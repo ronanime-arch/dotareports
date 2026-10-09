@@ -45,6 +45,15 @@ sealed class AppController
     string _gameState = "";
     bool _picking;
     DraftWindow _draft = null!;
+    // напоминания по часам матча: режим берём из пика (Турбо / All Pick)
+    ReminderSettings _reminders = ReminderSettings.Load();
+    readonly ReminderEngine _reminderEngine = new();
+    OverlayWindow _reminderOverlay = null!;
+    ReminderWindow? _reminderWindow;
+    string? _matchMode;
+    // Dota присылает данные хоть раз с запуска программы; нет — после пары минут подсказать, почему
+    DateTime? _lastGsi;
+    bool _gsiHintShown;
 
     ConductSummary? _latest;
     bool _busy, _dotaWasRunning;
@@ -60,9 +69,21 @@ sealed class AppController
     public async Task StartAsync()
     {
         Directory.CreateDirectory(Paths.Root);
+        // Приёмник GSI — первым делом: окно токена и вход в Steam могут ждать сколько угодно, а Dota уже шлёт данные.
+        string? gsiError = null;
+        try
+        {
+            _gsi.Start();
+        }
+        catch (System.Net.Sockets.SocketException ex)
+        {
+            gsiError = ex.Message;
+            Log.Write($"GSI: порт {GsiListener.Port} занят: {ex.Message}");
+        }
         Setup.EnsureSeed();
         if (!File.Exists(Paths.StratzToken)) Setup.AskStratzToken();
         _overlay = new OverlayWindow();
+        _reminderOverlay = new OverlayWindow(top: 330);
         _draft = new DraftWindow(_draftData);
         _turboCard = new TurboCard();
         _rating = new RatingWindow();
@@ -78,12 +99,16 @@ sealed class AppController
         _frameTimer.Tick += (_, _) => _watcher.Tick();
         _watcher.Changed += snap => _app.Dispatcher.BeginInvoke(() =>
         {
+            if (snap.Mode != null) _matchMode = snap.Mode;
             if (_picking && _draftData.TurboReady)
                 _turboCard.Render(_draftData, snap, $"с экрана: банов {snap.Bans}, занято {snap.Taken}");
         });
         _gsi.Updated += s => _app.Dispatcher.BeginInvoke(() => OnGsi(s));
         CreateTray();
-        if (Setup.EnsureGsiConfig() is { } gsiNote)
+        if (gsiError != null)
+            _tray.ShowBalloonTip(10000, "Dota Reports",
+                $"Порт {GsiListener.Port} занят другой программой — карточка пика и напоминания не сработают.", Forms.ToolTipIcon.Warning);
+        else if (Setup.EnsureGsiConfig() is { } gsiNote)
             _tray.ShowBalloonTip(10000, "Dota Reports", gsiNote, Forms.ToolTipIcon.Info);
         if (!Setup.ScreenSupported)
             _tray.ShowBalloonTip(10000, "Dota Reports", "Баны и союзники с экрана распознаются только при 1920×1080 — у вас другое разрешение, карточка будет без них.", Forms.ToolTipIcon.Warning);
@@ -91,14 +116,6 @@ sealed class AppController
         await _browser.InitAsync();
         _reader = new GcpdReader(_browser);
         RegisterHotkey();
-        try
-        {
-            _gsi.Start();
-        }
-        catch (System.Net.Sockets.SocketException ex)
-        {
-            Log.Write($"GSI: порт {GsiListener.Port} занят: {ex.Message}");
-        }
 
         _poll.Tick += async (_, _) => await OnPollAsync();
         _poll.Start();
@@ -110,15 +127,18 @@ sealed class AppController
     // Пик начался — карточка и запись кадров; закончился — убрать.
     void OnGsi(GsiState s)
     {
+        _lastGsi = DateTime.Now;
         _watcher.Update(s);
         if (s.GameState.Length == 0 && _gameState is "DOTA_GAMERULES_STATE_POST_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
             _profileTimer.Start();
         _gameState = s.GameState;
+        CheckReminders(s);
         bool picking = s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION";
         if (picking == _picking) return;
         _picking = picking;
         if (picking)
         {
+            _matchMode = null; // новый матч — режим распознается заново
             _watcher.Begin(s.MatchId is { Length: > 0 } m && m != "0" ? m : DateTime.Now.ToString("yyyyMMdd_HHmmss"));
             _frameTimer.Start();
             if (_draftData.TurboReady)
@@ -133,6 +153,44 @@ sealed class AppController
             _watcher.End();
             _turboCard.Hide();
         }
+    }
+
+    // Часы матча идут в GSI (map.clock_time) — те же, что на экране: до горна меньше нуля, на паузе стоят.
+    void CheckReminders(GsiState s)
+    {
+        bool inGame = s.GameState is "DOTA_GAMERULES_STATE_PRE_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS";
+        if (!inGame || s.ClockTime is not int clock || !_reminders.Enabled || _reminders.Pick(_matchMode) is not { } profile)
+        {
+            _reminderEngine.Reset();
+            return;
+        }
+        var due = _reminderEngine.Update(s.MatchId, clock, profile).ToList();
+        if (due.Count == 0) return;
+        string When(int at) => (at > clock ? $"через {ReminderTime.Format(at - clock)}" : "сейчас") + $" · в {ReminderTime.Format(at)}";
+        var lines = due.Count == 1
+            ? new List<(string, Color)> { (When(due[0].At), OverlayWindow.White) }
+            : due.Select(d => ($"{d.Rule.Text} — {When(d.At)}", OverlayWindow.White)).ToList();
+        lines.Add(($"профиль «{profile.Name}»", OverlayWindow.Gray));
+        _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", OverlayWindow.Green, lines, TimeSpan.FromSeconds(8));
+        if (_reminders.Sound) System.Media.SystemSounds.Exclamation.Play();
+    }
+
+    void OpenReminders()
+    {
+        if (_reminderWindow != null)
+        {
+            _reminderWindow.Activate();
+            return;
+        }
+        _reminderWindow = new ReminderWindow(_reminders);
+        _reminderWindow.Saved += s =>
+        {
+            _reminders = s;
+            _reminderEngine.Reset();
+        };
+        _reminderWindow.Closed += (_, _) => _reminderWindow = null;
+        _reminderWindow.Show();
+        _reminderWindow.Activate();
     }
 
     async Task LoadDraftAsync()
@@ -159,10 +217,27 @@ sealed class AppController
         // Сводка появляется после матча: проверяем, пока игра открыта, и ещё раз сразу после выхода.
         bool justClosed = _dotaWasRunning && !running;
         _dotaWasRunning = running;
+        if (running) CheckGsiAlive();
         if (running || justClosed)
             await RefreshAsync(interactive: false, manual: false);
         if (justClosed)
             await LoadDraftAsync(); // обновить пул: появились новые игры
+    }
+
+    // Dota открыта больше двух минут, а данных GSI нет ни разу — один раз объяснить причину.
+    void CheckGsiAlive()
+    {
+        if (_lastGsi != null || _gsiHintShown || Setup.DotaStartedAt() is not { } started || DateTime.Now - started < TimeSpan.FromMinutes(2)) return;
+        var config = Setup.GsiConfigPath();
+        if (config == null || !File.Exists(config)) return; // об этом уже сказали при запуске
+        _gsiHintShown = true;
+        var written = File.GetLastWriteTime(config);
+        bool beforeConfig = started < written;
+        Log.Write($"GSI: Dota открыта с {started:HH:mm:ss}, конфиг от {written:dd.MM HH:mm:ss}, данных нет");
+        _tray.ShowBalloonTip(10000, "Dota Reports", beforeConfig
+            ? "Dota открыта раньше, чем появился конфиг, — перезапустите её один раз, дальше не понадобится."
+            : "Dota не присылает данные игры — карточка пика и напоминания не сработают. Подробности в log.txt.",
+            Forms.ToolTipIcon.Warning);
     }
 
     async Task RefreshAsync(bool interactive, bool manual)
@@ -455,6 +530,7 @@ sealed class AppController
         menu.Items.Add("Помощник в пике (Ctrl+Alt+D)", null, (_, _) => _draft.Toggle());
         menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
+        menu.Items.Add("Напоминания…", null, (_, _) => OpenReminders());
         menu.Items.Add("Проверить сейчас", null, async (_, _) => await RefreshAsync(interactive: true, manual: true));
         menu.Items.Add("Папка с данными", null, (_, _) => Process.Start("explorer.exe", Paths.Root));
         menu.Items.Add("Токен Stratz…", null, async (_, _) =>
@@ -495,6 +571,8 @@ sealed class AppController
         _tray.Visible = false;
         _tray.Dispose();
         _overlay.Close();
+        _reminderOverlay.Close();
+        _reminderWindow?.Close();
         _draft.Close();
         _turboCard.Close();
         _rating.Close();

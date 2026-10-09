@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -30,6 +30,7 @@ static class Paths
     public static string ProfileTables => Path.Combine(Root, "profile_tables.json");
     public static string RankConfidence => Path.Combine(Root, "rank_confidence.txt");
     public static string SeenOutgoing => Path.Combine(Root, "seen_outgoing.json");
+    public static string Reminders => Path.Combine(Root, "reminders.json");
 }
 
 static class Log

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -9,8 +9,8 @@ using System.Threading.Tasks;
 
 namespace DotaReports;
 
-/// <summary>Что важно из сообщения GSI: фаза игры, ваша сторона, ваш герой (0 — ещё не выбран), матч.</summary>
-sealed record GsiState(string GameState, string? Team, int HeroId, string? MatchId, int TeamSlot);
+/// <summary>Что важно из сообщения GSI: фаза игры, ваша сторона, ваш герой (0 — ещё не выбран), матч, часы матча в секундах (до горна — меньше нуля).</summary>
+sealed record GsiState(string GameState, string? Team, int HeroId, string? MatchId, int TeamSlot, int? ClockTime = null);
 
 /// <summary>
 /// Приём Game State Integration: Dota сама шлёт POST с JSON на 127.0.0.1:38461
@@ -111,7 +111,8 @@ sealed class GsiListener
             string? team = hasPlayer && pl.TryGetProperty("team_name", out var tn) ? tn.GetString() : null;
             int teamSlot = hasPlayer && pl.TryGetProperty("team_slot", out var ts) && ts.ValueKind == JsonValueKind.Number ? ts.GetInt32() : -1;
             int hero = root.TryGetProperty("hero", out var h) && h.TryGetProperty("id", out var hid) && hid.ValueKind == JsonValueKind.Number ? hid.GetInt32() : 0;
-            parsed = new GsiState(state, team, hero, matchId, teamSlot);
+            int? clock = hasMap && map.TryGetProperty("clock_time", out var ct) && ct.ValueKind == JsonValueKind.Number ? ct.GetInt32() : null;
+            parsed = new GsiState(state, team, hero, matchId, teamSlot, clock);
         }
         catch (JsonException)
         {

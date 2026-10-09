@@ -55,26 +55,53 @@ static class Setup
         }
     }
 
-    /// <summary>Кладёт конфиг GSI в папку Dota. null — всё в порядке; иначе — что сказать пользователю.</summary>
+    /// <summary>
+    /// Кладёт конфиг GSI в папку Dota. null — всё в порядке; иначе — что сказать пользователю.
+    /// Dota читает конфиги GSI только при своём запуске: перезапуск нужен один раз — если она уже была открыта, когда конфиг появился.
+    /// Дальше программу можно закрывать и открывать когда угодно — Dota сама продолжит слать данные.
+    /// </summary>
     public static string? EnsureGsiConfig()
     {
-        var dota = FindDota();
-        if (dota == null) return "Не нашёл Dota 2 в библиотеках Steam — карточка пика не появится.";
-        var dir = Path.Combine(dota, "game", "dota", "cfg", "gamestate_integration");
-        var file = Path.Combine(dir, GsiFile);
+        var file = GsiConfigPath();
+        if (file == null) return "Не нашёл Dota 2 в библиотеках Steam — карточка пика не появится.";
         try
         {
             if (File.Exists(file) && File.ReadAllText(file) == GsiConfig) return null;
-            Directory.CreateDirectory(dir);
+            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
             File.WriteAllText(file, GsiConfig);
             Log.Write("Конфиг GSI записан: " + file);
-            return "Конфиг Dota записан. Если Dota запущена — перезапустите её один раз.";
+            return DotaStartedAt() is not null
+                ? "Конфиг Dota записан. Dota уже открыта — перезапустите её один раз, дальше это не понадобится."
+                : null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             Log.Write("Конфиг GSI не записан: " + ex.Message);
             return $"Не удалось записать конфиг в папку Dota ({ex.Message}). Запустите программу один раз от имени администратора.";
         }
+    }
+
+    public static string? GsiConfigPath() =>
+        FindDota() is { } dota ? Path.Combine(dota, "game", "dota", "cfg", "gamestate_integration", GsiFile) : null;
+
+    /// <summary>Когда запущена Dota (самый ранний процесс dota2); null — не запущена.</summary>
+    public static DateTime? DotaStartedAt()
+    {
+        var procs = Process.GetProcessesByName("dota2");
+        DateTime? first = null;
+        foreach (var p in procs)
+        {
+            try
+            {
+                if (first == null || p.StartTime < first) first = p.StartTime;
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+            {
+                first ??= DateTime.Now; // процесс есть, но время старта не отдаёт
+            }
+            p.Dispose();
+        }
+        return first;
     }
 
     // Steam: путь из реестра, библиотеки из steamapps\libraryfolders.vdf, Dota 2 — приложение 570.

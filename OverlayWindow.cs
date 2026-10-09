@@ -22,10 +22,13 @@ sealed class OverlayWindow : Window
     readonly StackPanel _panel = new();
     readonly DispatcherTimer _autoHide = new();
     readonly DispatcherTimer _keepOnTop = new() { Interval = TimeSpan.FromSeconds(1) };
+    readonly double _top;
     IntPtr _hwnd;
 
-    public OverlayWindow()
+    /// <param name="top">Отступ от верха экрана — чтобы два таких окна не перекрывали друг друга.</param>
+    public OverlayWindow(double top = 120)
     {
+        _top = top;
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
@@ -86,7 +89,7 @@ sealed class OverlayWindow : Window
     {
         var wa = SystemParameters.WorkArea;
         Left = wa.Right - ActualWidth - 24;
-        Top = wa.Top + 120;
+        Top = wa.Top + _top;
     }
 
     // Игра в режиме «окно без рамки» может подняться выше — возвращаем окно наверх.
