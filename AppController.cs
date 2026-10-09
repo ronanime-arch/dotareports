@@ -1,0 +1,504 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Threading;
+using Forms = System.Windows.Forms;
+
+namespace DotaReports;
+
+/// <summary>Значок в трее, проверка GCPD раз в минуту, пока запущена Dota, всплывающее окно на 6 секунд.</summary>
+sealed class AppController
+{
+    const int HotkeyId = 0xD07A;
+    const int DraftHotkeyId = 0xD07B;
+    const int RatingHotkeyId = 0xD07C;
+    const uint VK_S = 0x53;
+    const uint VK_R = 0x52;
+    const uint VK_D = 0x44;
+    static readonly TimeSpan PopupTime = TimeSpan.FromSeconds(6);
+
+    readonly System.Windows.Application _app;
+    readonly DispatcherTimer _poll = new() { Interval = TimeSpan.FromMinutes(1) }; // пока открыта Dota — сводка жалоб и ваши отправленные жалобы
+    readonly SeenStore _seen = SeenStore.Load();
+    SteamBrowser _browser = null!;
+    GcpdReader _reader = null!;
+    OverlayWindow _overlay = null!;
+    Forms.NotifyIcon _tray = null!;
+    readonly DraftData _draftData = new();
+    readonly GsiListener _gsi = new();
+    readonly PickWatcher _watcher = new();
+    readonly DispatcherTimer _frameTimer = new() { Interval = TimeSpan.FromSeconds(0.5) };
+    TurboCard _turboCard = null!;
+    RatingWindow _rating = null!;
+    readonly ProfileData _profile = new();
+    readonly DispatcherTimer _profileTimer = new() { Interval = TimeSpan.FromSeconds(60) };
+    // «Уверенность в ранге» видна только на экране профиля Dota — смотрим туда раз в 3 с, пока вы в меню
+    readonly DispatcherTimer _confTimer = new() { Interval = TimeSpan.FromSeconds(3) };
+    (int Percent, DateTime At)? _confidence = ConfidenceReader.LoadLast();
+    bool _confBusy;
+    string _gameState = "";
+    bool _picking;
+    DraftWindow _draft = null!;
+
+    ConductSummary? _latest;
+    bool _busy, _dotaWasRunning;
+
+    public AppController(System.Windows.Application app)
+    {
+        _app = app;
+        // «DotaReports.exe --exit» из другой копии: обычный выход с закрытием WebView2 (куки входа в Steam сохраняются)
+        var exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ExitEventName);
+        ThreadPool.RegisterWaitForSingleObject(exitEvent, (_, _) => _app.Dispatcher.BeginInvoke(Exit), null, Timeout.Infinite, executeOnlyOnce: true);
+    }
+
+    public async Task StartAsync()
+    {
+        Directory.CreateDirectory(Paths.Root);
+        Setup.EnsureSeed();
+        if (!File.Exists(Paths.StratzToken)) Setup.AskStratzToken();
+        _overlay = new OverlayWindow();
+        _draft = new DraftWindow(_draftData);
+        _turboCard = new TurboCard();
+        _rating = new RatingWindow();
+        // после матча история в GCPD обновляется не сразу — читаем профиль через минуту после выхода в меню
+        _profileTimer.Tick += async (_, _) =>
+        {
+            _profileTimer.Stop();
+            await RefreshAsync(interactive: false, manual: false); // сводка жалоб и ваши отправленные жалобы за этот матч
+            await RefreshProfileAsync();
+        };
+        _confTimer.Tick += async (_, _) => await CheckConfidenceAsync();
+        _confTimer.Start();
+        _frameTimer.Tick += (_, _) => _watcher.Tick();
+        _watcher.Changed += snap => _app.Dispatcher.BeginInvoke(() =>
+        {
+            if (_picking && _draftData.TurboReady)
+                _turboCard.Render(_draftData, snap, $"с экрана: банов {snap.Bans}, занято {snap.Taken}");
+        });
+        _gsi.Updated += s => _app.Dispatcher.BeginInvoke(() => OnGsi(s));
+        CreateTray();
+        if (Setup.EnsureGsiConfig() is { } gsiNote)
+            _tray.ShowBalloonTip(10000, "Dota Reports", gsiNote, Forms.ToolTipIcon.Info);
+        if (!Setup.ScreenSupported)
+            _tray.ShowBalloonTip(10000, "Dota Reports", "Баны и союзники с экрана распознаются только при 1920×1080 — у вас другое разрешение, карточка будет без них.", Forms.ToolTipIcon.Warning);
+        _browser = new SteamBrowser();
+        await _browser.InitAsync();
+        _reader = new GcpdReader(_browser);
+        RegisterHotkey();
+        try
+        {
+            _gsi.Start();
+        }
+        catch (System.Net.Sockets.SocketException ex)
+        {
+            Log.Write($"GSI: порт {GsiListener.Port} занят: {ex.Message}");
+        }
+
+        _poll.Tick += async (_, _) => await OnPollAsync();
+        _poll.Start();
+        _ = LoadDraftAsync(); // не ждёт GCPD: вход в Steam может затянуться, а кэш пика уже на диске
+        await RefreshAsync(interactive: true, manual: false);
+        await RefreshProfileAsync();
+    }
+
+    // Пик начался — карточка и запись кадров; закончился — убрать.
+    void OnGsi(GsiState s)
+    {
+        _watcher.Update(s);
+        if (s.GameState.Length == 0 && _gameState is "DOTA_GAMERULES_STATE_POST_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+            _profileTimer.Start();
+        _gameState = s.GameState;
+        bool picking = s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION";
+        if (picking == _picking) return;
+        _picking = picking;
+        if (picking)
+        {
+            _watcher.Begin(s.MatchId is { Length: > 0 } m && m != "0" ? m : DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+            _frameTimer.Start();
+            if (_draftData.TurboReady)
+            {
+                _turboCard.Render(_draftData, new PickSnapshot(new HashSet<int>(), new List<int>(), new List<int>(), new List<int>(), 0, 0, null, 0), _watcher.Status);
+                _turboCard.ShowCard();
+            }
+        }
+        else
+        {
+            _frameTimer.Stop();
+            _watcher.End();
+            _turboCard.Hide();
+        }
+    }
+
+    async Task LoadDraftAsync()
+    {
+        try
+        {
+            await _draftData.LoadAsync();
+            if (!_profile.Loaded) _profile.LoadCache(_draftData.Heroes);
+            _draftData.SetProfile(_profile);
+        }
+        catch (Exception ex)
+        {
+            Log.Write("Данные пика не загрузились: " + ex);
+        }
+        _draft.DataChanged();
+    }
+
+    async Task OnPollAsync()
+    {
+        var procs = Process.GetProcessesByName("dota2");
+        bool running = procs.Length > 0;
+        foreach (var p in procs) p.Dispose();
+
+        // Сводка появляется после матча: проверяем, пока игра открыта, и ещё раз сразу после выхода.
+        bool justClosed = _dotaWasRunning && !running;
+        _dotaWasRunning = running;
+        if (running || justClosed)
+            await RefreshAsync(interactive: false, manual: false);
+        if (justClosed)
+            await LoadDraftAsync(); // обновить пул: появились новые игры
+    }
+
+    async Task RefreshAsync(bool interactive, bool manual)
+    {
+        if (_busy) return;
+        _busy = true;
+        SetTrayText("проверяю…");
+        try
+        {
+            var res = await _reader.ReadIncomingAsync(interactive);
+            if (res.NeedLogin)
+            {
+                SetTrayText("нужно войти в Steam");
+                _tray.ShowBalloonTip(8000, "Dota Reports",
+                    "Нужно войти в Steam: правый клик по значку → «Проверить сейчас».", Forms.ToolTipIcon.Warning);
+                return;
+            }
+
+            if (res.Me.AccountId is { } account)
+                File.WriteAllText(Paths.Account, account);
+            var summaries = ReportParser.Parse(res.Table);
+            var fresh = summaries.Where(s => !_seen.Contains(s.MatchId)).ToList();
+            bool firstRun = !_seen.Initialized;
+            _seen.Add(fresh.Select(s => s.MatchId));
+            _seen.Initialized = true;
+            _seen.Save();
+            _latest = summaries.FirstOrDefault();
+            SetTrayText($"проверено {DateTime.Now:HH:mm}");
+
+            // Первый запуск: старые сводки просто запоминаем, окно не показываем.
+            var reported = firstRun ? null : fresh.FirstOrDefault(s => s.Reports > 0);
+            if (reported != null)
+            {
+                ShowSummary(reported);
+                // окно на 6 с легко пропустить — уведомление Windows остаётся в центре уведомлений
+                _tray.ShowBalloonTip(10000, "На вас пожаловались",
+                    $"{reported.Reports} {Plural(reported.Reports, "жалоба", "жалобы", "жалоб")} от {reported.ReportingParties} " +
+                    $"{Plural(reported.ReportingParties, "игрока", "игроков", "игроков")} за {reported.Matches} матчей, за общение: {reported.CommsReports}",
+                    Forms.ToolTipIcon.Warning);
+            }
+            else if (manual)
+                _tray.ShowBalloonTip(4000, "Dota Reports", "Новых жалоб нет.", Forms.ToolTipIcon.Info);
+
+            await CheckOutgoingAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Write("Ошибка проверки: " + ex);
+            SetTrayText("ошибка, см. log.txt");
+            _tray.ShowBalloonTip(8000, "Dota Reports — ошибка", ex.Message, Forms.ToolTipIcon.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    static readonly Dictionary<string, string> ReportReasonsRu = new()
+    {
+        ["Communication Abuse"] = "оскорбления", ["Ability Abuse"] = "абуз способностей", ["Feeding"] = "фид",
+        ["Did Not Play Role Postgame"] = "не своя роль", ["Did Not Play Role"] = "не своя роль", ["Avoid Player"] = "избегать",
+        ["Abusive Coach"] = "токсичный тренер", ["Cheating"] = "читы", ["Disruptive Gameplay"] = "мешал игре", ["Enemy Cheating"] = "читы у врага",
+    };
+
+    /// <summary>
+    /// Ваши отправленные жалобы (GCPD «Игроки, на которых пожаловались» — Target = тот, на кого пожаловались вы):
+    /// новая строка → окно и уведомление «Ваша жалоба отправлена». Похвалы из той же таблицы не показываем.
+    /// </summary>
+    async Task CheckOutgoingAsync()
+    {
+        var tables = await _reader.ReadTablesAsync(new[] { ("Account", "MatchPlayerReport", 0) });
+        if (tables == null || !tables.TryGetValue("Account:MatchPlayerReport", out var table)) return;
+        var headers = table.GetProperty("headers").EnumerateArray().Select(h => h.GetString() ?? "").ToList();
+        var rows = table.GetProperty("rows").EnumerateArray()
+            .Select(r => r.EnumerateArray().Select(c => c.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "").ToList())
+            .Where(r => r.Count == headers.Count)
+            .ToList();
+        string Cell(List<string> r, string name) => headers.IndexOf(name) is var i and >= 0 ? r[i] : "";
+
+        bool firstRun = !File.Exists(Paths.SeenOutgoing);
+        var seen = firstRun ? new HashSet<string>() : System.Text.Json.JsonSerializer.Deserialize<HashSet<string>>(File.ReadAllText(Paths.SeenOutgoing)) ?? new();
+        var fresh = new List<(string Target, string Match, List<string> Reasons)>();
+        foreach (var r in rows)
+        {
+            var key = $"{Cell(r, "MatchID")}|{Cell(r, "Target")}|{Cell(r, "Date")}";
+            if (!seen.Add(key)) continue;
+            var reasons = headers.Where((h, i) => r[i] == "Yes" && h != "Commended").Select(h => ReportReasonsRu.GetValueOrDefault(h, h)).ToList();
+            if (reasons.Count > 0) fresh.Add((Cell(r, "Target"), Cell(r, "MatchID"), reasons));
+        }
+        File.WriteAllText(Paths.SeenOutgoing, System.Text.Json.JsonSerializer.Serialize(seen));
+        if (firstRun || fresh.Count == 0) return; // при первом запуске старые строки только запоминаем
+
+        var lines = fresh.Take(4).Select(f => ($"{f.Target} — {string.Join(", ", f.Reasons)}", OverlayWindow.White)).ToList();
+        lines.Add(($"матч {fresh[0].Match} · это жалоба от вас, не на вас", OverlayWindow.Gray));
+        _overlay.ShowPopup(fresh.Count == 1 ? "Ваша жалоба отправлена" : $"Ваши жалобы отправлены: {fresh.Count}", OverlayWindow.White, lines, PopupTime);
+        _tray.ShowBalloonTip(10000, "Ваша жалоба отправлена",
+            string.Join("; ", fresh.Take(3).Select(f => $"{f.Target} — {string.Join(", ", f.Reasons)}")) + $" (матч {fresh[0].Match})",
+            Forms.ToolTipIcon.Info);
+    }
+
+    // Вкладки GCPD для окна рейтинга и пула героев; та же страница Steam, что и для жалоб, поэтому тот же замок _busy.
+    async Task RefreshProfileAsync()
+    {
+        if (_busy || _draftData.Heroes.Count == 0) return;
+        _busy = true;
+        try
+        {
+            var tables = await _reader.ReadTablesAsync(ProfileData.Tabs);
+            if (tables == null) return; // нужен вход — напомнит проверка жалоб
+            _profile.Apply(tables, _draftData.Heroes, DateTime.Now);
+            _profile.Save(tables);
+            _draftData.SetProfile(_profile);
+            if (_rating.IsVisible) RenderRating();
+        }
+        catch (Exception ex)
+        {
+            Log.Write("Профиль GCPD не прочитан: " + ex.Message);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    static readonly string[] MedalNames = { "", "Рекрут", "Страж", "Рыцарь", "Герой", "Легенда", "Властелин", "Божество", "Титан" };
+
+    void RenderRating()
+    {
+        var lines = new List<(string, Color)>();
+        string medal = _draftData.Medal is >= 1 and <= 8
+            ? MedalNames[_draftData.Medal] + (_draftData.RankTier % 10 is >= 1 and <= 5 ? " " + new[] { "", "I", "II", "III", "IV", "V" }[_draftData.RankTier % 10] : "")
+            : "неизвестен";
+        if (_profile.Calibration() is { } cal)
+        {
+            lines.Add(($"На калибровке: {cal.Games}{(cal.AtLeast ? "+" : "")} {Plural(cal.Games, "игра", "игры", "игр")} · {cal.Wins}–{cal.Games - cal.Wins} ({100.0 * cal.Wins / cal.Games:0}%)", OverlayWindow.Green));
+            if (_confidence is { } conf)
+                lines.Add(($"Уверенность в ранге: {conf.Percent}% (профиль Dota, {conf.At:dd.MM HH:mm})", OverlayWindow.Green));
+            else
+                lines.Add(("Уверенность в ранге: откройте профиль в Dota — прочитаю", OverlayWindow.Gray));
+            lines.Add(($"ранг до калибровки: {medal}", OverlayWindow.Gray));
+        }
+        else
+            lines.Add(($"Ранг: {medal}", OverlayWindow.White));
+
+        if (_profile.Loaded)
+        {
+            var today = _profile.Today();
+            lines.Add(($"Сегодня: {today.Games} {Plural(today.Games, "игра", "игры", "игр")} · {today.Wins}–{today.Games - today.Wins}" +
+                       (today.RankedGames > 0 ? $" · в рейтинге {today.RankedWins}–{today.RankedGames - today.RankedWins}" : ""), OverlayWindow.White));
+            if (_profile.Streak() is { } st)
+                lines.Add(($"Серия: {st.Count} {(st.Wins ? Plural(st.Count, "победа", "победы", "побед") : Plural(st.Count, "поражение", "поражения", "поражений"))} подряд",
+                    st.Wins ? OverlayWindow.Green : OverlayWindow.Red));
+        }
+        if (_latest != null)
+            lines.Add(($"Поведение: {_latest.Score}" + (_latest.ScoreDelta is int d ? $" ({d:+#;-#;0})" : "") +
+                       $" · похвал {_latest.Commends} · жалоб {_latest.Reports}", OverlayWindow.White));
+        if (_profile.Loaded)
+        {
+            int w = _profile.AccountInt("Wins"), l = _profile.AccountInt("Losses");
+            if (w + l > 0) lines.Add(($"Всего: {w}–{l} ({100.0 * w / (w + l):0.0}%)", OverlayWindow.Gray));
+            lines.Add(($"Можно отправить: жалоб {_profile.AccountInt("NegativeReportsRemaining")} · похвал {_profile.AccountInt("PositiveReportsRemaining")}", OverlayWindow.Gray));
+        }
+        var updated = _profile.UpdatedAt is { } u ? $"данные Valve от {u:dd.MM HH:mm}" : "данные Valve ещё не загружены";
+        _rating.Render("Рейтинг", lines, updated + " · Ctrl+Alt+S — скрыть");
+    }
+
+    async Task CheckConfidenceAsync()
+    {
+        if (_confBusy || _picking || _gameState is "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS" or "DOTA_GAMERULES_STATE_PRE_GAME") return;
+        var procs = Process.GetProcessesByName("dota2");
+        bool running = procs.Length > 0;
+        foreach (var p in procs) p.Dispose();
+        if (!running || !Setup.ScreenSupported) return;
+        _confBusy = true;
+        try
+        {
+            var value = await Task.Run(() =>
+            {
+                using var bmp = ConfidenceReader.CaptureScreen();
+                return ConfidenceReader.Read(bmp);
+            });
+            if (value is { } v && (_confidence?.Percent != v || DateTime.Now - _confidence.Value.At > TimeSpan.FromMinutes(30)))
+            {
+                ConfidenceReader.Save(v);
+                _confidence = (v, DateTime.Now);
+                if (_rating.IsVisible) RenderRating();
+            }
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or System.Runtime.InteropServices.ExternalException)
+        {
+            Log.Write("Полоса уверенности не прочитана: " + ex.Message);
+        }
+        finally
+        {
+            _confBusy = false;
+        }
+    }
+
+    async Task ToggleRatingAsync()
+    {
+        if (_rating.IsVisible)
+        {
+            _rating.Toggle();
+            return;
+        }
+        RenderRating();
+        _rating.Toggle();
+        await CheckConfidenceAsync();   // если профиль Dota открыт прямо сейчас — сразу подхватим процент
+        if (_profile.UpdatedAt is not { } u || DateTime.Now - u > TimeSpan.FromMinutes(15))
+            await RefreshProfileAsync();
+    }
+
+    void ShowSummary(ConductSummary s)
+    {
+        var lines = new List<(string, Color)>();
+        if (s.Reports > 0)
+        {
+            lines.Add(($"{s.Reports} {Plural(s.Reports, "жалоба", "жалобы", "жалоб")} от {s.ReportingParties} {Plural(s.ReportingParties, "игрока", "игроков", "игроков")}" +
+                       $" — в {s.ReportedMatches} из {s.Matches} {Plural(s.Matches, "матча", "матчей", "матчей")}", OverlayWindow.White));
+            lines.Add(($"за общение (чат/голос): {s.CommsReports}", s.CommsReports > 0 ? OverlayWindow.Red : OverlayWindow.Gray));
+        }
+        var score = s.Score is int sc ? $"поведение {sc}" + (s.ScoreDelta is int d ? $" ({d:+#;-#;0})" : "") + " · " : "";
+        lines.Add(($"{score}похвал: {s.Commends}", OverlayWindow.Gray));
+        if (s.When is DateTime w) lines.Add(($"сводка за {s.Matches} {Plural(s.Matches, "матч", "матча", "матчей")} от {w:dd.MM HH:mm}", OverlayWindow.Gray));
+
+        _overlay.ShowPopup(
+            s.Reports > 0 ? "На вас пожаловались" : "Жалоб на вас нет",
+            s.Reports > 0 ? OverlayWindow.Red : OverlayWindow.Green,
+            lines, PopupTime);
+    }
+
+    static string Plural(int n, string one, string few, string many)
+    {
+        int m10 = n % 10, m100 = n % 100;
+        if (m10 == 1 && m100 != 11) return one;
+        if (m10 is >= 2 and <= 4 && m100 is < 12 or > 14) return few;
+        return many;
+    }
+
+    void ShowLatest()
+    {
+        if (_latest != null)
+            ShowSummary(_latest);
+        else
+            _overlay.ShowPopup("Dota Reports", OverlayWindow.White, new[] { ("Сводки ещё не загружены.", OverlayWindow.Gray) }, PopupTime);
+    }
+
+    void RegisterHotkey()
+    {
+        HwndSource.FromHwnd(_browser.Handle).AddHook(WndProc);
+        if (!Native.RegisterHotKey(_browser.Handle, HotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_R))
+        {
+            Log.Write("Ctrl+Alt+R занята другой программой");
+            _tray.ShowBalloonTip(8000, "Dota Reports",
+                "Ctrl+Alt+R занята другой программой — последняя сводка по двойному клику на значок.", Forms.ToolTipIcon.Warning);
+        }
+        if (!Native.RegisterHotKey(_browser.Handle, RatingHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_S))
+            Log.Write("Ctrl+Alt+S занята другой программой");
+        if (!Native.RegisterHotKey(_browser.Handle, DraftHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_D))
+        {
+            Log.Write("Ctrl+Alt+D занята другой программой");
+            _tray.ShowBalloonTip(8000, "Dota Reports",
+                "Ctrl+Alt+D занята другой программой — помощник в пике открывается из меню значка.", Forms.ToolTipIcon.Warning);
+        }
+    }
+
+    IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == Native.WM_HOTKEY && wParam.ToInt32() == HotkeyId)
+        {
+            ShowLatest();
+            handled = true;
+        }
+        else if (msg == Native.WM_HOTKEY && wParam.ToInt32() == RatingHotkeyId)
+        {
+            _ = ToggleRatingAsync();
+            handled = true;
+        }
+        else if (msg == Native.WM_HOTKEY && wParam.ToInt32() == DraftHotkeyId)
+        {
+            _draft.Toggle();
+            handled = true;
+        }
+        return IntPtr.Zero;
+    }
+
+    void CreateTray()
+    {
+        var menu = new Forms.ContextMenuStrip();
+        menu.Items.Add("Помощник в пике (Ctrl+Alt+D)", null, (_, _) => _draft.Toggle());
+        menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
+        menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
+        menu.Items.Add("Проверить сейчас", null, async (_, _) => await RefreshAsync(interactive: true, manual: true));
+        menu.Items.Add("Папка с данными", null, (_, _) => Process.Start("explorer.exe", Paths.Root));
+        menu.Items.Add("Токен Stratz…", null, async (_, _) =>
+        {
+            Setup.AskStratzToken();
+            await LoadDraftAsync();
+        });
+        var autostart = new Forms.ToolStripMenuItem("Запускать с Windows") { Checked = Setup.AutostartEnabled, CheckOnClick = true };
+        autostart.CheckedChanged += (_, _) => Setup.AutostartEnabled = autostart.Checked;
+        menu.Items.Add(autostart);
+        menu.Items.Add(new Forms.ToolStripSeparator());
+        menu.Items.Add("Выход", null, (_, _) => Exit());
+
+        _tray = new Forms.NotifyIcon
+        {
+            Icon = System.Drawing.SystemIcons.Shield,
+            Text = "Dota Reports",
+            ContextMenuStrip = menu,
+            Visible = true,
+        };
+        _tray.DoubleClick += (_, _) => ShowLatest();
+    }
+
+    void SetTrayText(string status)
+    {
+        var text = "Dota Reports: " + status;
+        _tray.Text = text.Length > 120 ? text[..120] : text;
+    }
+
+    void Exit()
+    {
+        _poll.Stop();
+        _confTimer.Stop();
+        _gsi.Stop();
+        Native.UnregisterHotKey(_browser.Handle, HotkeyId);
+        Native.UnregisterHotKey(_browser.Handle, DraftHotkeyId);
+        Native.UnregisterHotKey(_browser.Handle, RatingHotkeyId);
+        _tray.Visible = false;
+        _tray.Dispose();
+        _overlay.Close();
+        _draft.Close();
+        _turboCard.Close();
+        _rating.Close();
+        _browser.Close();
+        _app.Shutdown();
+    }
+}
