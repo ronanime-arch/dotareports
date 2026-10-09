@@ -66,7 +66,8 @@ static class Setup
         if (file == null) return "Не нашёл Dota 2 в библиотеках Steam — карточка пика не появится.";
         try
         {
-            if (File.Exists(file) && File.ReadAllText(file) == GsiConfig) return null;
+            // переводы строк зависят от того, как собран exe (LF/CRLF в исходниках) — Dota всё равно, перезаписывать из-за них не надо
+            if (File.Exists(file) && File.ReadAllText(file).ReplaceLineEndings() == GsiConfig.ReplaceLineEndings()) return null;
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
             File.WriteAllText(file, GsiConfig);
             Log.Write("Конфиг GSI записан: " + file);
