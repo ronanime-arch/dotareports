@@ -52,6 +52,7 @@ static class Program
                 $"сегодня: {today.Games} игр, {today.Wins} побед; рейтинг {today.RankedGames}/{today.RankedWins}",
                 $"серия: {(streak is { } st ? $"{st.Count} {(st.Wins ? "побед" : "поражений")}" : "—")}",
                 $"всего: {profile.AccountInt("Wins")}–{profile.AccountInt("Losses")}; можно жалоб {profile.AccountInt("NegativeReportsRemaining")}",
+                $"low priority: {profile.LowPriorityGames}",
                 "пул: " + string.Join(", ", data.Pool.OrderByDescending(kv => kv.Value.Games).Take(8).Select(kv => $"{data.Heroes.GetValueOrDefault(kv.Key)} {kv.Value.Games}/{kv.Value.Wins}")),
                 "против: " + string.Join(", ", new[] { 14, 35, 26, 44 }.Select(h => profile.AgainstHero.TryGetValue(h, out var r) ? $"{data.Heroes.GetValueOrDefault(h)} {r.Wins}–{r.Losses}" : $"{h}: нет")),
             };
@@ -77,6 +78,51 @@ static class Program
                     result = "ошибка: " + ex.Message; // не тот файл или таблица без нужных колонок
                 }
             File.WriteAllText(Path.Combine(Paths.Root, "parse_test.txt"), result);
+            return;
+        }
+        if (args.Length >= 1 && args[0] == "--history-test")
+        {
+            // conduct_history.json (+ сводки из last_table.json, если передан) и кэш профиля → окна сводок, в history_test.txt.
+            // Файл истории не меняется. «матч сводки в истории» проверяет правило окна: MatchID сводки — последний матч окна.
+            var history = ConductHistory.Load();
+            var lines = new List<string>();
+            if (args.Length >= 2)
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(args[1]));
+                var table = doc.RootElement.TryGetProperty("table", out var t) ? t : doc.RootElement;
+                if (table.ValueKind == System.Text.Json.JsonValueKind.Object && !GcpdReader.EmptyTable(table))
+                    history.Merge(ReportParser.Parse(table));
+                else
+                    lines.Add("в дампе нет таблицы сводок: " + GcpdReader.PageMessage(table));
+            }
+            var heroes = new Dictionary<int, string>();
+            if (File.Exists(Paths.Heroes))
+            {
+                using var heroDoc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Paths.Heroes));
+                foreach (var h in heroDoc.RootElement.EnumerateArray())
+                    heroes[h.GetProperty("id").GetInt32()] = h.GetProperty("localized_name").GetString() ?? "";
+            }
+            var profile = new ProfileData();
+            profile.LoadCache(heroes);
+            history.AttachMatches(profile.Matches);
+            lines.Add($"сводок {history.Summaries.Count}, матчей в истории GCPD {profile.Matches.Count}");
+            foreach (var s in history.Summaries)
+            {
+                var w = history.Window(s);
+                ulong.TryParse(s.MatchId, out var id);
+                var own = profile.Matches.FirstOrDefault(m => m.MatchId == id && id > 0);
+                var next = profile.Matches.Where(m => m.MatchId > id).OrderBy(m => m.MatchId).FirstOrDefault();
+                string anchor = own == null
+                    ? "матч сводки в истории: нет"
+                    : $"матч сводки в истории: да ({own.StartLocal:dd.MM HH:mm}); сводка после его начала: {(s.When > own.StartLocal ? "да" : "нет")}" +
+                      (next == null ? "" : $", до начала следующего ({next.StartLocal:dd.MM HH:mm}): {(s.When < next.StartLocal ? "да" : "нет")}");
+                lines.Add($"{s.MatchId} от {s.When:dd.MM HH:mm} · поведение {s.Score} ({s.ScoreDelta:+#;-#;0}) · жалоб {s.Reports} · " +
+                          $"окно {w.Count}/{s.Matches} {(history.Exact(s) ? "точно" : "≈")} · {anchor}");
+                foreach (var m in w)
+                    lines.Add($"    {m.MatchId} {m.StartLocal:dd.MM HH:mm} {heroes.GetValueOrDefault(m.HeroId, m.Hero)} режим {m.GameMode} " +
+                              $"{(m.Win switch { true => "W", false => "L", null => "?" })} {m.Kills}/{m.Deaths}/{m.Assists}{(m.LowPriority ? " LP" : "")}");
+            }
+            File.WriteAllLines(Path.Combine(Paths.Root, "history_test.txt"), lines);
             return;
         }
         if (args.Length >= 1 && args[0] == "--card-test")

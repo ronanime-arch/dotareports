@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Shapes;
 
 namespace DotaReports;
 
@@ -40,13 +42,33 @@ sealed class RatingWindow : Window
         };
     }
 
-    public void Render(string title, IEnumerable<(string Text, Color Color)> lines, string footer)
+    /// <param name="trend">Баллы поведения по сводкам, старые первыми — мини-график перед подвалом (от двух точек).</param>
+    public void Render(string title, IEnumerable<(string Text, Color Color)> lines, string footer, IReadOnlyList<int>? trend = null)
     {
         _panel.Children.Clear();
         _panel.Children.Add(Line(title, 16, OverlayWindow.White, bold: true));
         foreach (var (text, color) in lines)
             _panel.Children.Add(Line(text, 13, color, top: 4));
+        if (trend is { Count: >= 2 }) _panel.Children.Add(Chart(trend));
         _panel.Children.Add(Line(footer, 10, OverlayWindow.Gray, top: 8));
+    }
+
+    // Ломаная по баллам на всю ширину окна (300 − отступы 12+12); ровный ряд — посередине.
+    static Canvas Chart(IReadOnlyList<int> values)
+    {
+        const double W = 276, H = 48, Pad = 3;
+        int min = values.Min(), max = values.Max();
+        double range = Math.Max(max - min, 1);
+        var points = new PointCollection();
+        for (int i = 0; i < values.Count; i++)
+        {
+            double y = max == min ? H / 2 : Pad + (max - values[i]) / range * (H - 2 * Pad);
+            points.Add(new Point(i * W / (values.Count - 1), y));
+        }
+        var color = values[values.Count - 1] >= values[0] ? OverlayWindow.Green : OverlayWindow.Red;
+        var canvas = new Canvas { Width = W, Height = H, Margin = new Thickness(0, 6, 0, 0) };
+        canvas.Children.Add(new Polyline { Points = points, Stroke = new SolidColorBrush(color), StrokeThickness = 2, StrokeLineJoin = PenLineJoin.Round });
+        return canvas;
     }
 
     public void Toggle()
