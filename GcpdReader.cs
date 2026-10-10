@@ -17,7 +17,7 @@ sealed record GcpdResult(bool NeedLogin, JsonElement Table, Me Me)
     public static readonly GcpdResult Login = new(true, default, new Me(null, null, null));
 
     /// <summary>Вкладка открылась, а таблицы нет: «личная статистика отсутствует. Повторите попытку позже».</summary>
-    public bool NoTable => !NeedLogin && !GcpdReader.HasTable(Table);
+    public bool NoTable => !NeedLogin && GcpdReader.EmptyTable(Table);
 }
 
 /// <summary>Открывает steamcommunity.com/my/gcpd/570 и достаёт таблицу «Incoming Match Player Report».</summary>
@@ -93,7 +93,7 @@ sealed class GcpdReader
             }
             // пустую вкладку не кладём: у потребителей останутся прежние данные
             var table = await _b.EvalAsync(TableJs);
-            if (HasTable(table)) result[$"{category}:{tab}"] = table;
+            if (!EmptyTable(table)) result[$"{category}:{tab}"] = table;
         }
         return result;
     }
@@ -222,12 +222,13 @@ sealed class GcpdReader
     }
 
     /// <summary>
-    /// Есть ли таблица в выгрузке TableJs. Смотрим на неё, а не на текст страницы — он на языке интерфейса Steam.
-    /// Строки без заголовков — уже смена разметки, это не «нет данных».
+    /// Steam открыл вкладку без таблицы: TableJs не нашёл ни заголовков, ни строк. Смотрим на выгрузку, а не на текст
+    /// страницы — он на языке интерфейса Steam. Строки без заголовков (смена разметки) и null (скрипт упал) — не «нет данных», а ошибка.
     /// </summary>
-    public static bool HasTable(JsonElement table) =>
+    public static bool EmptyTable(JsonElement table) =>
         table.ValueKind == JsonValueKind.Object &&
-        (table.GetProperty("headers").GetArrayLength() > 0 || table.GetProperty("rows").GetArrayLength() > 0);
+        table.TryGetProperty("headers", out var headers) && headers.GetArrayLength() == 0 &&
+        table.TryGetProperty("rows", out var rows) && rows.GetArrayLength() == 0;
 
     /// <summary>Конец текста страницы — там сообщение Steam; для журнала.</summary>
     public static string PageMessage(JsonElement table)

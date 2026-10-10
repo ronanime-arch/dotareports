@@ -64,7 +64,7 @@ static class Program
             using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(args[1]));
             var table = doc.RootElement.TryGetProperty("table", out var t) ? t : doc.RootElement;
             string result;
-            if (!GcpdReader.HasTable(table))
+            if (GcpdReader.EmptyTable(table))
                 result = "нет таблицы: " + GcpdReader.PageMessage(table);
             else
                 try
@@ -72,9 +72,9 @@ static class Program
                     var summaries = ReportParser.Parse(table);
                     result = $"сводок {summaries.Count}" + Environment.NewLine + string.Join(Environment.NewLine, summaries);
                 }
-                catch (InvalidOperationException ex)
+                catch (Exception ex) when (ex is InvalidOperationException or KeyNotFoundException)
                 {
-                    result = "ошибка: " + ex.Message;
+                    result = "ошибка: " + ex.Message; // не тот файл или таблица без нужных колонок
                 }
             File.WriteAllText(Path.Combine(Paths.Root, "parse_test.txt"), result);
             return;

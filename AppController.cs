@@ -266,16 +266,14 @@ sealed class AppController
                 // Сводки, отметку первого запуска и _latest не трогаем — иначе потом старые сводки всплывут как новые.
                 if (!_incomingEmpty) Log.Write("GCPD: Steam не отдал сводку жалоб: " + GcpdReader.PageMessage(res.Table));
                 _incomingEmpty = true;
-                _failStreak = 0;
                 SetTrayText($"Steam не отдал сводку жалоб, проверено {DateTime.Now:HH:mm}");
                 if (manual)
                     _tray.ShowBalloonTip(6000, "Dota Reports", "Steam сейчас не отдаёт сводку жалоб — проверю позже.", Forms.ToolTipIcon.Info);
                 await CheckOutgoingAsync(); // отдельная вкладка — может и работать
+                _failStreak = 0;
                 return;
             }
             var summaries = ReportParser.Parse(res.Table);
-            // сброс только после разбора: устойчивая ошибка колонок должна дойти до окна ошибки
-            _failStreak = 0;
             if (_incomingEmpty) Log.Write("GCPD: сводка жалоб снова доступна");
             _incomingEmpty = false;
             var fresh = summaries.Where(s => !_seen.Contains(s.MatchId)).ToList();
@@ -301,6 +299,7 @@ sealed class AppController
                 _tray.ShowBalloonTip(4000, "Dota Reports", "Новых жалоб нет.", Forms.ToolTipIcon.Info);
 
             await CheckOutgoingAsync();
+            _failStreak = 0; // сброс только после всей проверки: устойчивая ошибка на любом шаге должна дойти до окна
         }
         catch (Exception ex)
         {
@@ -382,7 +381,7 @@ sealed class AppController
                 Log.Write("Профиль GCPD: Steam отдал не все вкладки: " + (tables.Count > 0 ? string.Join(", ", tables.Keys) : "ни одной"));
             if (tables.Count == 0) return;
             _profile.Apply(tables, _draftData.Heroes, DateTime.Now);
-            if (tables.Count == ProfileData.Tabs.Length) _profile.Save(tables); // кэш — только целиком
+            _profile.Save(tables); // недостающие вкладки Save возьмёт из прошлого кэша
             _draftData.SetProfile(_profile);
             if (_rating.IsVisible) RenderRating();
         }
