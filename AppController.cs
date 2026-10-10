@@ -57,6 +57,8 @@ sealed class AppController
 
     ConductSummary? _latest;
     bool _busy, _dotaWasRunning;
+    bool _incomingEmpty; // Steam отдаёт вкладку жалоб без таблицы — в журнал только смену состояния
+    int _failStreak;     // проверок подряд с ошибкой: в фоне окно ошибки — один раз, со второй
 
     public AppController(System.Windows.Application app)
     {
@@ -258,7 +260,22 @@ sealed class AppController
 
             if (res.Me.AccountId is { } account)
                 File.WriteAllText(Paths.Account, account);
+            if (res.NoTable)
+            {
+                // Не «жалоб нет» и не «Valve сменила колонки»: Steam временно не отдаёт данные.
+                // Сводки, отметку первого запуска и _latest не трогаем — иначе потом старые сводки всплывут как новые.
+                if (!_incomingEmpty) Log.Write("GCPD: Steam не отдал сводку жалоб: " + GcpdReader.PageMessage(res.Table));
+                _incomingEmpty = true;
+                SetTrayText($"Steam не отдал сводку жалоб, проверено {DateTime.Now:HH:mm}");
+                if (manual)
+                    _tray.ShowBalloonTip(6000, "Dota Reports", "Steam сейчас не отдаёт сводку жалоб — проверю позже.", Forms.ToolTipIcon.Info);
+                await CheckOutgoingAsync(); // отдельная вкладка — может и работать
+                _failStreak = 0;
+                return;
+            }
             var summaries = ReportParser.Parse(res.Table);
+            if (_incomingEmpty) Log.Write("GCPD: сводка жалоб снова доступна");
+            _incomingEmpty = false;
             var fresh = summaries.Where(s => !_seen.Contains(s.MatchId)).ToList();
             bool firstRun = !_seen.Initialized;
             _seen.Add(fresh.Select(s => s.MatchId));
@@ -282,12 +299,16 @@ sealed class AppController
                 _tray.ShowBalloonTip(4000, "Dota Reports", "Новых жалоб нет.", Forms.ToolTipIcon.Info);
 
             await CheckOutgoingAsync();
+            _failStreak = 0; // сброс только после всей проверки: устойчивая ошибка на любом шаге должна дойти до окна
         }
         catch (Exception ex)
         {
+            _failStreak++;
             Log.Write("Ошибка проверки: " + ex);
             SetTrayText("ошибка, см. log.txt");
-            _tray.ShowBalloonTip(8000, "Dota Reports — ошибка", ex.Message, Forms.ToolTipIcon.Error);
+            // разовый сбой Steam — не повод для окна: в фоне сообщаем со второй ошибки подряд и один раз, по кнопке — сразу
+            if (manual || _failStreak == 2)
+                _tray.ShowBalloonTip(8000, "Dota Reports — ошибка", ex.Message, Forms.ToolTipIcon.Error);
         }
         finally
         {
@@ -308,34 +329,42 @@ sealed class AppController
     /// </summary>
     async Task CheckOutgoingAsync()
     {
-        var tables = await _reader.ReadTablesAsync(new[] { ("Account", "MatchPlayerReport", 0) });
-        if (tables == null || !tables.TryGetValue("Account:MatchPlayerReport", out var table)) return;
-        var headers = table.GetProperty("headers").EnumerateArray().Select(h => h.GetString() ?? "").ToList();
-        var rows = table.GetProperty("rows").EnumerateArray()
-            .Select(r => r.EnumerateArray().Select(c => c.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "").ToList())
-            .Where(r => r.Count == headers.Count)
-            .ToList();
-        string Cell(List<string> r, string name) => headers.IndexOf(name) is var i and >= 0 ? r[i] : "";
-
-        bool firstRun = !File.Exists(Paths.SeenOutgoing);
-        var seen = firstRun ? new HashSet<string>() : System.Text.Json.JsonSerializer.Deserialize<HashSet<string>>(File.ReadAllText(Paths.SeenOutgoing)) ?? new();
-        var fresh = new List<(string Target, string Match, List<string> Reasons)>();
-        foreach (var r in rows)
+        try
         {
-            var key = $"{Cell(r, "MatchID")}|{Cell(r, "Target")}|{Cell(r, "Date")}";
-            if (!seen.Add(key)) continue;
-            var reasons = headers.Where((h, i) => r[i] == "Yes" && h != "Commended").Select(h => ReportReasonsRu.GetValueOrDefault(h, h)).ToList();
-            if (reasons.Count > 0) fresh.Add((Cell(r, "Target"), Cell(r, "MatchID"), reasons));
-        }
-        File.WriteAllText(Paths.SeenOutgoing, System.Text.Json.JsonSerializer.Serialize(seen));
-        if (firstRun || fresh.Count == 0) return; // при первом запуске старые строки только запоминаем
+            var tables = await _reader.ReadTablesAsync(new[] { ("Account", "MatchPlayerReport", 0) });
+            if (tables == null || !tables.TryGetValue("Account:MatchPlayerReport", out var table)) return;
+            var headers = table.GetProperty("headers").EnumerateArray().Select(h => h.GetString() ?? "").ToList();
+            var rows = table.GetProperty("rows").EnumerateArray()
+                .Select(r => r.EnumerateArray().Select(c => c.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "").ToList())
+                .Where(r => r.Count == headers.Count)
+                .ToList();
+            string Cell(List<string> r, string name) => headers.IndexOf(name) is var i and >= 0 ? r[i] : "";
 
-        var lines = fresh.Take(4).Select(f => ($"{f.Target} — {string.Join(", ", f.Reasons)}", OverlayWindow.White)).ToList();
-        lines.Add(($"матч {fresh[0].Match} · это жалоба от вас, не на вас", OverlayWindow.Gray));
-        _overlay.ShowPopup(fresh.Count == 1 ? "Ваша жалоба отправлена" : $"Ваши жалобы отправлены: {fresh.Count}", OverlayWindow.White, lines, PopupTime);
-        _tray.ShowBalloonTip(10000, "Ваша жалоба отправлена",
-            string.Join("; ", fresh.Take(3).Select(f => $"{f.Target} — {string.Join(", ", f.Reasons)}")) + $" (матч {fresh[0].Match})",
-            Forms.ToolTipIcon.Info);
+            bool firstRun = !File.Exists(Paths.SeenOutgoing);
+            var seen = firstRun ? new HashSet<string>() : System.Text.Json.JsonSerializer.Deserialize<HashSet<string>>(File.ReadAllText(Paths.SeenOutgoing)) ?? new();
+            var fresh = new List<(string Target, string Match, List<string> Reasons)>();
+            foreach (var r in rows)
+            {
+                var key = $"{Cell(r, "MatchID")}|{Cell(r, "Target")}|{Cell(r, "Date")}";
+                if (!seen.Add(key)) continue;
+                var reasons = headers.Where((h, i) => r[i] == "Yes" && h != "Commended").Select(h => ReportReasonsRu.GetValueOrDefault(h, h)).ToList();
+                if (reasons.Count > 0) fresh.Add((Cell(r, "Target"), Cell(r, "MatchID"), reasons));
+            }
+            File.WriteAllText(Paths.SeenOutgoing, System.Text.Json.JsonSerializer.Serialize(seen));
+            if (firstRun || fresh.Count == 0) return; // при первом запуске старые строки только запоминаем
+
+            var lines = fresh.Take(4).Select(f => ($"{f.Target} — {string.Join(", ", f.Reasons)}", OverlayWindow.White)).ToList();
+            lines.Add(($"матч {fresh[0].Match} · это жалоба от вас, не на вас", OverlayWindow.Gray));
+            _overlay.ShowPopup(fresh.Count == 1 ? "Ваша жалоба отправлена" : $"Ваши жалобы отправлены: {fresh.Count}", OverlayWindow.White, lines, PopupTime);
+            _tray.ShowBalloonTip(10000, "Ваша жалоба отправлена",
+                string.Join("; ", fresh.Take(3).Select(f => $"{f.Target} — {string.Join(", ", f.Reasons)}")) + $" (матч {fresh[0].Match})",
+                Forms.ToolTipIcon.Info);
+        }
+        catch (Exception ex)
+        {
+            // дополнительная вкладка: её сбой не должен превращать проверку жалоб на вас в ошибку
+            Log.Write("Отправленные жалобы не прочитаны: " + ex.Message);
+        }
     }
 
     // Вкладки GCPD для окна рейтинга и пула героев; та же страница Steam, что и для жалоб, поэтому тот же замок _busy.
@@ -347,8 +376,12 @@ sealed class AppController
         {
             var tables = await _reader.ReadTablesAsync(ProfileData.Tabs);
             if (tables == null) return; // нужен вход — напомнит проверка жалоб
+            // пустые вкладки Steam («повторите попытку позже») в tables не попадают — по ним остаются прежние данные
+            if (tables.Count < ProfileData.Tabs.Length)
+                Log.Write("Профиль GCPD: Steam отдал не все вкладки: " + (tables.Count > 0 ? string.Join(", ", tables.Keys) : "ни одной"));
+            if (tables.Count == 0) return;
             _profile.Apply(tables, _draftData.Heroes, DateTime.Now);
-            _profile.Save(tables);
+            _profile.Save(tables); // недостающие вкладки Save возьмёт из прошлого кэша
             _draftData.SetProfile(_profile);
             if (_rating.IsVisible) RenderRating();
         }

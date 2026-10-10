@@ -53,7 +53,22 @@ sealed class ProfileData
 
     public void Save(Dictionary<string, JsonElement> tables)
     {
-        File.WriteAllText(Paths.ProfileTables, JsonSerializer.Serialize(new { updated = DateTime.Now, tables }));
+        // вкладки, которые Steam в этот раз не отдал («повторите попытку позже»), берём из прошлого кэша
+        var all = new Dictionary<string, JsonElement>(tables);
+        try
+        {
+            if (File.Exists(Paths.ProfileTables))
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(Paths.ProfileTables));
+                foreach (var p in doc.RootElement.GetProperty("tables").EnumerateObject())
+                    all.TryAdd(p.Name, p.Value.Clone());
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or KeyNotFoundException or InvalidOperationException)
+        {
+            Log.Write("Кэш профиля не прочитан, пишу заново: " + ex.Message);
+        }
+        File.WriteAllText(Paths.ProfileTables, JsonSerializer.Serialize(new { updated = DateTime.Now, tables = all }));
     }
 
     public void Apply(Dictionary<string, JsonElement> tables, IReadOnlyDictionary<int, string> heroes, DateTime updated)
