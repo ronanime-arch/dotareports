@@ -87,6 +87,22 @@ static class Program
             }));
             return;
         }
+        if (args.Length >= 1 && args[0] == "--reminder-test")
+        {
+            // прогон часов матча с -1:30 до 40:00 по профилям из reminders.json: когда что покажется, в reminder_test.txt
+            var settings = ReminderSettings.Load();
+            var lines = new List<string>();
+            foreach (var profile in settings.Profiles)
+            {
+                lines.Add($"== {profile.Name} ({(profile.Mode.Length > 0 ? profile.Mode : "вручную")})");
+                var engine = new ReminderEngine();
+                for (int clock = -90; clock <= 40 * 60; clock++)
+                    foreach (var (rule, at) in engine.Update("test", clock, profile))
+                        lines.Add($"{ReminderTime.Format(Math.Max(clock, 0))}  {rule.Text} (в {ReminderTime.Format(at)})");
+            }
+            File.WriteAllLines(Path.Combine(Paths.Root, "reminder_test.txt"), lines);
+            return;
+        }
         if (args.Length >= 2 && args[0] == "--draft-test")
         {
             DraftTest(args[1].Split(','), Path.Combine(Paths.Root, "draft_test.txt"));
