@@ -15,6 +15,9 @@ sealed record Me(string? SteamId, string? AccountId, string? Profile);
 sealed record GcpdResult(bool NeedLogin, JsonElement Table, Me Me)
 {
     public static readonly GcpdResult Login = new(true, default, new Me(null, null, null));
+
+    /// <summary>Вкладка открылась, а таблицы нет: «личная статистика отсутствует. Повторите попытку позже».</summary>
+    public bool NoTable => !NeedLogin && !GcpdReader.HasTable(Table);
 }
 
 /// <summary>Открывает steamcommunity.com/my/gcpd/570 и достаёт таблицу «Incoming Match Player Report».</summary>
@@ -88,7 +91,9 @@ sealed class GcpdReader
                 if (clicked.ValueKind != JsonValueKind.True) break;
                 await Task.Delay(2500);
             }
-            result[$"{category}:{tab}"] = await _b.EvalAsync(TableJs);
+            // пустую вкладку не кладём: у потребителей останутся прежние данные
+            var table = await _b.EvalAsync(TableJs);
+            if (HasTable(table)) result[$"{category}:{tab}"] = table;
         }
         return result;
     }
@@ -214,6 +219,23 @@ sealed class GcpdReader
         string? accountId = ulong.TryParse(steamId, out var id64) && id64 > SteamId64Base ? (id64 - SteamId64Base).ToString() : null;
         var m = Regex.Match(page.GetProperty("href").GetString() ?? "", @"^https://steamcommunity\.com/(?:id|profiles)/[^/?#]+", RegexOptions.IgnoreCase);
         return new Me(steamId, accountId, m.Success ? m.Value : null);
+    }
+
+    /// <summary>
+    /// Есть ли таблица в выгрузке TableJs. Смотрим на неё, а не на текст страницы — он на языке интерфейса Steam.
+    /// Строки без заголовков — уже смена разметки, это не «нет данных».
+    /// </summary>
+    public static bool HasTable(JsonElement table) =>
+        table.ValueKind == JsonValueKind.Object &&
+        (table.GetProperty("headers").GetArrayLength() > 0 || table.GetProperty("rows").GetArrayLength() > 0);
+
+    /// <summary>Конец текста страницы — там сообщение Steam; для журнала.</summary>
+    public static string PageMessage(JsonElement table)
+    {
+        var s = table.ValueKind == JsonValueKind.Object && table.TryGetProperty("pageText", out var p) && p.ValueKind == JsonValueKind.String
+            ? p.GetString() ?? ""
+            : "";
+        return s.Length > 160 ? "…" + s[^160..] : s;
     }
 
     static void Dump(JsonElement page, JsonElement? table)

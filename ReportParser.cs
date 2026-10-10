@@ -30,7 +30,8 @@ static class ReportParser
         int Col(string name) => headers.FindIndex(h => h.Equals(name, StringComparison.OrdinalIgnoreCase));
         int Required(string name) => Col(name) is var i and >= 0
             ? i
-            : throw new InvalidOperationException($"В таблице GCPD нет колонки «{name}» — Valve её поменяла. Таблица записана в {Paths.Dump}");
+            : throw new InvalidOperationException(
+                $"В таблице GCPD нет колонки «{name}», есть: {(headers.Count > 0 ? string.Join(", ", headers) : "ни одной")}. Таблица записана в {Paths.Dump}");
 
         int match = Required("Conduct Summary MatchID");
         int reports = Required("Reports");

@@ -58,6 +58,27 @@ static class Program
             File.WriteAllLines(Path.Combine(Paths.Root, "rating_test.txt"), lines);
             return;
         }
+        if (args.Length >= 2 && args[0] == "--parse-test")
+        {
+            // last_table.json (или выгрузка одной таблицы) → что увидит проверка жалоб, в parse_test.txt
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(args[1]));
+            var table = doc.RootElement.TryGetProperty("table", out var t) ? t : doc.RootElement;
+            string result;
+            if (!GcpdReader.HasTable(table))
+                result = "нет таблицы: " + GcpdReader.PageMessage(table);
+            else
+                try
+                {
+                    var summaries = ReportParser.Parse(table);
+                    result = $"сводок {summaries.Count}" + Environment.NewLine + string.Join(Environment.NewLine, summaries);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    result = "ошибка: " + ex.Message;
+                }
+            File.WriteAllText(Path.Combine(Paths.Root, "parse_test.txt"), result);
+            return;
+        }
         if (args.Length >= 1 && args[0] == "--card-test")
         {
             // отрисовка карточки на вымышленном пике All Pick, роль «сложная»: враги Sniper, Tinker; союзник Slardar; собирается DK
