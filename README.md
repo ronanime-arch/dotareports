@@ -1,5 +1,8 @@
 # Dota Reports — оповещения о жалобах и подсказки в пике для Dota 2
 
+СКАЧАТЬ
+https://github.com/ronanime-arch/dotareports/releases/latest/download/DotaReports.zip
+
 УСТАНОВКА
 1. Распакуйте папку DotaReports куда угодно (например, C:\DotaReports) и запустите DotaReports.exe.
    Если Windows покажет «Система Windows защитила ваш компьютер» — «Подробнее» → «Выполнить в любом случае»

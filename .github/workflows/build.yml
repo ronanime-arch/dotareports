@@ -1,0 +1,32 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Publish
+        run: dotnet publish DotaReports.csproj -c Release -r win-x64 --self-contained -o dist/DotaReports
+      - name: Zip
+        shell: pwsh
+        run: |
+          Copy-Item README.md dist/DotaReports/ПРОЧТИ.txt
+          Compress-Archive -Path dist/DotaReports -DestinationPath DotaReports.zip
+      # После мержа в main — новый релиз; ссылка releases/latest/download/DotaReports.zip всегда ведёт на него
+      - name: Release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v1.0.${{ github.run_number }}" DotaReports.zip --title "v1.0.${{ github.run_number }}" --notes "Сборка из ${{ github.sha }}" --latest
