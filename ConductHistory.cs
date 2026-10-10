@@ -18,6 +18,8 @@ sealed class ConductHistory
     /// <summary>Матчи окна по MatchId сводки, новые первыми.</summary>
     public Dictionary<string, List<MatchRow>> Windows { get; set; } = new();
 
+    bool _keepFile; // файл не прочитался и не отложился (занят?) — не затираем его, до следующего запуска история только в памяти
+
     /// <summary>Добавить сводки со страницы GCPD. false — ничего не поменялось: файл не переписываем каждую минуту.</summary>
     public bool Merge(IEnumerable<ConductSummary> summaries)
     {
@@ -37,7 +39,9 @@ sealed class ConductHistory
 
     /// <summary>
     /// Окна из истории матчей: матчи после предыдущей (более старой) сводки и до этой включительно, не больше Matches;
-    /// у самой старой — последние Matches штук. Окно заменяется, только если стало длиннее. false — ни одно не выросло.
+    /// у самой старой — последние Matches штук. Окно заменяется, только если стало длиннее или, при той же длине, впервые
+    /// заканчивается матчем сводки (у самой старой нижней границы нет: по устаревшему профилю окно сдвинуто в прошлое).
+    /// false — ничего не поменялось.
     /// </summary>
     public bool AttachMatches(IReadOnlyList<MatchRow> matches)
     {
@@ -51,7 +55,9 @@ sealed class ConductHistory
             if (id == 0 || s.Matches <= 0) continue;
             ulong after = i + 1 < Summaries.Count ? Id(Summaries[i + 1].MatchId) : 0;
             var window = known.Where(m => m.MatchId <= id && m.MatchId > after).Take(s.Matches).ToList();
-            if (window.Count > Window(s).Count)
+            var old = Window(s);
+            bool anchored = window.Count > 0 && window[0].MatchId == id, wasAnchored = old.Count > 0 && old[0].MatchId == id;
+            if (window.Count > old.Count || (window.Count == old.Count && anchored && !wasAnchored))
             {
                 Windows[s.MatchId] = window;
                 changed = true;
@@ -77,12 +83,30 @@ sealed class ConductHistory
             if (File.Exists(Paths.ConductHistory))
                 return JsonSerializer.Deserialize<ConductHistory>(File.ReadAllText(Paths.ConductHistory)) ?? new();
         }
-        catch (Exception ex) when (ex is IOException or JsonException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
         {
-            Log.Write("История поведения не прочитана, начинаю заново: " + ex.Message);
+            // файл не перезаписываем: в нём сводки и окна, которых в GCPD уже нет, — откладываем в сторону
+            var aside = Paths.ConductHistory + ".bad-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            try
+            {
+                File.Move(Paths.ConductHistory, aside, overwrite: true);
+            }
+            catch (Exception moveEx) when (moveEx is IOException or UnauthorizedAccessException)
+            {
+                Log.Write($"История поведения не прочитана и не отложена, файл не трогаю до перезапуска: {ex.Message}; {moveEx.Message}");
+                return new() { _keepFile = true };
+            }
+            Log.Write($"История поведения не прочитана, начинаю заново (старый файл: {aside}): " + ex.Message);
         }
         return new();
     }
 
-    public void Save() => File.WriteAllText(Paths.ConductHistory, JsonSerializer.Serialize(this));
+    // через временный файл: оборванная запись не испортит историю
+    public void Save()
+    {
+        if (_keepFile) return;
+        var tmp = Paths.ConductHistory + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(this));
+        File.Move(tmp, Paths.ConductHistory, overwrite: true);
+    }
 }

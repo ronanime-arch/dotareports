@@ -57,7 +57,13 @@ sealed class BehaviorHistoryWindow : Window
         bool first = true;
         foreach (var s in _history.Summaries)
         {
-            _list.Children.Add(new Expander { Header = Header(s), IsExpanded = first, Content = Matches(s), Margin = new Thickness(0, 0, 0, 6) });
+            _list.Children.Add(new Expander
+            {
+                Header = new TextBlock { Text = Header(s), TextWrapping = TextWrapping.Wrap }, // строка со сводкой с жалобами длиннее окна
+                IsExpanded = first,
+                Content = Matches(s),
+                Margin = new Thickness(0, 0, 0, 6),
+            });
             first = false;
         }
     }
