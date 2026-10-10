@@ -59,6 +59,9 @@ sealed class AppController
     bool _busy, _dotaWasRunning;
     bool _incomingEmpty; // Steam отдаёт вкладку жалоб без таблицы — в журнал только смену состояния
     int _failStreak;     // проверок подряд с ошибкой: в фоне окно ошибки — один раз, со второй
+    bool _profilePending; // профиль после матча не прочитан из-за занятости — дочитает поминутный опрос
+    readonly ConductHistory _history = ConductHistory.Load();
+    BehaviorHistoryWindow? _historyWindow;
 
     public AppController(System.Windows.Application app)
     {
@@ -93,6 +96,12 @@ sealed class AppController
         _profileTimer.Tick += async (_, _) =>
         {
             _profileTimer.Stop();
+            // идёт поминутная проверка: повтор через 60 с попал бы в неё же (у опроса тот же период) — дочитает сам опрос
+            if (_busy)
+            {
+                _profilePending = true;
+                return;
+            }
             await RefreshAsync(interactive: false, manual: false); // сводка жалоб и ваши отправленные жалобы за этот матч
             await RefreshProfileAsync();
         };
@@ -122,6 +131,13 @@ sealed class AppController
         _poll.Tick += async (_, _) => await OnPollAsync();
         _poll.Start();
         _ = LoadDraftAsync(); // не ждёт GCPD: вход в Steam может затянуться, а кэш пика уже на диске
+        // герои из кэша уже прочитаны (до первого await в LoadAsync): профиль из кэша — сразу, не дожидаясь сети,
+        // иначе сравнение low priority и окна истории зависели бы от того, что успело раньше
+        if (!_profile.Loaded && _draftData.Heroes.Count > 0)
+        {
+            _profile.LoadCache(_draftData.Heroes);
+            UpdateHistory(null);
+        }
         await RefreshAsync(interactive: true, manual: false);
         await RefreshProfileAsync();
     }
@@ -200,7 +216,11 @@ sealed class AppController
         try
         {
             await _draftData.LoadAsync();
-            if (!_profile.Loaded) _profile.LoadCache(_draftData.Heroes);
+            if (!_profile.Loaded)
+            {
+                _profile.LoadCache(_draftData.Heroes);
+                UpdateHistory(null);
+            }
             _draftData.SetProfile(_profile);
         }
         catch (Exception ex)
@@ -224,6 +244,11 @@ sealed class AppController
             await RefreshAsync(interactive: false, manual: false);
         if (justClosed)
             await LoadDraftAsync(); // обновить пул: появились новые игры
+        if (_profilePending && !_busy)
+        {
+            _profilePending = false;
+            await RefreshProfileAsync();
+        }
     }
 
     // Dota открыта больше двух минут, а данных GSI нет ни разу — один раз объяснить причину.
@@ -298,6 +323,7 @@ sealed class AppController
             else if (manual)
                 _tray.ShowBalloonTip(4000, "Dota Reports", "Новых жалоб нет.", Forms.ToolTipIcon.Info);
 
+            UpdateHistory(summaries); // и при первом запуске: это история, а не оповещение
             await CheckOutgoingAsync();
             _failStreak = 0; // сброс только после всей проверки: устойчивая ошибка на любом шаге должна дойти до окна
         }
@@ -380,9 +406,13 @@ sealed class AppController
             if (tables.Count < ProfileData.Tabs.Length)
                 Log.Write("Профиль GCPD: Steam отдал не все вкладки: " + (tables.Count > 0 ? string.Join(", ", tables.Keys) : "ни одной"));
             if (tables.Count == 0) return;
+            // пустой Account — первый запуск без кэша: уже действующий low priority покажет окно рейтинга, не уведомление
+            int? lpBefore = _profile.Account.Count > 0 ? _profile.LowPriorityGames : null;
             _profile.Apply(tables, _draftData.Heroes, DateTime.Now);
             _profile.Save(tables); // недостающие вкладки Save возьмёт из прошлого кэша
             _draftData.SetProfile(_profile);
+            if (lpBefore is int before) NotifyLowPriority(before, _profile.LowPriorityGames);
+            UpdateHistory(null);
             if (_rating.IsVisible) RenderRating();
         }
         catch (Exception ex)
@@ -395,11 +425,61 @@ sealed class AppController
         }
     }
 
+    // Low priority назначили или сняли. Счётчик убывает после каждой игры в нём — это не событие.
+    void NotifyLowPriority(int before, int now)
+    {
+        if (before == 0 && now > 0)
+        {
+            var games = $"{now} {Plural(now, "игра", "игры", "игр")}";
+            _overlay.ShowPopup("Вы в low priority", OverlayWindow.Red, new[]
+            {
+                ($"осталось {games}", OverlayWindow.White),
+                ("данные Valve (GCPD), обновлены после матча", OverlayWindow.Gray),
+            }, PopupTime);
+            _tray.ShowBalloonTip(10000, "Вы в low priority", $"Осталось {games}.", Forms.ToolTipIcon.Warning);
+        }
+        else if (before > 0 && now == 0)
+            _tray.ShowBalloonTip(8000, "Dota Reports", "Low priority снят.", Forms.ToolTipIcon.Info);
+    }
+
+    // Сводки и окна матчей — в conduct_history.json, файл — только при изменениях (опрос идёт раз в минуту).
+    // Побочная функция: её сбой не должен ломать оповещения о жалобах.
+    void UpdateHistory(IEnumerable<ConductSummary>? summaries)
+    {
+        try
+        {
+            bool changed = summaries != null && _history.Merge(summaries);
+            changed |= _history.AttachMatches(_profile.Matches);
+            if (!changed) return;
+            _history.Save();
+            _historyWindow?.Render();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            Log.Write("История поведения не сохранена: " + ex.Message);
+        }
+    }
+
+    void OpenHistory()
+    {
+        if (_historyWindow != null)
+        {
+            _historyWindow.Activate();
+            return;
+        }
+        _historyWindow = new BehaviorHistoryWindow(_history, _draftData);
+        _historyWindow.Closed += (_, _) => _historyWindow = null;
+        _historyWindow.Show();
+        _historyWindow.Activate();
+    }
+
     static readonly string[] MedalNames = { "", "Рекрут", "Страж", "Рыцарь", "Герой", "Легенда", "Властелин", "Божество", "Титан" };
 
     void RenderRating()
     {
         var lines = new List<(string, Color)>();
+        int lp = _profile.LowPriorityGames;
+        if (lp > 0) lines.Add(($"Low priority: осталось {lp} {Plural(lp, "игра", "игры", "игр")}", OverlayWindow.Red));
         string medal = _draftData.Medal is >= 1 and <= 8
             ? MedalNames[_draftData.Medal] + (_draftData.RankTier % 10 is >= 1 and <= 5 ? " " + new[] { "", "I", "II", "III", "IV", "V" }[_draftData.RankTier % 10] : "")
             : "неизвестен";
@@ -424,17 +504,23 @@ sealed class AppController
                 lines.Add(($"Серия: {st.Count} {(st.Wins ? Plural(st.Count, "победа", "победы", "побед") : Plural(st.Count, "поражение", "поражения", "поражений"))} подряд",
                     st.Wins ? OverlayWindow.Green : OverlayWindow.Red));
         }
-        if (_latest != null)
-            lines.Add(($"Поведение: {_latest.Score}" + (_latest.ScoreDelta is int d ? $" ({d:+#;-#;0})" : "") +
-                       $" · похвал {_latest.Commends} · жалоб {_latest.Reports}", OverlayWindow.White));
+        if ((_latest ?? _history.Summaries.FirstOrDefault()) is { } latest)
+            lines.Add(($"Поведение: {latest.Score}" + (latest.ScoreDelta is int d ? $" ({d:+#;-#;0})" : "") +
+                       $" · похвал {latest.Commends} · жалоб {latest.Reports}", OverlayWindow.White));
+        // тренд по накопленным сводкам: старые слева
+        var trend = _history.Summaries.Where(s => s.Score != null).Take(20).Select(s => s.Score!.Value).Reverse().ToList();
+        if (trend.Count >= 2)
+            lines.Add(($"поведение за {trend.Count} {Plural(trend.Count, "сводку", "сводки", "сводок")}: {trend[0]} → {trend[^1]}", OverlayWindow.Gray));
         if (_profile.Loaded)
         {
             int w = _profile.AccountInt("Wins"), l = _profile.AccountInt("Losses");
             if (w + l > 0) lines.Add(($"Всего: {w}–{l} ({100.0 * w / (w + l):0.0}%)", OverlayWindow.Gray));
-            lines.Add(($"Можно отправить: жалоб {_profile.AccountInt("NegativeReportsRemaining")} · похвал {_profile.AccountInt("PositiveReportsRemaining")}", OverlayWindow.Gray));
+            int negative = _profile.AccountInt("NegativeReportsRemaining");
+            bool noReports = negative == 0 && _profile.Account.ContainsKey("NegativeReportsRemaining");
+            lines.Add(($"Можно отправить: жалоб {negative} · похвал {_profile.AccountInt("PositiveReportsRemaining")}", noReports ? OverlayWindow.Red : OverlayWindow.Gray));
         }
         var updated = _profile.UpdatedAt is { } u ? $"данные Valve от {u:dd.MM HH:mm}" : "данные Valve ещё не загружены";
-        _rating.Render("Рейтинг", lines, updated + " · Ctrl+Alt+S — скрыть");
+        _rating.Render("Рейтинг", lines, updated + " · Ctrl+Alt+S — скрыть", trend.Count >= 2 ? trend : null);
     }
 
     async Task CheckConfidenceAsync()
@@ -512,8 +598,8 @@ sealed class AppController
 
     void ShowLatest()
     {
-        if (_latest != null)
-            ShowSummary(_latest);
+        if ((_latest ?? _history.Summaries.FirstOrDefault()) is { } latest)
+            ShowSummary(latest);
         else
             _overlay.ShowPopup("Dota Reports", OverlayWindow.White, new[] { ("Сводки ещё не загружены.", OverlayWindow.Gray) }, PopupTime);
     }
@@ -564,6 +650,7 @@ sealed class AppController
         menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
         menu.Items.Add("Напоминания…", null, (_, _) => OpenReminders());
+        menu.Items.Add("История поведения…", null, (_, _) => OpenHistory());
         menu.Items.Add("Проверить сейчас", null, async (_, _) => await RefreshAsync(interactive: true, manual: true));
         menu.Items.Add("Папка с данными", null, (_, _) => Process.Start("explorer.exe", Paths.Root));
         menu.Items.Add("Токен Stratz…", null, async (_, _) =>
@@ -606,6 +693,7 @@ sealed class AppController
         _overlay.Close();
         _reminderOverlay.Close();
         _reminderWindow?.Close();
+        _historyWindow?.Close();
         _draft.Close();
         _turboCard.Close();
         _rating.Close();

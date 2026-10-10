@@ -7,8 +7,9 @@ using System.Text.Json;
 
 namespace DotaReports;
 
-/// <summary>Один матч из истории GCPD (Matches → PlayerMatchHistory).</summary>
-sealed record MatchRow(DateTime StartLocal, int GameMode, string Hero, bool? Win, bool Uncalibrated);
+/// <summary>Один матч из истории GCPD (Matches → PlayerMatchHistory). Хвост с умолчаниями — для истории поведения.</summary>
+sealed record MatchRow(DateTime StartLocal, int GameMode, string Hero, bool? Win, bool Uncalibrated,
+    ulong MatchId = 0, int HeroId = 0, int Kills = 0, int Deaths = 0, int Assists = 0, bool LowPriority = false);
 
 /// <summary>
 /// Ваши данные Valve из GCPD для окна рейтинга и карточки пика: история матчей (калибровка, сегодня, серия),
@@ -87,8 +88,12 @@ sealed class ProfileData
                 int outcome = int.TryParse(r.GetValueOrDefault("MatchOutcome"), out var o) ? o : 0;
                 bool radiant = slot >= 0 && slot < 128;   // у Dire слот 128+ (в таблице — байт со знаком: −126)
                 bool? win = outcome switch { 2 => radiant, 3 => !radiant, _ => null };
+                var hero = r.GetValueOrDefault("Hero") ?? "";
+                int heroId = HeroId(hero);
                 return new MatchRow(ParseGmt(r.GetValueOrDefault("StartTime")), int.TryParse(r.GetValueOrDefault("GameMode"), out var gm) ? gm : 0,
-                    r.GetValueOrDefault("Hero") ?? "", win, r.GetValueOrDefault("Uncalibrated") == "Yes");
+                    heroes.GetValueOrDefault(heroId, hero), win, r.GetValueOrDefault("Uncalibrated") == "Yes",
+                    ulong.TryParse(r.GetValueOrDefault("MatchID"), out var mid) ? mid : 0, heroId,
+                    Int(r, "Kills"), Int(r, "Deaths"), Int(r, "Assists"), r.GetValueOrDefault("Low Priority") == "Yes");
             }).OrderByDescending(m => m.StartLocal).ToList();
 
         if (tables.TryGetValue("Stats:GameHeroStandings", out var st))
@@ -131,6 +136,9 @@ sealed class ProfileData
     }
 
     public int AccountInt(string key) => int.TryParse(Account.GetValueOrDefault(key), out var v) ? v : 0;
+
+    /// <summary>Сколько игр осталось в low priority (0 — не в нём). Других ограничений GCPD не показывает.</summary>
+    public int LowPriorityGames => AccountInt("LowPriorityGamesRemaining");
 
     static int Int(Dictionary<string, string> r, string key) => int.TryParse(r.GetValueOrDefault(key), out var v) ? v : 0;
 

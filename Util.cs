@@ -31,6 +31,7 @@ static class Paths
     public static string RankConfidence => Path.Combine(Root, "rank_confidence.txt");
     public static string SeenOutgoing => Path.Combine(Root, "seen_outgoing.json");
     public static string Reminders => Path.Combine(Root, "reminders.json");
+    public static string ConductHistory => Path.Combine(Root, "conduct_history.json");
 }
 
 static class Log
