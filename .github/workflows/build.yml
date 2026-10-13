@@ -18,7 +18,8 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Publish
-        run: dotnet publish DotaReports.csproj -c Release -r win-x64 --self-contained -o dist/DotaReports
+        # версия сборки = номер релиза (v1.0.N): по ней кнопка «Обновить» в трее понимает, есть ли новее
+        run: dotnet publish DotaReports.csproj -c Release -r win-x64 --self-contained -o dist/DotaReports -p:Version=1.0.${{ github.run_number }}
       - name: Zip
         shell: pwsh
         run: |

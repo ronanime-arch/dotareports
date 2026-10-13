@@ -37,6 +37,18 @@ static class Paths
     public static string Predictions => Path.Combine(Root, "predictions.json");
 }
 
+static class Words
+{
+    /// <summary>Склонение по числу: 1 игра, 2 игры, 5 игр.</summary>
+    public static string Plural(long n, string one, string few, string many)
+    {
+        long m10 = n % 10, m100 = n % 100;
+        if (m10 == 1 && m100 != 11) return one;
+        if (m10 is >= 2 and <= 4 && m100 is < 12 or > 14) return few;
+        return many;
+    }
+}
+
 static class Log
 {
     public static void Write(string message)

@@ -63,11 +63,16 @@ sealed class DraftWindow : Window
         foreach (var (label, tag) in new[] { ("Турбо", "TURBO"), ("All Pick", "ALL_PICK") })
             _mode.Items.Add(new ComboBoxItem { Content = label, Tag = tag });
         _mode.SelectedIndex = 0;
-        _mode.SelectionChanged += (_, _) => Recalculate();
+        _mode.SelectionChanged += (_, _) =>
+        {
+            _role.IsEnabled = Mode == "ALL_PICK"; // в Турбо ролей нет
+            Recalculate();
+        };
         for (int i = 0; i < RoleNames.Length; i++) _role.Items.Add(new ComboBoxItem { Content = RoleNames[i], Tag = i });
         _role.SelectedIndex = 0;
         _role.SelectionChanged += (_, _) => Recalculate();
         _role.ToolTip = "Роль учитывается в All Pick: винрейт героя именно на ней";
+        _role.IsEnabled = false; // по умолчанию Турбо
 
         var clear = new Button { Content = "Очистить", Padding = new Thickness(10, 2, 10, 2) };
         clear.Click += (_, _) => { _enemies.Clear(); _allies.Clear(); Recalculate(); _enemies.Focus(); };
@@ -168,10 +173,10 @@ sealed class DraftWindow : Window
         foreach (var p in mine)
         {
             var g = _data.Pool[p.HeroId];
-            _mine.Children.Add(Row(p, $"у вас {g.Games} игр, {100.0 * g.Wins / g.Games:0}%" + (p.Rare ? " · редко на этой роли" : "")));
+            _mine.Children.Add(Row(p, $"у вас {Games(g.Games)}, {100.0 * g.Wins / g.Games:0}%" + (p.Rare ? " · редко на этой роли" : "")));
         }
         foreach (var p in picks.Where(p => !p.Rare).Take(TopCount))
-            _best.Children.Add(Row(p, _data.Pool.TryGetValue(p.HeroId, out var g) ? $"у вас {g.Games} игр" : ""));
+            _best.Children.Add(Row(p, _data.Pool.TryGetValue(p.HeroId, out var g) ? $"у вас {Games(g.Games)}" : ""));
     }
 
     void ShowCounters()
@@ -185,11 +190,11 @@ sealed class DraftWindow : Window
         foreach (var r in ranked.Where(r => _data.Pool.TryGetValue(r.HeroId, out var p) && p.Games >= MinPoolGames))
         {
             var p = _data.Pool[r.HeroId];
-            _mine.Children.Add(CounterRow(r, $"у вас {p.Games} игр, {100.0 * p.Wins / p.Games:0}% побед"));
+            _mine.Children.Add(CounterRow(r, $"у вас {Games(p.Games)}, {100.0 * p.Wins / p.Games:0}% побед"));
         }
         if (_mine.Children.Count == 0) _mine.Children.Add(Label("Нет героев с 2+ играми.", 13, Dim));
         foreach (var r in ranked.Take(TopCount))
-            _best.Children.Add(CounterRow(r, _data.Pool.TryGetValue(r.HeroId, out var p) ? $"у вас {p.Games} игр" : ""));
+            _best.Children.Add(CounterRow(r, _data.Pool.TryGetValue(r.HeroId, out var p) ? $"у вас {Games(p.Games)}" : ""));
     }
 
     // Строка героя: винрейт в режиме (на роли) и поправки за врагов, союзников, состав и риск контрпика, п.п.
@@ -230,6 +235,8 @@ sealed class DraftWindow : Window
         };
         return grid;
     }
+
+    static string Games(int n) => $"{n} {Words.Plural(n, "игра", "игры", "игр")}";
 
     static TextBlock Label(string text, double size, Brush color, double top = 0) => new()
     {

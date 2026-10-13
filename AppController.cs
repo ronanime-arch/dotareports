@@ -65,6 +65,7 @@ sealed class AppController
     readonly ConductHistory _history = ConductHistory.Load();
     BehaviorHistoryWindow? _historyWindow;
     AnalyticsWindow? _analytics;
+    Forms.ToolStripMenuItem _updateItem = null!;
 
     public AppController(System.Windows.Application app)
     {
@@ -134,6 +135,7 @@ sealed class AppController
         _poll.Tick += async (_, _) => await OnPollAsync();
         _poll.Start();
         _ = LoadDraftAsync(); // не ждёт GCPD: вход в Steam может затянуться, а кэш пика уже на диске
+        _ = UpdateAsync(manual: false); // вышла новая версия — подсказать про кнопку в трее
         // герои из кэша уже прочитаны (до первого await в LoadAsync): профиль из кэша — сразу, не дожидаясь сети,
         // иначе сравнение low priority и окна истории зависели бы от того, что успело раньше
         if (!_profile.Loaded && _draftData.Heroes.Count > 0)
@@ -189,27 +191,53 @@ sealed class AppController
 
     void RenderCard()
     {
-        if (_picking && _lastSnap != null && _draftData.TurboReady)
-            _turboCard.Render(_draftData, _lastSnap, $"с экрана: банов {_lastSnap.Bans}, занято {_lastSnap.Taken}", _ownHero);
+        if (!_picking || _lastSnap == null || !_draftData.TurboReady) return;
+        _turboCard.Render(_draftData, _lastSnap, $"с экрана: банов {_lastSnap.Bans}, занято {_lastSnap.Taken}", _ownHero);
+        _turboCard.ShowCard(); // данные могли догрузиться уже посреди пика — тогда карточки ещё не было
     }
 
-    // Начало матча: прогноз по итоговому драфту — окно и запись в журнал, чтобы потом сверить с исходом.
+    // Начало матча: прогноз по итоговому драфту — окно поверх игры и журнал (потом сверить с исходом),
+    // разбор матча и Dotabuff вашего героя — в «Аналитике» (окно свёрнуто или уже открыто — игре не мешает).
     void ShowPrediction(GsiState s)
     {
         if (_lastSnap is not { } snap) return;
         var mode = _mode.Mode ?? snap.Mode;
-        var team = snap.Allies.Concat(snap.Planned).Where(h => h != s.HeroId).ToList();
-        if (_draftData.WinProbability(mode, team, snap.Enemies, s.HeroId) is not { } chance || chance.KnownAllies + chance.KnownEnemies < 4) return;
-        var color = chance.P >= 0.52 ? OverlayWindow.Green : chance.P <= 0.48 ? OverlayWindow.Red : OverlayWindow.White;
-        var verdict = chance.P >= 0.56 ? "драфт в вашу пользу" : chance.P <= 0.44 ? "драфт за врагом — играйте аккуратнее" : "драфт примерно равный";
+        var team = snap.Allies.Concat(snap.Planned).Where(h => h != s.HeroId).Distinct().ToList();
+        var chance = mode == null ? null : _draftData.WinProbability(mode, team, snap.Enemies, s.HeroId);
+        ShowMatchAnalytics(new MatchInfo(s.HeroId, team, snap.Enemies.ToList(), mode, chance));
+        // режим неизвестен — винрейты Турбо и обычной игры разные, гадать не будем
+        if (chance == null || chance.KnownAllies + chance.KnownEnemies < 4) return;
+        var color = chance.P >= 0.53 ? OverlayWindow.Green : chance.P <= 0.47 ? OverlayWindow.Red : OverlayWindow.White;
+        var verdict = chance.KnownEnemies == 0 ? "враги неизвестны — оценка только по вашим героям"
+            : chance.P >= 0.53 ? "драфт в вашу пользу" : chance.P <= 0.47 ? "драфт за врагом — играйте аккуратнее" : "драфт примерно равный";
         var lines = new List<(string, Color)>
         {
             (verdict, OverlayWindow.White),
             ($"известно: ваших {chance.KnownAllies}, их {chance.KnownEnemies}" + (chance.Parts.Count > 0 ? " · " + string.Join(" · ", chance.Parts) : ""), OverlayWindow.Gray),
         };
-        _overlay.ShowPopup($"Шанс победы ≈ {chance.P:0%}", color, lines, PopupTime, color);
-        if (s.MatchId is { Length: > 0 } id && id != "0")
+        // ваш герой против их героев: самые заметные матчапы
+        var matchups = snap.Enemies.Select(e => (Enemy: e, Adv: _draftData.MatchupAdvantage(s.HeroId, e, mode)))
+            .Where(m => m.Adv is double a && Math.Abs(a) >= 0.5).OrderByDescending(m => Math.Abs(m.Adv!.Value)).Take(3)
+            .Select(m => $"{_draftData.Heroes.GetValueOrDefault(m.Enemy, $"#{m.Enemy}")} {m.Adv:+0.0;-0.0}").ToList();
+        if (matchups.Count > 0)
+            lines.Add(($"{_draftData.Heroes.GetValueOrDefault(s.HeroId, "ваш герой")} против: {string.Join(", ", matchups)}", OverlayWindow.Gray));
+        lines.Add(("разбор и Dotabuff героя — «Аналитика» (трей)", OverlayWindow.Gray));
+        _overlay.ShowPopup((chance.KnownEnemies == 0 ? "Ваш драфт" : "Шанс победы") + $" ≈ {chance.P:0%}", color, lines, PopupTime, color);
+        // в журнал — только когда враг известен: иначе это не прогноз матча
+        if (chance.KnownEnemies >= 3 && s.MatchId is { Length: > 0 } id && id != "0")
             PredictionLog.Add(new Prediction(id, mode, chance.P, chance.KnownAllies, chance.KnownEnemies, DateTime.Now));
+    }
+
+    // Разбор матча в «Аналитике»: открытое окно обновляется без перехвата фокуса, закрытое открывается свёрнутым.
+    void ShowMatchAnalytics(MatchInfo info)
+    {
+        if (_analytics == null)
+        {
+            _analytics = new AnalyticsWindow(_draftData, _browser?.WebEnvironment) { ShowActivated = false, WindowState = System.Windows.WindowState.Minimized };
+            _analytics.Closed += (_, _) => _analytics = null;
+            _analytics.Show();
+        }
+        _analytics.ShowMatch(info);
     }
 
     // Часы матча идут в GSI (map.clock_time) — те же, что на экране: до горна меньше нуля, на паузе стоят.
@@ -224,14 +252,21 @@ sealed class AppController
         }
         // режим не определён — только общие для всех профилей тайминги, а не первый профиль
         var profile = _reminders.Pick(_mode.Mode);
-        var due = _reminderEngine.Update(s.MatchId, clock, profile ?? _reminders.CommonRules()).ToList();
+        // общие тайминги — только пока режим не ясен; ясен, но профиля под него нет — молчим
+        var rules = profile ?? (_mode.Mode == null ? _reminders.CommonRules() : null);
+        if (rules == null)
+        {
+            _reminderEngine.Reset();
+            return;
+        }
+        var due = _reminderEngine.Update(s.MatchId, clock, rules).ToList();
         if (due.Count == 0) return;
         string When(int at) => (at > clock ? $"через {ReminderTime.Format(at - clock)}" : "сейчас") + $" · в {ReminderTime.Format(at)}";
         // у каждого напоминания свой цвет: одно — заголовок и полоса его цвета, несколько — каждая строка своим
         var lines = due.Count == 1
             ? new List<(string, Color)> { (When(due[0].At), OverlayWindow.White) }
             : due.Select(d => ($"{d.Rule.Text} — {When(d.At)}", d.Rule.DisplayColor())).ToList();
-        lines.Add((profile != null ? $"профиль «{profile.Name}»" : "режим не определён — только общие тайминги", OverlayWindow.Gray));
+        lines.Add((profile != null ? $"профиль «{profile.Name}»" : "режим ещё не определён — только общие тайминги", OverlayWindow.Gray));
         var color = due.Count == 1 ? due[0].Rule.DisplayColor() : OverlayWindow.White;
         _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", color, lines, TimeSpan.FromSeconds(8),
             due.Count == 1 ? color : due[0].Rule.DisplayColor());
@@ -515,6 +550,7 @@ sealed class AppController
             _analytics.Closed += (_, _) => _analytics = null;
             _analytics.Show();
         }
+        if (_analytics.WindowState == System.Windows.WindowState.Minimized) _analytics.WindowState = System.Windows.WindowState.Normal;
         _analytics.Activate();
         if (url != null) _analytics.Navigate(url);
     }
@@ -651,13 +687,7 @@ sealed class AppController
             lines, PopupTime);
     }
 
-    static string Plural(int n, string one, string few, string many)
-    {
-        int m10 = n % 10, m100 = n % 100;
-        if (m10 == 1 && m100 != 11) return one;
-        if (m10 is >= 2 and <= 4 && m100 is < 12 or > 14) return few;
-        return many;
-    }
+    static string Plural(int n, string one, string few, string many) => Words.Plural(n, one, few, many);
 
     void ShowLatest()
     {
@@ -725,6 +755,8 @@ sealed class AppController
         var autostart = new Forms.ToolStripMenuItem("Запускать с Windows") { Checked = Setup.AutostartEnabled, CheckOnClick = true };
         autostart.CheckedChanged += (_, _) => Setup.AutostartEnabled = autostart.Checked;
         menu.Items.Add(autostart);
+        _updateItem = new Forms.ToolStripMenuItem($"Обновить DotaReports (у вас {Updater.Current})", null, async (_, _) => await UpdateAsync(manual: true));
+        menu.Items.Add(_updateItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("Выход", null, (_, _) => Exit());
 
@@ -736,6 +768,58 @@ sealed class AppController
             Visible = true,
         };
         _tray.DoubleClick += (_, _) => ShowLatest();
+    }
+
+    // Кнопка «Обновить» в трее: последний релиз с GitHub, файлы заменяет скрипт после выхода, программа запускается снова.
+    // При запуске (manual: false) — только подсказка, если вышла новая версия.
+    async Task UpdateAsync(bool manual)
+    {
+        Version? latest = null;
+        try
+        {
+            latest = await Updater.LatestAsync();
+        }
+        catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            Log.Write("Проверка обновления: " + ex.Message);
+        }
+        var current = Updater.Current;
+        if (latest != null && latest > current) _updateItem.Text = $"Обновить до {latest} (у вас {current})";
+        if (!manual)
+        {
+            if (latest != null && latest > current)
+                _tray.ShowBalloonTip(10000, "Dota Reports", $"Вышла версия {latest} — значок в трее → «Обновить до {latest}».", Forms.ToolTipIcon.Info);
+            return;
+        }
+        if (latest == null)
+        {
+            _tray.ShowBalloonTip(6000, "Dota Reports", "GitHub не ответил — попробуйте обновиться позже.", Forms.ToolTipIcon.Warning);
+            return;
+        }
+        if (latest <= current)
+        {
+            _tray.ShowBalloonTip(5000, "Dota Reports", $"У вас последняя версия {current}.", Forms.ToolTipIcon.Info);
+            return;
+        }
+        if (System.Windows.MessageBox.Show($"Установить версию {latest}? Программа закроется и запустится снова; вход в Steam, история и настройки сохранятся.",
+                "Dota Reports — обновление", System.Windows.MessageBoxButton.YesNo) != System.Windows.MessageBoxResult.Yes)
+            return;
+        var text = _updateItem.Text;
+        _updateItem.Enabled = false;
+        _updateItem.Text = "Скачиваю обновление…";
+        try
+        {
+            await Updater.PrepareAsync();
+            Exit(); // скрипт ждёт выхода, копирует файлы и запускает новую версию
+        }
+        catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or TaskCanceledException or IOException or UnauthorizedAccessException
+                                       or InvalidDataException or System.ComponentModel.Win32Exception)
+        {
+            Log.Write("Обновление не удалось: " + ex);
+            _tray.ShowBalloonTip(8000, "Dota Reports — обновление", "Не удалось: " + ex.Message, Forms.ToolTipIcon.Error);
+            _updateItem.Enabled = true;
+            _updateItem.Text = text;
+        }
     }
 
     void SetTrayText(string status)
