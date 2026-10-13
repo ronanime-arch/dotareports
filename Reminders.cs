@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Media;
 
 namespace DotaReports;
 
@@ -22,6 +23,10 @@ sealed class ReminderRule
     public string Every { get; set; } = "";
     public string Until { get; set; } = "";
     public int Lead { get; set; } = 20;
+    /// <summary>Цвет в окне поверх игры: ключ из <see cref="ReminderColors"/>; пусто — по тексту.</summary>
+    public string Color { get; set; } = "";
+
+    public System.Windows.Media.Color DisplayColor() => ReminderColors.Of(string.IsNullOrEmpty(Color) ? ReminderColors.Guess(Text) : Color);
 
     /// <summary>Моменты событий (секунды часов матча), у которых время показа попадает в (from, to].</summary>
     public IEnumerable<int> DueBetween(int from, int to)
@@ -55,6 +60,35 @@ sealed class ReminderProfile
     public ReminderProfile Copy() => new() { Name = Name, Mode = Mode, Rules = new(Rules.Select(r => r.Copy())) };
 }
 
+/// <summary>Цвет напоминания: ключ в reminders.json, подпись в окне настроек.</summary>
+sealed record ReminderColor(string Key, string Label, Color Value);
+
+static class ReminderColors
+{
+    public static readonly ReminderColor[] All =
+    {
+        new("green", "зелёный", Color.FromRgb(0x7C, 0xD9, 0x92)),
+        new("blue", "синий", Color.FromRgb(0x4F, 0xA3, 0xFF)),
+        new("yellow", "жёлтый", Color.FromRgb(0xFF, 0xD3, 0x4D)),
+        new("purple", "фиолетовый", Color.FromRgb(0xB5, 0x7B, 0xFF)),
+        new("red", "красный", Color.FromRgb(0xFF, 0x6B, 0x57)),
+        new("white", "белый", Color.FromRgb(0xF2, 0xF2, 0xF2)),
+    };
+
+    public static Color Of(string? key) => (All.FirstOrDefault(c => c.Key == key) ?? All[0]).Value;
+
+    /// <summary>Цвет по тексту — для правил из старого reminders.json: лотосы синие, баунти жёлтые, мудрость фиолетовая, катапульта красная, остальное зелёное.</summary>
+    public static string Guess(string? text)
+    {
+        var t = (text ?? "").ToLowerInvariant();
+        if (t.Contains("лотос")) return "blue";
+        if (t.Contains("баунти") || t.Contains("золот")) return "yellow";
+        if (t.Contains("мудрост") || t.Contains("опыт")) return "purple";
+        if (t.Contains("катапульт")) return "red";
+        return "green";
+    }
+}
+
 static class ReminderTime
 {
     /// <summary>«7:00», «0:30», «90» (секунды); пусто — 0.</summary>
@@ -84,11 +118,26 @@ sealed class ReminderSettings
     public string Active { get; set; } = Auto;
     public List<ReminderProfile> Profiles { get; set; } = new();
 
-    /// <summary>Профиль для матча: выбранный вручную или по режиму; режим не распознан — первый профиль.</summary>
+    /// <summary>
+    /// Профиль для матча: выбранный вручную или по режиму. Режим не определён (или под него нет профиля) — null:
+    /// тогда только <see cref="CommonRules"/>, а не первый профиль, — иначе в Турбо всплывали тайминги обычной игры.
+    /// </summary>
     public ReminderProfile? Pick(string? mode)
     {
         if (Active != Auto && Profiles.FirstOrDefault(p => p.Name == Active) is { } chosen) return chosen;
-        return Profiles.FirstOrDefault(p => mode != null && p.Mode == mode) ?? Profiles.FirstOrDefault();
+        return mode == null ? null : Profiles.FirstOrDefault(p => p.Mode == mode);
+    }
+
+    /// <summary>
+    /// Правила, одинаковые во всех профилях с режимом: руны, мудрость, катапульта. У Торментора и лотосов в Турбо
+    /// свои тайминги — пока режим не ясен, по ним лучше промолчать, чем напомнить не вовремя.
+    /// </summary>
+    public ReminderProfile CommonRules()
+    {
+        var auto = Profiles.Where(p => !string.IsNullOrEmpty(p.Mode)).ToList();
+        var rules = auto.Count == 0 ? new List<ReminderRule>()
+            : auto[0].Rules.Where(r => r.Enabled && auto.All(p => p.Rules.Any(o => o.Enabled && o.Text == r.Text && o.At == r.At && o.Every == r.Every && o.Until == r.Until))).ToList();
+        return new ReminderProfile { Name = "общие тайминги", Rules = new(rules) };
     }
 
     public ReminderSettings Copy() => new() { Enabled = Enabled, Sound = Sound, Active = Active, Profiles = Profiles.Select(p => p.Copy()).ToList() };
@@ -98,7 +147,12 @@ sealed class ReminderSettings
         try
         {
             if (File.Exists(Paths.Reminders) && JsonSerializer.Deserialize<ReminderSettings>(File.ReadAllText(Paths.Reminders)) is { Profiles.Count: > 0 } s)
+            {
+                // правила из файла до появления цветов — цвет по тексту
+                foreach (var r in s.Profiles.SelectMany(p => p.Rules).Where(r => string.IsNullOrEmpty(r.Color)))
+                    r.Color = ReminderColors.Guess(r.Text);
                 return s;
+            }
         }
         catch (Exception ex) when (ex is IOException or JsonException)
         {
@@ -117,6 +171,7 @@ sealed class ReminderSettings
         }));
     }
 
+    // Цвета: вода и руна силы — зелёные, баунти — жёлтые, мудрость — фиолетовая, катапульта — красная, лотосы — синие.
     // Тайминги патча 7.41: руны воды 2:00 и 4:00, руна силы с 6:00 каждые 2:00, баунти каждые 4:00,
     // святилища мудрости (бывшие руны опыта) с 7:00 каждые 7:00, катапульта каждые 5:00, Торментор с 15:00 (в Турбо 7:30), лотосы каждые 3:00 (в Турбо 1:30).
     public static ReminderSettings Defaults() => new()
@@ -128,13 +183,13 @@ sealed class ReminderSettings
                 Name = "Обычная игра", Mode = "ALL_PICK",
                 Rules = new()
                 {
-                    new() { Text = "Руна воды — река", At = "2:00", Every = "2:00", Until = "4:00", Lead = 20 },
-                    new() { Text = "Баунти-руны", At = "4:00", Every = "4:00", Lead = 20 },
-                    new() { Text = "Активная руна — река у мида", At = "6:00", Every = "2:00", Lead = 20 },
-                    new() { Text = "Святилище мудрости — драться за опыт", At = "7:00", Every = "7:00", Lead = 30 },
-                    new() { Text = "Катапульта выходит на линию", At = "5:00", Every = "5:00", Lead = 10 },
-                    new() { Text = "Торментор — собирайтесь", At = "15:00", Lead = 60 },
-                    new() { Enabled = false, Text = "Лотосы в пруду", At = "3:00", Every = "3:00", Lead = 15 },
+                    new() { Text = "Руна воды — река", Color = "green", At = "2:00", Every = "2:00", Until = "4:00", Lead = 20 },
+                    new() { Text = "Баунти-руны", Color = "yellow", At = "4:00", Every = "4:00", Lead = 20 },
+                    new() { Text = "Активная руна — река у мида", Color = "green", At = "6:00", Every = "2:00", Lead = 20 },
+                    new() { Text = "Святилище мудрости — драться за опыт", Color = "purple", At = "7:00", Every = "7:00", Lead = 30 },
+                    new() { Text = "Катапульта выходит на линию", Color = "red", At = "5:00", Every = "5:00", Lead = 10 },
+                    new() { Text = "Торментор — собирайтесь", Color = "green", At = "15:00", Lead = 60 },
+                    new() { Enabled = false, Text = "Лотосы в пруду", Color = "blue", At = "3:00", Every = "3:00", Lead = 15 },
                 },
             },
             new ReminderProfile
@@ -142,13 +197,13 @@ sealed class ReminderSettings
                 Name = "Турбо", Mode = "TURBO",
                 Rules = new()
                 {
-                    new() { Text = "Руна воды — река", At = "2:00", Every = "2:00", Until = "4:00", Lead = 20 },
-                    new() { Text = "Баунти-руны", At = "4:00", Every = "4:00", Lead = 20 },
-                    new() { Text = "Активная руна — река у мида", At = "6:00", Every = "2:00", Lead = 20 },
-                    new() { Text = "Святилище мудрости — драться за опыт", At = "7:00", Every = "7:00", Lead = 30 },
-                    new() { Text = "Катапульта выходит на линию", At = "5:00", Every = "5:00", Lead = 10 },
-                    new() { Text = "Торментор — собирайтесь", At = "7:30", Lead = 45 },
-                    new() { Enabled = false, Text = "Лотосы в пруду", At = "1:30", Every = "1:30", Lead = 15 },
+                    new() { Text = "Руна воды — река", Color = "green", At = "2:00", Every = "2:00", Until = "4:00", Lead = 20 },
+                    new() { Text = "Баунти-руны", Color = "yellow", At = "4:00", Every = "4:00", Lead = 20 },
+                    new() { Text = "Активная руна — река у мида", Color = "green", At = "6:00", Every = "2:00", Lead = 20 },
+                    new() { Text = "Святилище мудрости — драться за опыт", Color = "purple", At = "7:00", Every = "7:00", Lead = 30 },
+                    new() { Text = "Катапульта выходит на линию", Color = "red", At = "5:00", Every = "5:00", Lead = 10 },
+                    new() { Text = "Торментор — собирайтесь", Color = "green", At = "7:30", Lead = 45 },
+                    new() { Enabled = false, Text = "Лотосы в пруду", Color = "blue", At = "1:30", Every = "1:30", Lead = 15 },
                 },
             },
         },
@@ -210,7 +265,7 @@ sealed class ReminderWindow : Window
         _edit = current.Copy();
         _profiles = new ObservableCollection<ReminderProfile>(_edit.Profiles);
         Title = "Dota Reports — напоминания";
-        Width = 760;
+        Width = 860;
         SizeToContent = SizeToContent.Height;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         ResizeMode = ResizeMode.CanMinimize;
@@ -240,6 +295,15 @@ sealed class ReminderWindow : Window
         _grid.Columns.Add(new DataGridTextColumn { Header = "Повтор", Binding = Bind(nameof(ReminderRule.Every)), Width = 70 });
         _grid.Columns.Add(new DataGridTextColumn { Header = "До", Binding = Bind(nameof(ReminderRule.Until)), Width = 70 });
         _grid.Columns.Add(new DataGridTextColumn { Header = "За сколько, с", Binding = Bind(nameof(ReminderRule.Lead)), Width = 90 });
+        _grid.Columns.Add(new DataGridComboBoxColumn
+        {
+            Header = "Цвет",
+            ItemsSource = ReminderColors.All,
+            DisplayMemberPath = nameof(ReminderColor.Label),
+            SelectedValuePath = nameof(ReminderColor.Key),
+            SelectedValueBinding = Bind(nameof(ReminderRule.Color)),
+            Width = 100,
+        });
 
         var panel = new StackPanel { Margin = new Thickness(14) };
         panel.Children.Add(Row(enabled, sound));
@@ -258,7 +322,8 @@ sealed class ReminderWindow : Window
             Foreground = System.Windows.Media.Brushes.DimGray,
             Text = "Время — по часам матча, «м:сс». «Повтор» пусто — один раз; «До» пусто — до конца игры. " +
                    "«За сколько» — во сколько секунд до события показать напоминание. " +
-                   "«Авто» выбирает профиль по режиму, распознанному в пике (Турбо / All Pick); если программа запущена уже в игре — первый профиль.",
+                   "«Авто» выбирает профиль по режиму: с экрана пика или по доходу в первую минуту (в Турбо он вдвое выше). " +
+                   "Пока режим не определён — только тайминги, одинаковые во всех профилях. Чужие игры, повторы и кастомки — без напоминаний.",
         });
         var buttons = Row(Button("Добавить строку", AddRule), Button("Удалить строку", RemoveRule), Button("Вернуть стандартные", ResetDefaults));
         var save = new Button { Content = "Сохранить", Padding = new Thickness(16, 2, 16, 2), IsDefault = true, Margin = new Thickness(0, 0, 8, 0) };
@@ -300,7 +365,7 @@ sealed class ReminderWindow : Window
     {
         var active = _edit.Active;
         _activeBox.Items.Clear();
-        _activeBox.Items.Add(new ComboBoxItem { Content = "Авто — по режиму из пика", Tag = ReminderSettings.Auto });
+        _activeBox.Items.Add(new ComboBoxItem { Content = "Авто — по режиму матча", Tag = ReminderSettings.Auto });
         foreach (var p in _profiles) _activeBox.Items.Add(new ComboBoxItem { Content = p.Name, Tag = p.Name });
         _activeBox.SelectedItem = _activeBox.Items.Cast<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == active) ?? _activeBox.Items[0];
     }
@@ -364,7 +429,7 @@ sealed class ReminderWindow : Window
     void AddRule()
     {
         if (_profileBox.SelectedItem is not ReminderProfile p) return;
-        var rule = new ReminderRule { Text = "Новое напоминание", At = "10:00" };
+        var rule = new ReminderRule { Text = "Новое напоминание", At = "10:00", Color = "green" };
         p.Rules.Add(rule);
         _grid.SelectedItem = rule;
         _grid.ScrollIntoView(rule);

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -24,8 +23,12 @@ sealed class BehaviorHistoryWindow : Window
     /// <summary>Строка таблицы матчей.</summary>
     sealed record Row(ulong MatchId, string Date, string Hero, string Mode, string Result, string Kda, string Lp);
 
-    public BehaviorHistoryWindow(ConductHistory history, DraftData data)
+    readonly Action<string> _openUrl;
+
+    /// <param name="openUrl">Открыть страницу матча (Dotabuff в окне «Аналитика»).</param>
+    public BehaviorHistoryWindow(ConductHistory history, DraftData data, Action<string> openUrl)
     {
+        _openUrl = openUrl;
         _history = history;
         _data = data;
         Title = "Dota Reports — история поведения";
@@ -49,7 +52,7 @@ sealed class BehaviorHistoryWindow : Window
         _list.Children.Add(new TextBlock
         {
             Text = "Сводка Valve выходит раз в 15 матчей. Valve пишет, в скольких матчах были жалобы, но не в каких и не от кого. " +
-                   "Двойной клик по матчу — открыть его на OpenDota. «≈» — окно матчей собрано примерно.",
+                   "Двойной клик по матчу — открыть его на Dotabuff. «≈» — окно матчей собрано примерно.",
             TextWrapping = TextWrapping.Wrap,
             Foreground = Brushes.Gray,
             Margin = new Thickness(0, 0, 0, 8),
@@ -128,9 +131,9 @@ sealed class BehaviorHistoryWindow : Window
     static DataGridTextColumn Column(string header, string path, DataGridLength width) =>
         new() { Header = header, Binding = new Binding(path), Width = width };
 
-    static void OpenMatch(object sender, MouseButtonEventArgs e)
+    void OpenMatch(object sender, MouseButtonEventArgs e)
     {
         if (sender is DataGridRow { Item: Row { MatchId: > 0 } row })
-            Process.Start(new ProcessStartInfo($"https://www.opendota.com/matches/{row.MatchId}") { UseShellExecute = true });
+            _openUrl(Dotabuff.Match(row.MatchId));
     }
 }

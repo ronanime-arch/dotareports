@@ -19,6 +19,7 @@ static class Paths
     public static string Heroes => Path.Combine(Root, "heroes.json");
     public static string Matchups => Path.Combine(Root, "matchups.json");
     public static string MatchupsBrackets => Path.Combine(Root, "matchups_brackets.txt");
+    public static string MatchupsTurbo => Path.Combine(Root, "matchups_turbo.json");
     public static string Pool => Path.Combine(Root, "pool.json");
     public static string Recent => Path.Combine(Root, "recent.json");
     public static string ModeStats => Path.Combine(Root, "mode_stats.json");
@@ -32,6 +33,8 @@ static class Paths
     public static string SeenOutgoing => Path.Combine(Root, "seen_outgoing.json");
     public static string Reminders => Path.Combine(Root, "reminders.json");
     public static string ConductHistory => Path.Combine(Root, "conduct_history.json");
+    public static string MatchMode => Path.Combine(Root, "match_mode.json");
+    public static string Predictions => Path.Combine(Root, "predictions.json");
 }
 
 static class Log

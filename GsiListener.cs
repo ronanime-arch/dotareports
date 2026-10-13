@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -9,8 +10,18 @@ using System.Threading.Tasks;
 
 namespace DotaReports;
 
-/// <summary>Что важно из сообщения GSI: фаза игры, ваша сторона, ваш герой (0 — ещё не выбран), матч, часы матча в секундах (до горна — меньше нуля).</summary>
-sealed record GsiState(string GameState, string? Team, int HeroId, string? MatchId, int TeamSlot, int? ClockTime = null);
+/// <summary>
+/// Что важно из сообщения GSI: фаза игры, ваша сторона, ваш герой (0 — ещё не выбран), матч, часы матча в секундах
+/// (до горна — меньше нуля); зритель (повтор, DotaTV — у player вместо полей игрока команды team2/team3),
+/// кастомная игра (map.customgamename), пассивный доход с начала матча (player.gold_from_income).
+/// </summary>
+sealed record GsiState(string GameState, string? Team, int HeroId, string? MatchId, int TeamSlot, int? ClockTime = null,
+    bool Spectating = false, string? CustomGame = null, int? GoldFromIncome = null)
+{
+    /// <summary>Вы играете сами: есть герой и сторона, не смотрите чужую игру и не в кастомке.</summary>
+    public bool OwnGame => HeroId > 0 && !Spectating && string.IsNullOrEmpty(CustomGame) &&
+        (string.Equals(Team, "radiant", StringComparison.OrdinalIgnoreCase) || string.Equals(Team, "dire", StringComparison.OrdinalIgnoreCase));
+}
 
 /// <summary>
 /// Приём Game State Integration: Dota сама шлёт POST с JSON на 127.0.0.1:38461
@@ -22,12 +33,16 @@ sealed class GsiListener
     public const int Port = 38461;
     const int MaxSamples = 400;
     const int MaxPerLateState = 5;
-    static readonly HashSet<string> SkipStates = new() { "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "DOTA_GAMERULES_STATE_POST_GAME" };
+    const string InProgress = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS";
+    static readonly HashSet<string> SkipStates = new() { "DOTA_GAMERULES_STATE_POST_GAME" };
     static readonly HashSet<string> LateStates = new() { "DOTA_GAMERULES_STATE_PRE_GAME", "" };
+    // из идущего матча — по образцу на отметках часов (сверить поля дохода и режима), не каждое сообщение
+    static readonly int[] InGameMarks = { 0, 30, 60, 120, 300, 600 };
 
     readonly TcpListener _listener = new(IPAddress.Loopback, Port);
     readonly object _lock = new();
     readonly Dictionary<string, int> _perState = new();
+    readonly HashSet<string> _inGameSaved = new();
     string? _lastState;
     string? _lastBody;
     int _saved;
@@ -112,7 +127,10 @@ sealed class GsiListener
             int teamSlot = hasPlayer && pl.TryGetProperty("team_slot", out var ts) && ts.ValueKind == JsonValueKind.Number ? ts.GetInt32() : -1;
             int hero = root.TryGetProperty("hero", out var h) && h.TryGetProperty("id", out var hid) && hid.ValueKind == JsonValueKind.Number ? hid.GetInt32() : 0;
             int? clock = hasMap && map.TryGetProperty("clock_time", out var ct) && ct.ValueKind == JsonValueKind.Number ? ct.GetInt32() : null;
-            parsed = new GsiState(state, team, hero, matchId, teamSlot, clock);
+            bool spectating = hasPlayer && (pl.TryGetProperty("team2", out _) || pl.TryGetProperty("team3", out _));
+            string? custom = hasMap && map.TryGetProperty("customgamename", out var cg) && cg.ValueKind == JsonValueKind.String ? cg.GetString() : null;
+            int? income = hasPlayer && pl.TryGetProperty("gold_from_income", out var gi) && gi.ValueKind == JsonValueKind.Number ? gi.GetInt32() : null;
+            parsed = new GsiState(state, team, hero, matchId, teamSlot, clock, spectating, custom, income);
         }
         catch (JsonException)
         {
@@ -129,6 +147,12 @@ sealed class GsiListener
                 _lastState = state;
             }
             if (SkipStates.Contains(state) || body == _lastBody || _saved >= MaxSamples) return;
+            if (state == InProgress)
+            {
+                // отметка часов, которую матч уже прошёл и которой ещё нет в образцах
+                int? mark = parsed.ClockTime is int c ? InGameMarks.Where(m => m <= c).Select(m => (int?)m).LastOrDefault() : null;
+                if (mark == null || !_inGameSaved.Add($"{parsed.MatchId}:{mark}")) return;
+            }
             _perState.TryGetValue(state, out var count);
             if (LateStates.Contains(state) && count >= MaxPerLateState) return;
             _perState[state] = count + 1;
