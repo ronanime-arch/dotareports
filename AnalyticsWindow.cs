@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -130,7 +131,7 @@ sealed class AnalyticsWindow : Window
         _trends.Content = columns;
     }
 
-    void Section(StackPanel panel, string title, System.Collections.Generic.IEnumerable<(int Hero, double Now, double Before, long N)> rows)
+    void Section(StackPanel panel, string title, IEnumerable<(int Hero, double Now, double Before, long N)> rows)
     {
         panel.Children.Add(new TextBlock { Text = title, FontSize = 14, Foreground = Brushes.Gray, Margin = new Thickness(0, 10, 0, 4) });
         foreach (var (hero, now, before, n) in rows)
