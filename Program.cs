@@ -135,7 +135,10 @@ static class Program
             data.SetProfile(prof);
             var card = new TurboCard();
             card.Render(data, new PickSnapshot(new HashSet<int> { 1, 14 }, new List<int> { 35, 34 }, new List<int> { 28 }, new List<int> { 49 }, 1, 3, "ALL_PICK", 3), "тест");
-            File.WriteAllText(Path.Combine(Paths.Root, "card_test.txt"), card.DumpText());
+            var text = card.DumpText();
+            // время стратегии: все 10 героев, вы на Juggernaut — прогноз и состав вместо подсказок
+            card.Render(data, new PickSnapshot(new HashSet<int> { 1, 14 }, new List<int> { 35, 34, 26, 44, 5 }, new List<int> { 28, 49, 86, 74 }, new List<int>(), 1, 9, "ALL_PICK", 1), "тест 5×5", ownHero: 8);
+            File.WriteAllText(Path.Combine(Paths.Root, "card_test.txt"), text + Environment.NewLine + "=====" + Environment.NewLine + card.DumpText());
             return;
         }
         if (args.Length >= 2 && args[0] == "--slot-test")
@@ -156,18 +159,46 @@ static class Program
         }
         if (args.Length >= 1 && args[0] == "--reminder-test")
         {
-            // прогон часов матча с -1:30 до 40:00 по профилям из reminders.json: когда что покажется, в reminder_test.txt
+            // прогон часов матча с -1:30 до 40:00 по профилям из reminders.json и по общим правилам (режим не определён):
+            // когда что покажется и каким цветом, в reminder_test.txt
             var settings = ReminderSettings.Load();
             var lines = new List<string>();
-            foreach (var profile in settings.Profiles)
+            foreach (var profile in settings.Profiles.Append(settings.CommonRules()))
             {
-                lines.Add($"== {profile.Name} ({(profile.Mode.Length > 0 ? profile.Mode : "вручную")})");
+                lines.Add($"== {profile.Name} ({(!string.IsNullOrEmpty(profile.Mode) ? profile.Mode : "вручную / режим не определён")})");
                 var engine = new ReminderEngine();
                 for (int clock = -90; clock <= 40 * 60; clock++)
                     foreach (var (rule, at) in engine.Update("test", clock, profile))
-                        lines.Add($"{ReminderTime.Format(Math.Max(clock, 0))}  {rule.Text} (в {ReminderTime.Format(at)})");
+                        lines.Add($"{ReminderTime.Format(Math.Max(clock, 0))}  {rule.Text} (в {ReminderTime.Format(at)}) — {rule.DisplayColor()}");
             }
             File.WriteAllLines(Path.Combine(Paths.Root, "reminder_test.txt"), lines);
+            return;
+        }
+        if (args.Length >= 2 && args[0] == "--winprob-test")
+        {
+            // DotaReports.exe --winprob-test "джагер,крип,лион|снайпер,пудж" [ALL_PICK] — прогноз по драфту и кого брать, в winprob_test.txt
+            var data = new DraftData();
+            data.LoadAsync().GetAwaiter().GetResult();
+            var prof = new ProfileData();
+            prof.LoadCache(data.Heroes);
+            data.SetProfile(prof);
+            var sides = args[1].Split('|');
+            List<int> Ids(string list) => list.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => HeroSearch.Find(x, data.Heroes, 1).FirstOrDefault()).Where(id => id > 0).Distinct().ToList();
+            var allies = Ids(sides[0]);
+            var enemies = sides.Length > 1 ? Ids(sides[1]) : new List<int>();
+            var mode = args.Length >= 3 ? args[2].ToUpperInvariant() : "TURBO";
+            string Names(IEnumerable<int> ids) => string.Join(", ", ids.Select(id => data.Heroes.GetValueOrDefault(id, $"#{id}")));
+            var lines = new List<string> { $"режим {mode}; ваши: {Names(allies)}; их: {Names(enemies)}", "status: " + data.Status };
+            if (data.WinProbability(mode, allies, enemies, 0) is { } chance)
+                lines.Add($"шанс победы {chance.P:0.0%} (ваших {chance.KnownAllies}, их {chance.KnownEnemies}): {string.Join(" · ", chance.Parts)}");
+            else
+                lines.Add("шанс победы: нет данных Stratz");
+            lines.Add("в команде: " + string.Join(", ", data.Lacking(allies)));
+            foreach (var p in data.TurboPicks(mode, 0, new HashSet<int>(allies), enemies, allies).Where(p => !p.Rare).Take(10))
+                lines.Add($"{data.Heroes.GetValueOrDefault(p.HeroId)} {p.Winrate:0.0}% · враги {p.VsRevealed:+0.0;-0.0} · союзники {p.WithAllies:+0.0;-0.0} · " +
+                          $"состав {p.Composition:+0.0;-0.0} · риск {p.CounterRisk:+0.0;-0.0} · итог {p.Total:0.0} · ваша игра {data.PersonalBonus(p.HeroId, mode):+0.0;-0.0}");
+            File.WriteAllLines(Path.Combine(Paths.Root, "winprob_test.txt"), lines);
             return;
         }
         if (args.Length >= 2 && args[0] == "--draft-test")

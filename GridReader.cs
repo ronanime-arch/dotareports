@@ -110,8 +110,9 @@ sealed class GridReader
     public List<int> Enemies { get; } = new();
     /// <summary>Предвыбор союзников: полупрозрачный портрет в их слоте, герой ещё свободен.</summary>
     public List<int> Planned { get; } = new();
-    /// <summary>"TURBO", "ALL_PICK" или null, пока не распознан.</summary>
+    /// <summary>"TURBO", "ALL_PICK" или null, пока не распознан (или кадры противоречат друг другу).</summary>
     public string? Mode { get; private set; }
+    readonly Dictionary<string, int> _modeVotes = new();
     /// <summary>Ваша роль 1..5 по подписи под ником (All Pick), 0 — не видна.</summary>
     public int Position { get; private set; }
 
@@ -148,6 +149,7 @@ sealed class GridReader
         Array.Clear(_slotSure);
         _iconEnemies.Clear();
         Array.Clear(_slotHero);
+        _modeVotes.Clear();
         Mode = null;
         Position = 0;
     }
@@ -383,7 +385,12 @@ sealed class GridReader
             for (int y = 68; y < 86; y++)
                 if (f.Bright(x, y, 170)) { if (left < 0) left = x; right = x; break; }
         string? mode = left < 0 ? null : (right - left) switch { >= 66 and <= 80 => "ALL_PICK", >= 52 and <= 64 => "TURBO", _ => null };
-        if (mode != null && mode != Mode) { Mode = mode; changed = true; }
+        // режим — когда надпись прочитана одинаково хотя бы в 3 кадрах и в 80% прочтений: блик или подсказка поверх
+        // надписи не переключают режим, а противоречивые кадры оставляют его неизвестным
+        if (mode != null) _modeVotes[mode] = _modeVotes.GetValueOrDefault(mode) + 1;
+        var top = _modeVotes.OrderByDescending(kv => kv.Value).FirstOrDefault();
+        string? voted = top.Value >= 3 && top.Value >= 0.8 * _modeVotes.Values.Sum() ? top.Key : null;
+        if (voted != Mode) { Mode = voted; changed = true; }
 
         if (ownIndex >= 0 && _roleTemplates.Count > 0 && Mode == "ALL_PICK")
         {

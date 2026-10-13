@@ -43,14 +43,16 @@ sealed class AppController
     (int Percent, DateTime At)? _confidence = ConfidenceReader.LoadLast();
     bool _confBusy;
     string _gameState = "";
-    bool _picking;
+    bool _picking;   // пик и время стратегии: карточка видна, кадры снимаются
+    int _ownHero;    // ваш герой в этом пике (GSI), 0 — ещё не выбран
+    PickSnapshot? _lastSnap;
     DraftWindow _draft = null!;
     // напоминания по часам матча: режим берём из пика (Турбо / All Pick)
     ReminderSettings _reminders = ReminderSettings.Load();
     readonly ReminderEngine _reminderEngine = new();
     OverlayWindow _reminderOverlay = null!;
     ReminderWindow? _reminderWindow;
-    string? _matchMode;
+    readonly MatchMode _mode = MatchMode.Load(); // режим матча: экран пика + доход из GSI
     // Dota присылает данные хоть раз с запуска программы; нет — после пары минут подсказать, почему
     DateTime? _lastGsi;
     bool _gsiHintShown;
@@ -62,6 +64,7 @@ sealed class AppController
     bool _profilePending; // профиль после матча не прочитан из-за занятости — дочитает поминутный опрос
     readonly ConductHistory _history = ConductHistory.Load();
     BehaviorHistoryWindow? _historyWindow;
+    AnalyticsWindow? _analytics;
 
     public AppController(System.Windows.Application app)
     {
@@ -88,8 +91,8 @@ sealed class AppController
         Setup.EnsureSeed();
         if (!File.Exists(Paths.StratzToken)) Setup.AskStratzToken();
         _overlay = new OverlayWindow();
-        _reminderOverlay = new OverlayWindow(top: 330);
-        _draft = new DraftWindow(_draftData);
+        _reminderOverlay = new OverlayWindow(top: 330, backgroundAlpha: 0x99); // полупрозрачное: игра под ним видна
+        _draft = new DraftWindow(_draftData) { OpenUrl = url => OpenAnalytics(url) };
         _turboCard = new TurboCard();
         _rating = new RatingWindow();
         // после матча история в GCPD обновляется не сразу — читаем профиль через минуту после выхода в меню
@@ -110,9 +113,9 @@ sealed class AppController
         _frameTimer.Tick += (_, _) => _watcher.Tick();
         _watcher.Changed += snap => _app.Dispatcher.BeginInvoke(() =>
         {
-            if (snap.Mode != null) _matchMode = snap.Mode;
-            if (_picking && _draftData.TurboReady)
-                _turboCard.Render(_draftData, snap, $"с экрана: банов {snap.Bans}, занято {snap.Taken}");
+            _mode.FromScreen(snap.Mode);
+            _lastSnap = snap;
+            RenderCard();
         });
         _gsi.Updated += s => _app.Dispatcher.BeginInvoke(() => OnGsi(s));
         CreateTray();
@@ -147,21 +150,29 @@ sealed class AppController
     {
         _lastGsi = DateTime.Now;
         _watcher.Update(s);
+        _mode.Update(s);
         if (s.GameState.Length == 0 && _gameState is "DOTA_GAMERULES_STATE_POST_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
             _profileTimer.Start();
         _gameState = s.GameState;
         CheckReminders(s);
-        bool picking = s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION";
+        // карточка — и в пике, и во время стратегии: тогда видны все герои, и прогноз по драфту полный
+        bool picking = s.GameState is "DOTA_GAMERULES_STATE_HERO_SELECTION" or "DOTA_GAMERULES_STATE_STRATEGY_TIME";
+        if (picking && s.HeroId != _ownHero)
+        {
+            _ownHero = s.HeroId;
+            if (_picking) RenderCard();
+        }
         if (picking == _picking) return;
         _picking = picking;
         if (picking)
         {
-            _matchMode = null; // новый матч — режим распознается заново
+            _mode.Begin(s.MatchId); // новый матч — режим распознается заново
             _watcher.Begin(s.MatchId is { Length: > 0 } m && m != "0" ? m : DateTime.Now.ToString("yyyyMMdd_HHmmss"));
             _frameTimer.Start();
+            _lastSnap = new PickSnapshot(new HashSet<int>(), new List<int>(), new List<int>(), new List<int>(), 0, 0, null, 0);
             if (_draftData.TurboReady)
             {
-                _turboCard.Render(_draftData, new PickSnapshot(new HashSet<int>(), new List<int>(), new List<int>(), new List<int>(), 0, 0, null, 0), _watcher.Status);
+                _turboCard.Render(_draftData, _lastSnap, _watcher.Status, _ownHero);
                 _turboCard.ShowCard();
             }
         }
@@ -170,26 +181,60 @@ sealed class AppController
             _frameTimer.Stop();
             _watcher.End();
             _turboCard.Hide();
+            if (s.GameState.Length > 0 && s.OwnGame) ShowPrediction(s); // матч пошёл дальше (не выход в меню из пика)
+            _ownHero = 0;
+            _lastSnap = null;
         }
+    }
+
+    void RenderCard()
+    {
+        if (_picking && _lastSnap != null && _draftData.TurboReady)
+            _turboCard.Render(_draftData, _lastSnap, $"с экрана: банов {_lastSnap.Bans}, занято {_lastSnap.Taken}", _ownHero);
+    }
+
+    // Начало матча: прогноз по итоговому драфту — окно и запись в журнал, чтобы потом сверить с исходом.
+    void ShowPrediction(GsiState s)
+    {
+        if (_lastSnap is not { } snap) return;
+        var mode = _mode.Mode ?? snap.Mode;
+        var team = snap.Allies.Concat(snap.Planned).Where(h => h != s.HeroId).ToList();
+        if (_draftData.WinProbability(mode, team, snap.Enemies, s.HeroId) is not { } chance || chance.KnownAllies + chance.KnownEnemies < 4) return;
+        var color = chance.P >= 0.52 ? OverlayWindow.Green : chance.P <= 0.48 ? OverlayWindow.Red : OverlayWindow.White;
+        var verdict = chance.P >= 0.56 ? "драфт в вашу пользу" : chance.P <= 0.44 ? "драфт за врагом — играйте аккуратнее" : "драфт примерно равный";
+        var lines = new List<(string, Color)>
+        {
+            (verdict, OverlayWindow.White),
+            ($"известно: ваших {chance.KnownAllies}, их {chance.KnownEnemies}" + (chance.Parts.Count > 0 ? " · " + string.Join(" · ", chance.Parts) : ""), OverlayWindow.Gray),
+        };
+        _overlay.ShowPopup($"Шанс победы ≈ {chance.P:0%}", color, lines, PopupTime, color);
+        if (s.MatchId is { Length: > 0 } id && id != "0")
+            PredictionLog.Add(new Prediction(id, mode, chance.P, chance.KnownAllies, chance.KnownEnemies, DateTime.Now));
     }
 
     // Часы матча идут в GSI (map.clock_time) — те же, что на экране: до горна меньше нуля, на паузе стоят.
     void CheckReminders(GsiState s)
     {
         bool inGame = s.GameState is "DOTA_GAMERULES_STATE_PRE_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS";
-        if (!inGame || s.ClockTime is not int clock || !_reminders.Enabled || _reminders.Pick(_matchMode) is not { } profile)
+        // только своя игра: не просмотр чужой (DotaTV, повтор), не кастомка, герой выбран
+        if (!inGame || !s.OwnGame || s.ClockTime is not int clock || !_reminders.Enabled)
         {
             _reminderEngine.Reset();
             return;
         }
-        var due = _reminderEngine.Update(s.MatchId, clock, profile).ToList();
+        // режим не определён — только общие для всех профилей тайминги, а не первый профиль
+        var profile = _reminders.Pick(_mode.Mode);
+        var due = _reminderEngine.Update(s.MatchId, clock, profile ?? _reminders.CommonRules()).ToList();
         if (due.Count == 0) return;
         string When(int at) => (at > clock ? $"через {ReminderTime.Format(at - clock)}" : "сейчас") + $" · в {ReminderTime.Format(at)}";
+        // у каждого напоминания свой цвет: одно — заголовок и полоса его цвета, несколько — каждая строка своим
         var lines = due.Count == 1
             ? new List<(string, Color)> { (When(due[0].At), OverlayWindow.White) }
-            : due.Select(d => ($"{d.Rule.Text} — {When(d.At)}", OverlayWindow.White)).ToList();
-        lines.Add(($"профиль «{profile.Name}»", OverlayWindow.Gray));
-        _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", OverlayWindow.Green, lines, TimeSpan.FromSeconds(8));
+            : due.Select(d => ($"{d.Rule.Text} — {When(d.At)}", d.Rule.DisplayColor())).ToList();
+        lines.Add((profile != null ? $"профиль «{profile.Name}»" : "режим не определён — только общие тайминги", OverlayWindow.Gray));
+        var color = due.Count == 1 ? due[0].Rule.DisplayColor() : OverlayWindow.White;
+        _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", color, lines, TimeSpan.FromSeconds(8),
+            due.Count == 1 ? color : due[0].Rule.DisplayColor());
         if (_reminders.Sound) System.Media.SystemSounds.Exclamation.Play();
     }
 
@@ -228,6 +273,7 @@ sealed class AppController
             Log.Write("Данные пика не загрузились: " + ex);
         }
         _draft.DataChanged();
+        RenderCard(); // данные догрузились посреди пика — карточка с ними
     }
 
     async Task OnPollAsync()
@@ -460,6 +506,19 @@ sealed class AppController
         }
     }
 
+    // Тренды меты и Dotabuff во встроенном браузере (тот же профиль WebView2, что и для GCPD)
+    void OpenAnalytics(string? url = null)
+    {
+        if (_analytics == null)
+        {
+            _analytics = new AnalyticsWindow(_draftData, _browser?.WebEnvironment);
+            _analytics.Closed += (_, _) => _analytics = null;
+            _analytics.Show();
+        }
+        _analytics.Activate();
+        if (url != null) _analytics.Navigate(url);
+    }
+
     void OpenHistory()
     {
         if (_historyWindow != null)
@@ -467,7 +526,7 @@ sealed class AppController
             _historyWindow.Activate();
             return;
         }
-        _historyWindow = new BehaviorHistoryWindow(_history, _draftData);
+        _historyWindow = new BehaviorHistoryWindow(_history, _draftData, url => OpenAnalytics(url));
         _historyWindow.Closed += (_, _) => _historyWindow = null;
         _historyWindow.Show();
         _historyWindow.Activate();
@@ -519,6 +578,10 @@ sealed class AppController
             bool noReports = negative == 0 && _profile.Account.ContainsKey("NegativeReportsRemaining");
             lines.Add(($"Можно отправить: жалоб {negative} · похвал {_profile.AccountInt("PositiveReportsRemaining")}", noReports ? OverlayWindow.Red : OverlayWindow.Gray));
         }
+        // насколько прогноз по драфту совпадал с исходом — по матчам, исход которых уже есть в истории GCPD
+        var (hits, predicted) = PredictionLog.Accuracy(_profile.Matches);
+        if (predicted >= 5)
+            lines.Add(($"Прогноз по драфту угадал {hits} из {predicted} ({100.0 * hits / predicted:0}%)", OverlayWindow.Gray));
         var updated = _profile.UpdatedAt is { } u ? $"данные Valve от {u:dd.MM HH:mm}" : "данные Valve ещё не загружены";
         _rating.Render("Рейтинг", lines, updated + " · Ctrl+Alt+S — скрыть", trend.Count >= 2 ? trend : null);
     }
@@ -651,6 +714,7 @@ sealed class AppController
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
         menu.Items.Add("Напоминания…", null, (_, _) => OpenReminders());
         menu.Items.Add("История поведения…", null, (_, _) => OpenHistory());
+        menu.Items.Add("Аналитика и Dotabuff…", null, (_, _) => OpenAnalytics());
         menu.Items.Add("Проверить сейчас", null, async (_, _) => await RefreshAsync(interactive: true, manual: true));
         menu.Items.Add("Папка с данными", null, (_, _) => Process.Start("explorer.exe", Paths.Root));
         menu.Items.Add("Токен Stratz…", null, async (_, _) =>
@@ -694,6 +758,7 @@ sealed class AppController
         _reminderOverlay.Close();
         _reminderWindow?.Close();
         _historyWindow?.Close();
+        _analytics?.Close();
         _draft.Close();
         _turboCard.Close();
         _rating.Close();

@@ -72,14 +72,26 @@ sealed class TurboCard : Window
 
     static readonly string[] RoleNames = { "любая", "лёгкая", "центр", "сложная", "поддержка", "полная поддержка" };
 
-    public void Render(DraftData data, PickSnapshot snap, string recognition)
+    /// <param name="ownHero">Ваш герой из GSI (0 — ещё не выбран): после пика карточка показывает прогноз и состав, а не что брать.</param>
+    public void Render(DraftData data, PickSnapshot snap, string recognition, int ownHero = 0)
     {
         bool allPick = snap.Mode == "ALL_PICK";
         string N(IEnumerable<int> ids) => string.Join(", ", ids.Select(id => data.Heroes.GetValueOrDefault(id, $"#{id}")));
+        // Предвыбор союзников считаем их героями: учитываем сочетание и не предлагаем.
+        var team = snap.Allies.Concat(snap.Planned).Where(h => h != ownHero).ToList();
 
         _panel.Children.Clear();
-        _panel.Children.Add(Text(allPick ? "Пик · All Pick" : "Пик · Турбо", 15, Fg, bold: true));
+        _panel.Children.Add(Text(snap.Mode switch { "ALL_PICK" => "Пик · All Pick", "TURBO" => "Пик · Турбо", _ => "Пик · режим не распознан" }, 15, Fg, bold: true));
         _panel.Children.Add(Text("роль: " + RoleNames[Math.Clamp(snap.Position, 0, 5)], 11, Dim));
+
+        // шанс победы по драфту — как только известно хотя бы двое героев
+        if (data.WinProbability(snap.Mode, team, snap.Enemies, ownHero) is { } chance && chance.KnownAllies + chance.KnownEnemies >= 2)
+        {
+            var color = chance.P >= 0.52 ? Good : chance.P <= 0.48 ? Bad : Fg;
+            _panel.Children.Add(Text($"Шанс победы ≈ {chance.P:0%}", 15, color, bold: true, top: 6));
+            _panel.Children.Add(Text($"по драфту: ваших {chance.KnownAllies}, их {chance.KnownEnemies}" +
+                (chance.Parts.Count > 0 ? " · " + string.Join(" · ", chance.Parts) : ""), 10, Dim));
+        }
 
         // в All Pick вражеские пики видны всем, в Турбо — только засвеченные при конфликте выбора
         if (snap.Enemies.Count > 0)
@@ -98,13 +110,25 @@ sealed class TurboCard : Window
             _panel.Children.Add(Text("Союзники: " + N(snap.Allies), 12, Good, top: 4));
         if (snap.Planned.Count > 0)
             _panel.Children.Add(Text("Собираются взять: " + N(snap.Planned), 12, Good, top: 2));
+        var lacking = data.Lacking(ownHero > 0 ? team.Append(ownHero).ToList() : team);
+        if (lacking.Count > 0)
+            _panel.Children.Add(Text("В команде: " + string.Join(", ", lacking), 11, Accent, top: 2));
 
-        // Предвыбор союзников считаем их героями: учитываем сочетание и не предлагаем.
-        var team = snap.Allies.Concat(snap.Planned).ToList();
+        if (ownHero > 0)
+        {
+            // вы уже выбрали — подсказывать, кого брать, поздно
+            _panel.Children.Add(Text("Ваш герой: " + data.Heroes.GetValueOrDefault(ownHero, $"#{ownHero}"), 15, Good, bold: true, top: 6));
+            double own = data.PersonalBonus(ownHero, snap.Mode);
+            if (data.Pool.TryGetValue(ownHero, out var pg) && pg.Games > 0)
+                _panel.Children.Add(Text($"у вас {pg.Games} игр, {100.0 * pg.Wins / pg.Games:0}% · ваша игра {own:+0.0;-0.0}", 11, Dim));
+            _panel.Children.Add(Text(recognition, 10, Dim, top: 6));
+            return;
+        }
+
         var blocked = new HashSet<int>(snap.Unavailable.Concat(snap.Planned));
         var picks = data.TurboPicks(snap.Mode, snap.Position, blocked, snap.Enemies, team);
         bool Playable(TurboPick p) => data.Pool.TryGetValue(p.HeroId, out var g) && g.Games >= MinPoolGames;
-        double Score(TurboPick p) => p.Total + data.PersonalBonus(p.HeroId);
+        double Score(TurboPick p) => p.Total + data.PersonalBonus(p.HeroId, snap.Mode);
 
         // Главное: кого брать. Из ваших героев (не «редко на роли») — с лучшим итогом, включая вашу игру на нём.
         var best = picks.Where(p => !p.Rare && Playable(p)).OrderByDescending(Score).FirstOrDefault()
@@ -116,11 +140,13 @@ sealed class TurboCard : Window
             var why = new List<string> { $"{best.Winrate:0.0}% " + (snap.Position > 0 ? "на роли" : allPick ? "в All Pick" : "в Турбо") };
             if (Math.Abs(best.VsRevealed) >= 0.05) why.Add($"против врагов {best.VsRevealed:+0.0;-0.0}");
             if (Math.Abs(best.WithAllies) >= 0.05) why.Add($"с союзниками {best.WithAllies:+0.0;-0.0}");
-            double personal = data.PersonalBonus(best.HeroId);
+            if (Math.Abs(best.Composition) >= 0.05) why.Add($"состав {best.Composition:+0.0;-0.0}");
+            if (Math.Abs(best.CounterRisk) >= 0.05) why.Add($"риск контрпика {best.CounterRisk:+0.0;-0.0}");
+            double personal = data.PersonalBonus(best.HeroId, snap.Mode);
             if (Math.Abs(personal) >= 0.05) why.Add($"ваша игра {personal:+0.0;-0.0}");
             _panel.Children.Add(Text(string.Join(" · ", why), 11, Dim));
             if (bestAny != null && bestAny.HeroId != best.HeroId && bestAny.Total - best.Total >= 1.5)
-                _panel.Children.Add(Text($"по статистике сильнее {data.Heroes.GetValueOrDefault(bestAny.HeroId)} ({bestAny.Winrate:0.0}% {bestAny.VsRevealed + bestAny.WithAllies:+0.0;-0.0}), но вы на нём почти не играете", 11, Dim, top: 2));
+                _panel.Children.Add(Text($"по статистике сильнее {data.Heroes.GetValueOrDefault(bestAny.HeroId)} ({bestAny.Winrate:0.0}% {bestAny.Bonus:+0.0;-0.0}), но вы на нём почти не играете", 11, Dim, top: 2));
         }
 
         var mine = picks.Where(Playable).OrderBy(p => p.Rare).ThenByDescending(Score).Take(PoolRows).ToList();
@@ -137,7 +163,8 @@ sealed class TurboCard : Window
             _panel.Children.Add(Row(data, p, null));
 
         _panel.Children.Add(Text(recognition, 10, Dim, top: 6));
-        var notes = data.TurboLabel + (snap.Enemies.Count + snap.Allies.Count > 0 ? "; поправка за союзников и врагов — по всем режимам" : "");
+        bool allModes = snap.Enemies.Count + snap.Allies.Count > 0 && (allPick || !data.TurboMatchups);
+        var notes = data.TurboLabel + (allModes ? "; поправка за союзников и врагов — по всем режимам" : "");
         _panel.Children.Add(Text(notes, 10, Dim, top: 2));
     }
 
@@ -147,8 +174,8 @@ sealed class TurboCard : Window
         var line = new TextBlock { FontSize = 13, Foreground = Fg, TextTrimming = TextTrimming.CharacterEllipsis };
         line.Inlines.Add(data.Heroes.GetValueOrDefault(p.HeroId, $"#{p.HeroId}") + "  ");
         line.Inlines.Add(new System.Windows.Documents.Run($"{p.Winrate:0.0}%") { Foreground = p.Winrate >= 50 ? Good : Bad, FontWeight = FontWeights.SemiBold });
-        // поправка за союзников и засвеченных врагов, в процентных пунктах
-        double bonus = p.VsRevealed + p.WithAllies;
+        // поправка за союзников, засвеченных врагов, состав и риск контрпика — в процентных пунктах
+        double bonus = p.Bonus;
         if (Math.Abs(bonus) >= 0.05)
             line.Inlines.Add(new System.Windows.Documents.Run($" {bonus:+0.0;-0.0}") { Foreground = bonus > 0 ? Good : Bad });
         sp.Children.Add(line);

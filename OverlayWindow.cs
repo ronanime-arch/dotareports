@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Threading;
 
 namespace DotaReports;
@@ -19,16 +20,22 @@ sealed class OverlayWindow : Window
     public static readonly Color Red = Color.FromRgb(0xFF, 0x6B, 0x57);
     public static readonly Color Green = Color.FromRgb(0x7C, 0xD9, 0x92);
 
+    static readonly Color DefaultAccent = Color.FromRgb(0xB0, 0x40, 0x30);
+
     readonly StackPanel _panel = new();
+    readonly Border _border;
+    readonly bool _shadow;
     readonly DispatcherTimer _autoHide = new();
     readonly DispatcherTimer _keepOnTop = new() { Interval = TimeSpan.FromSeconds(1) };
     readonly double _top;
     IntPtr _hwnd;
 
     /// <param name="top">Отступ от верха экрана — чтобы два таких окна не перекрывали друг друга.</param>
-    public OverlayWindow(double top = 120)
+    /// <param name="backgroundAlpha">Непрозрачность фона: меньше 255 — игра просвечивает, текст тогда с тенью.</param>
+    public OverlayWindow(double top = 120, byte backgroundAlpha = 0xFF)
     {
         _top = top;
+        _shadow = backgroundAlpha < 0xFF;
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
@@ -39,15 +46,16 @@ sealed class OverlayWindow : Window
         ResizeMode = ResizeMode.NoResize;
         SizeToContent = SizeToContent.Height;
         Width = 380;
-        Content = new Border
+        _border = new Border
         {
-            Background = new SolidColorBrush(Color.FromRgb(0x14, 0x18, 0x21)),
-            BorderBrush = new SolidColorBrush(Color.FromRgb(0xB0, 0x40, 0x30)),
+            Background = new SolidColorBrush(Color.FromArgb(backgroundAlpha, 0x14, 0x18, 0x21)),
+            BorderBrush = new SolidColorBrush(DefaultAccent),
             BorderThickness = new Thickness(0, 0, 0, 3),
             CornerRadius = new CornerRadius(6),
             Padding = new Thickness(16, 12, 16, 12),
             Child = _panel,
         };
+        Content = _border;
 
         SourceInitialized += (_, _) =>
         {
@@ -61,9 +69,10 @@ sealed class OverlayWindow : Window
         _keepOnTop.Tick += (_, _) => KeepOnTop();
     }
 
-    /// <summary>Первая строка — заголовок, остальные — текст. Окно само скроется через duration.</summary>
-    public void ShowPopup(string title, Color titleColor, IEnumerable<(string Text, Color Color)> lines, TimeSpan duration)
+    /// <summary>Первая строка — заголовок, остальные — текст. Окно само скроется через duration. accent — цвет полосы снизу.</summary>
+    public void ShowPopup(string title, Color titleColor, IEnumerable<(string Text, Color Color)> lines, TimeSpan duration, Color? accent = null)
     {
+        _border.BorderBrush = new SolidColorBrush(accent ?? DefaultAccent);
         _panel.Children.Clear();
         _panel.Children.Add(Line(title, 17, titleColor, bold: true));
         foreach (var (text, color) in lines)
@@ -100,7 +109,7 @@ sealed class OverlayWindow : Window
                 Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
     }
 
-    static TextBlock Line(string text, double size, Color color, bool bold = false, double top = 0) => new()
+    TextBlock Line(string text, double size, Color color, bool bold = false, double top = 0) => new()
     {
         Text = text,
         FontFamily = new FontFamily("Segoe UI"),
@@ -109,5 +118,7 @@ sealed class OverlayWindow : Window
         Foreground = new SolidColorBrush(color),
         TextWrapping = TextWrapping.Wrap,
         Margin = new Thickness(0, top, 0, 0),
+        // на полупрозрачном фоне светлая игра под текстом — тень держит его читаемым
+        Effect = _shadow ? new DropShadowEffect { Color = Colors.Black, ShadowDepth = 1, BlurRadius = 4, Opacity = 0.9 } : null,
     };
 }

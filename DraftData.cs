@@ -11,9 +11,19 @@ namespace DotaReports;
 
 sealed record CounterResult(int HeroId, double Score, IReadOnlyList<string> Parts, bool LowData);
 
-/// <summary>Кандидат на пик в Турбо: винрейт в Турбо на вашем ранге плюс преимущество против засвеченных врагов.</summary>
-/// <summary>Кандидат на пик: винрейт в режиме на вашей роли плюс поправки за врагов и союзников. Rare — на этой роли его почти не берут.</summary>
-sealed record TurboPick(int HeroId, double Winrate, double VsRevealed, double WithAllies, double Total, bool Rare);
+/// <summary>
+/// Кандидат на пик: винрейт в режиме на вашей роли плюс поправки (п.п. винрейта) за врагов, союзников, состав команды
+/// и риск контрпика (в All Pick враги видят ваш пик и могут ответить). Rare — на этой роли его почти не берут.
+/// </summary>
+sealed record TurboPick(int HeroId, double Winrate, double VsRevealed, double WithAllies, double Total, bool Rare,
+    double Composition = 0, double CounterRisk = 0)
+{
+    /// <summary>Все поправки к винрейту вместе.</summary>
+    public double Bonus => VsRevealed + WithAllies + Composition + CounterRisk;
+}
+
+/// <summary>Прогноз по драфту: вероятность победы, сколько героев известно с каждой стороны и из чего сложилось (п.п.).</summary>
+sealed record WinChance(double P, int KnownAllies, int KnownEnemies, IReadOnlyList<string> Parts);
 
 /// <summary>
 /// Данные для пика: герои (OpenDota), матчапы герой-против-героя по вашему брекету (Stratz, кэш на сутки),
@@ -22,6 +32,9 @@ sealed record TurboPick(int HeroId, double Winrate, double VsRevealed, double Wi
 sealed class DraftData
 {
     const int MinMatches = 100;
+    // матчап сглаживается к нулю по числу матчей: 300 матчей — вдвое, 3000 — почти как есть; меньше 30 — не учитываем
+    const int ShrinkMatches = 300, MinShrunkMatches = 30;
+    const double PpToLogit = 0.04; // 1 п.п. винрейта около 50% ≈ 0,04 логита
     static readonly TimeSpan MatchupsMaxAge = TimeSpan.FromHours(24);
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(60) };
 
@@ -33,12 +46,18 @@ sealed class DraftData
     Dictionary<string, Dictionary<int, (long N, long W)>> _modeStats = new();
     // _with[союзник][кандидат] = (synergy в одной команде, матчей)
     Dictionary<int, Dictionary<int, (double Syn, int N)>> _with = new();
+    // те же матчапы только по Турбо (если Stratz их отдаёт) — в Турбо другая игра, чем в обычных режимах
+    Dictionary<int, Dictionary<int, (double Syn, int N)>> _vsTurbo = new(), _withTurbo = new();
+    // роли героев OpenDota: Carry, Support, Disabler, Initiator, Nuker, Durable, Escape, Pusher
+    Dictionary<int, HashSet<string>> _roles = new();
 
     public IReadOnlyDictionary<int, string> Heroes => _heroes;
     public IReadOnlyDictionary<int, (int Games, int Wins)> Pool => _pool;
     public string Status { get; private set; } = "данные загружаются…";
     public bool Ready => _heroes.Count > 0 && _vs.Count > 0;
     public bool TurboReady => _heroes.Count > 0 && _modeStats.Count > 0;
+    /// <summary>Есть матчапы, посчитанные только по Турбо.</summary>
+    public bool TurboMatchups => _vsTurbo.Count > 0;
     /// <summary>Подпись к данным Турбо: брекет и до какой даты у Stratz есть статистика.</summary>
     public string TurboLabel { get; private set; } = "";
     /// <summary>Медаль по OpenDota (rank_tier / 10): 1 — Рекрут … 8 — Титан; 0 — неизвестна.</summary>
@@ -81,12 +100,12 @@ sealed class DraftData
         bool stale = !File.Exists(Paths.Matchups) || !File.Exists(Paths.ModeStats) || _with.Count == 0 || DateTime.Now - File.GetLastWriteTime(Paths.Matchups) > MatchupsMaxAge;
         if (stale || !File.Exists(Paths.MatchupsBrackets))
         {
+            int medal = Medal is >= 1 and <= 8 ? Medal : 0; // ранг уже прочитан шагом выше — второй запрос не нужен
             await Step("данные Stratz", errors, async () =>
             {
-                int medal = await MedalAsync(account);
                 var pairs = PairBrackets(medal);
                 await File.WriteAllBytesAsync(Paths.Matchups, await StratzAsync(
-                    $"{{ heroStats {{ matchUp(bracketBasicIds: [{string.Join(", ", pairs)}], take: 130) {{ heroId vs {{ heroId2 synergy matchCount }} with {{ heroId2 synergy matchCount }} }} }} }}"));
+                    $"{{ heroStats {{ matchUp(bracketBasicIds: [{string.Join(", ", pairs)}], take: 200) {{ heroId vs {{ heroId2 synergy matchCount }} with {{ heroId2 synergy matchCount }} }} }} }}"));
                 await File.WriteAllTextAsync(Paths.MatchupsBrackets, string.Join(", ", pairs));
                 // Винрейты по режиму и роли: последние 4 недели, ваша медаль и соседняя (12 запросов, раз в сутки)
                 var medals = MedalBrackets(medal);
@@ -102,6 +121,10 @@ sealed class DraftData
                 await File.WriteAllTextAsync(Paths.ModeStats, all.ToJsonString());
                 await File.WriteAllTextAsync(Paths.TurboBrackets, string.Join("–", medals));
             });
+            // отдельным шагом: не отдаст Stratz матчапы по режиму — остаются матчапы по всем режимам, остальное не страдает
+            await Step("матчапы Турбо", errors, async () =>
+                await File.WriteAllBytesAsync(Paths.MatchupsTurbo, await StratzAsync(
+                    $"{{ heroStats {{ matchUp(bracketBasicIds: [{string.Join(", ", PairBrackets(medal))}], gameModeIds: [TURBO], take: 200) {{ heroId vs {{ heroId2 synergy matchCount }} with {{ heroId2 synergy matchCount }} }} }} }}")));
         }
 
         LoadFromCache();
@@ -124,6 +147,16 @@ sealed class DraftData
         var atRole = position > 0 ? _modeStats.GetValueOrDefault($"{modeKey}_{position}") : null;
         long roleTotal = atRole?.Values.Sum(v => v.N) ?? 0;
 
+        bool turbo = modeKey == "TURBO";
+        // В All Pick враги видят ваш пик и могут ответить контрпиком: риск — средние 3 худших матчапа среди того,
+        // что врагу ещё доступно и реально берётся (≥ 1% пиков), с весом по числу ещё не выбранных врагов.
+        long total = overall.Values.Sum(v => v.N);
+        var likely = turbo || enemies.Count >= 5 ? new List<int>()
+            : overall.Where(kv => kv.Value.N >= total * 0.01 && !unavailable.Contains(kv.Key) && !enemies.Contains(kv.Key) && !allies.Contains(kv.Key))
+                .Select(kv => kv.Key).ToList();
+        double riskWeight = (5 - enemies.Count) / 5.0 * 0.5;
+        var lacking = Lacking(allies);
+
         var result = new List<TurboPick>();
         foreach (var (hero, (n, w)) in overall)
         {
@@ -138,21 +171,144 @@ sealed class DraftData
                 else
                     rare = true;
             }
-            double vs = enemies.Sum(e => Advantage(hero, e) ?? 0);
-            double with = allies.Sum(a => Synergy(a, hero) ?? 0);
-            result.Add(new TurboPick(hero, wr, vs, with, wr - 50 + vs + with, rare));
+            double vs = enemies.Sum(e => Advantage(hero, e, turbo) ?? 0);
+            double with = allies.Sum(a => Synergy(a, hero, turbo) ?? 0);
+            double comp = CompositionBonus(hero, allies, lacking);
+            double risk = likely.Count == 0 ? 0
+                : riskWeight * likely.Where(e => e != hero).Select(e => Math.Min(0, Advantage(hero, e, turbo) ?? 0)).OrderBy(x => x).Take(3).DefaultIfEmpty(0).Average();
+            result.Add(new TurboPick(hero, wr, vs, with, wr - 50 + vs + with + comp + risk, rare, comp, risk));
         }
         return result.OrderBy(r => r.Rare).ThenByDescending(r => r.Total).ToList();
+    }
+
+    /// <summary>Чего не хватает команде (от двух известных союзников): контроля, инициации, уже много керри.</summary>
+    public List<string> Lacking(IReadOnlyCollection<int> allies)
+    {
+        var notes = new List<string>();
+        if (allies.Count < 2 || _roles.Count == 0) return notes;
+        bool Has(int h, string role) => _roles.TryGetValue(h, out var r) && r.Contains(role);
+        if (!allies.Any(a => Has(a, "Disabler"))) notes.Add("нет контроля");
+        if (!allies.Any(a => Has(a, "Initiator"))) notes.Add("нет инициатора");
+        if (allies.Count(a => Has(a, "Carry") && !Has(a, "Support")) >= 2) notes.Add("уже два керри");
+        return notes;
+    }
+
+    // Поправка за состав (п.п.): закрывает дыру в команде — плюс, третий керри — минус. Грубо: роли OpenDota.
+    double CompositionBonus(int hero, IReadOnlyCollection<int> allies, List<string> lacking)
+    {
+        if (lacking.Count == 0) return 0;
+        bool Has(string role) => _roles.TryGetValue(hero, out var r) && r.Contains(role);
+        double bonus = 0;
+        if (lacking.Contains("нет контроля") && Has("Disabler")) bonus += 1.0;
+        if (lacking.Contains("нет инициатора") && Has("Initiator")) bonus += 0.5;
+        if (lacking.Contains("уже два керри") && Has("Carry") && !Has("Support")) bonus -= 0.7;
+        return bonus;
+    }
+
+    /// <summary>
+    /// Шанс победы по драфту: логистическая модель по винрейтам героев в режиме на вашем ранге, матчапам между командами,
+    /// сочетаниям внутри команд и вашей игре на своём герое и против их героев. Неизвестные герои — как средние (0).
+    /// Только драфт: исход решает игра, поэтому прогноз держится в пределах 15–85%.
+    /// </summary>
+    public WinChance? WinProbability(string? mode, IReadOnlyCollection<int> allies, IReadOnlyCollection<int> enemies, int ownHero)
+    {
+        var modeKey = mode == "ALL_PICK" ? "ALL_PICK_RANKED" : "TURBO";
+        if (!_modeStats.TryGetValue($"{modeKey}_0", out var overall)) return null;
+        bool turbo = modeKey == "TURBO";
+        var team = allies.Concat(ownHero > 0 ? new[] { ownHero } : Array.Empty<int>()).Distinct().ToList();
+        if (team.Count + enemies.Count == 0) return null;
+
+        // винрейт героя, сглаженный к 50% ещё 100 матчами, — в логитах
+        double Base(int h) => overall.TryGetValue(h, out var s) ? Logit((s.W + 50.0) / (s.N + 100.0)) : 0;
+        double PairSum(List<int> side)
+        {
+            double sum = 0;
+            for (int i = 0; i < side.Count; i++)
+                for (int j = i + 1; j < side.Count; j++)
+                {
+                    var ab = Synergy(side[i], side[j], turbo);
+                    var ba = Synergy(side[j], side[i], turbo);
+                    sum += ab is double x && ba is double y ? (x + y) / 2 : ab ?? ba ?? 0;
+                }
+            return sum;
+        }
+        var enemyList = enemies.ToList();
+        double heroes = team.Sum(Base) - enemyList.Sum(Base);
+        double matchups = team.Sum(a => enemyList.Sum(e => Advantage(a, e, turbo) ?? (Advantage(e, a, turbo) is double r ? -r : 0))) * PpToLogit;
+        double synergy = (PairSum(team) - PairSum(enemyList)) * PpToLogit;
+        // ваша игра: на своём герое (как будто ещё 20 игр с 50%) и против их героев (Dota Plus, GCPD) — с малым весом
+        double personal = 0;
+        if (ownHero > 0 && _pool.TryGetValue(ownHero, out var own))
+            personal += 0.5 * Logit((own.Wins + 10.0) / (own.Games + 20.0));
+        if (Profile is { Loaded: true } prof)
+            foreach (var e in enemyList)
+                if (prof.AgainstHero.TryGetValue(e, out var r))
+                    personal += 0.3 * Logit((r.Wins + 10.0) / (r.Wins + r.Losses + 20.0));
+        double logit = heroes + matchups + synergy + personal;
+        double p = Math.Clamp(1 / (1 + Math.Exp(-logit)), 0.15, 0.85);
+        // доли в п.п. (около 50% один логит ≈ 25 п.п.)
+        var parts = new List<string>();
+        void Part(string name, double l) { if (Math.Abs(l * 25) >= 0.1) parts.Add($"{name} {l * 25:+0.0;-0.0}"); }
+        Part("герои", heroes);
+        Part("матчапы", matchups);
+        Part("сочетания", synergy);
+        Part("ваша игра", personal);
+        return new WinChance(p, team.Count, enemyList.Count, parts);
+    }
+
+    static double Logit(double p) => Math.Log(p / (1 - p));
+
+    /// <summary>
+    /// Тренды меты по неделям Stratz (ваш ранг): последняя неделя против трёх предыдущих, герои с заметным числом матчей.
+    /// Растут — первыми, падают — последними; (герой, винрейт сейчас, до того, матчей за неделю).
+    /// </summary>
+    public List<(int Hero, double Now, double Before, long N)> MetaTrends(string mode)
+    {
+        var result = new List<(int, double, double, long)>();
+        try
+        {
+            if (!File.Exists(Paths.ModeStats)) return result;
+            using var doc = JsonDocument.Parse(File.ReadAllText(Paths.ModeStats));
+            var key = (mode == "ALL_PICK" ? "ALL_PICK_RANKED" : "TURBO") + "_0";
+            if (!doc.RootElement.TryGetProperty(key, out var rows)) return result;
+            var weeks = rows.EnumerateArray().Select(r => (Hero: r.GetProperty("heroId").GetInt32(), Week: r.GetProperty("week").GetInt64(),
+                N: r.GetProperty("matchCount").GetInt64(), W: r.GetProperty("winCount").GetInt64())).ToList();
+            if (weeks.Count == 0) return result;
+            long last = weeks.Max(r => r.Week);
+            long minN = (long)(weeks.Where(r => r.Week == last).Sum(r => r.N) * 0.004);
+            foreach (var g in weeks.GroupBy(r => r.Hero))
+            {
+                var now = g.Where(r => r.Week == last).ToList();
+                var before = g.Where(r => r.Week < last).ToList();
+                long nNow = now.Sum(r => r.N), nBefore = before.Sum(r => r.N);
+                if (nNow < Math.Max(minN, 200) || nBefore < 200 || !_heroes.ContainsKey(g.Key)) continue;
+                result.Add((g.Key, 100.0 * now.Sum(r => r.W) / nNow, 100.0 * before.Sum(r => r.W) / nBefore, nNow));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            Log.Write("Тренды меты не прочитаны: " + ex.Message);
+        }
+        return result.OrderByDescending(r => r.Item2 - r.Item3).ToList();
     }
 
     const long MinModeMatches = 2000, MinRoleMatches = 300;
     const double MinRoleShare = 0.008; // Skywrath на миде ≈ 1% пиков — должен считаться мидером
 
-    double? Synergy(int ally, int candidate) =>
-        _with.TryGetValue(ally, out var row) && row.TryGetValue(candidate, out var m) && m.N >= MinMatches ? m.Syn : null;
+    // Матчапы — со сглаживанием к нулю по числу матчей; в Турбо — из матчапов Турбо, если они есть для этой пары.
+    double? Synergy(int ally, int candidate, bool turbo = false) =>
+        Shrunk(turbo ? _withTurbo : null, _with, ally, candidate);
 
-    double? Advantage(int candidate, int enemy) =>
-        _vs.TryGetValue(enemy, out var row) && row.TryGetValue(candidate, out var m) && m.N >= MinMatches ? -m.Syn : null;
+    double? Advantage(int candidate, int enemy, bool turbo = false) =>
+        Shrunk(turbo ? _vsTurbo : null, _vs, enemy, candidate) is double syn ? -syn : null;
+
+    static double? Shrunk(Dictionary<int, Dictionary<int, (double Syn, int N)>>? first, Dictionary<int, Dictionary<int, (double Syn, int N)>> fallback, int a, int b)
+    {
+        foreach (var table in new[] { first, fallback })
+            if (table != null && table.TryGetValue(a, out var row) && row.TryGetValue(b, out var m) && m.N >= MinShrunkMatches)
+                return m.Syn * m.N / (m.N + ShrinkMatches);
+        return null;
+    }
 
     public List<CounterResult> Counters(IReadOnlyCollection<int> enemies)
     {
@@ -191,12 +347,21 @@ sealed class DraftData
                 using var doc = JsonDocument.Parse(File.ReadAllText(Paths.Heroes));
                 _heroes = doc.RootElement.EnumerateArray()
                     .ToDictionary(h => h.GetProperty("id").GetInt32(), h => h.GetProperty("localized_name").GetString() ?? "");
+                _roles = doc.RootElement.EnumerateArray().ToDictionary(h => h.GetProperty("id").GetInt32(),
+                    h => h.TryGetProperty("roles", out var r) && r.ValueKind == JsonValueKind.Array
+                        ? r.EnumerateArray().Select(x => x.GetString() ?? "").ToHashSet() : new HashSet<string>());
             }
             if (File.Exists(Paths.Matchups))
             {
                 var bytes = File.ReadAllBytes(Paths.Matchups);
                 _vs = ParseMatchups(bytes, "vs");
                 _with = ParseMatchups(bytes, "with");
+            }
+            if (File.Exists(Paths.MatchupsTurbo))
+            {
+                var bytes = File.ReadAllBytes(Paths.MatchupsTurbo);
+                _vsTurbo = ParseMatchups(bytes, "vs");
+                _withTurbo = ParseMatchups(bytes, "with");
             }
             _pool = ParsePool();
             MergeProfile();
@@ -276,16 +441,6 @@ sealed class DraftData
     static readonly string[] Medals = { "HERALD", "GUARDIAN", "CRUSADER", "ARCHON", "LEGEND", "ANCIENT", "DIVINE", "IMMORTAL" };
     static readonly string[] Pairs = { "HERALD_GUARDIAN", "CRUSADER_ARCHON", "LEGEND_ANCIENT", "DIVINE_IMMORTAL" };
 
-    /// <summary>Медаль 1..8 из OpenDota rank_tier (24 = Guardian 4), 0 — неизвестно.</summary>
-    static async Task<int> MedalAsync(string? account)
-    {
-        if (account == null) return 0;
-        using var doc = JsonDocument.Parse(await Http.GetStringAsync($"https://api.opendota.com/api/players/{account}"));
-        return doc.RootElement.TryGetProperty("rank_tier", out var rt) && rt.ValueKind == JsonValueKind.Number && rt.GetInt32() / 10 is var m and >= 1 and <= 8
-            ? m
-            : 0;
-    }
-
     // Брекеты Stratz парами медалей; добавляем соседнюю пару, чтобы на краю медали хватало матчей.
     static string[] PairBrackets(int medal)
     {
@@ -299,19 +454,35 @@ sealed class DraftData
     static string[] MedalBrackets(int medal) =>
         medal == 0 ? Medals : new[] { Medals[medal - 1], Medals[medal < 8 ? medal : medal - 2] };
 
+    // Stratz ограничивает частоту: на 429 и сбои сервера — ещё две попытки с паузой (или сколько попросит Retry-After)
     static async Task<byte[]> StratzAsync(string query)
     {
         if (!File.Exists(Paths.StratzToken))
             throw new InvalidOperationException("нет файла stratz_token.txt");
-        using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.stratz.com/graphql")
+        var token = File.ReadAllText(Paths.StratzToken).Trim();
+        for (int attempt = 1; ; attempt++)
         {
-            Content = new StringContent(JsonSerializer.Serialize(new { query }), Encoding.UTF8, "application/json"),
-        };
-        req.Headers.Authorization = new("Bearer", File.ReadAllText(Paths.StratzToken).Trim());
-        req.Headers.UserAgent.ParseAdd("STRATZ_API");
-        using var resp = await Http.SendAsync(req);
-        resp.EnsureSuccessStatusCode();
-        var bytes = await resp.Content.ReadAsByteArrayAsync();
+            using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.stratz.com/graphql")
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new { query }), Encoding.UTF8, "application/json"),
+            };
+            req.Headers.Authorization = new("Bearer", token);
+            req.Headers.UserAgent.ParseAdd("STRATZ_API");
+            using var resp = await Http.SendAsync(req);
+            int code = (int)resp.StatusCode;
+            if ((code == 429 || code >= 500) && attempt < 3)
+            {
+                var wait = resp.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(attempt * 5);
+                await Task.Delay(wait < TimeSpan.FromSeconds(60) ? wait : TimeSpan.FromSeconds(60));
+                continue;
+            }
+            resp.EnsureSuccessStatusCode();
+            return CheckErrors(await resp.Content.ReadAsByteArrayAsync());
+        }
+    }
+
+    static byte[] CheckErrors(byte[] bytes)
+    {
         using var doc = JsonDocument.Parse(bytes);
         if (doc.RootElement.TryGetProperty("errors", out var errors))
             throw new InvalidOperationException("Stratz: " + errors.ToString());
@@ -357,8 +528,19 @@ sealed class DraftData
     /// Ваша игра на герое, сильно сглаженная к 50% (как будто ещё 20 игр с 50%), с весом 0,3:
     /// 3 игры из 3 дают ≈ +2,0; 18 игр с 44% — ≈ −0,8. Мало игр не должно перевешивать миллионы матчей Stratz.
     /// </summary>
-    public double PersonalBonus(int hero) =>
-        _pool.TryGetValue(hero, out var p) ? 0.3 * (100.0 * (p.Wins + 10) / (p.Games + 20) - 50) : 0;
+    /// <param name="mode">Режим матча: плюс свежая форма на герое в этом режиме по истории GCPD (100 последних матчей).</param>
+    public double PersonalBonus(int hero, string? mode = null)
+    {
+        double bonus = _pool.TryGetValue(hero, out var p) ? 0.3 * (100.0 * (p.Wins + 10) / (p.Games + 20) - 50) : 0;
+        if (mode != null && Profile is { Loaded: true } prof)
+        {
+            int gameMode = mode == "ALL_PICK" ? ProfileData.RankedAllPick : ProfileData.Turbo;
+            var recent = prof.Matches.Where(m => m.HeroId == hero && m.GameMode == gameMode && m.Win != null).ToList();
+            if (recent.Count > 0)
+                bonus += 0.15 * (100.0 * (recent.Count(m => m.Win == true) + 3) / (recent.Count + 6) - 50);
+        }
+        return bonus;
+    }
 
     static async Task Step(string what, List<string> errors, Func<Task> action)
     {

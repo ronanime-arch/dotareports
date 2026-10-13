@@ -46,9 +46,13 @@ sealed class SteamBrowser
     CoreWebView2 Web => _controller?.CoreWebView2
         ?? throw new InvalidOperationException("WebView2 ещё не готов");
 
+    /// <summary>Тот же профиль браузера для окна «Аналитика»: второй профиль в той же папке с другими настройками не создать.</summary>
+    public CoreWebView2Environment? WebEnvironment { get; private set; }
+
     public async Task InitAsync()
     {
         var env = await CoreWebView2Environment.CreateAsync(null, Paths.WebView);
+        WebEnvironment = env;
         _controller = await env.CreateCoreWebView2ControllerAsync(_hwnd);
         _controller.IsVisible = false;
         UpdateBounds();
