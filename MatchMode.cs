@@ -80,8 +80,9 @@ sealed class MatchMode
     {
         try
         {
-            if (File.Exists(Paths.MatchMode))
-                return JsonSerializer.Deserialize<MatchMode>(File.ReadAllText(Paths.MatchMode)) ?? new();
+            // без номера матча (пик без номера, потом выход) — режим ни к чему не привязан: в следующей игре он был бы чужим
+            if (File.Exists(Paths.MatchMode) && JsonSerializer.Deserialize<MatchMode>(File.ReadAllText(Paths.MatchMode)) is { MatchId: { Length: > 0 } id } saved && id != "0")
+                return saved;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {

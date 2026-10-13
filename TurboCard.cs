@@ -84,8 +84,8 @@ sealed class TurboCard : Window
         _panel.Children.Add(Text(snap.Mode switch { "ALL_PICK" => "Пик · All Pick", "TURBO" => "Пик · Турбо", _ => "Пик · режим не распознан" }, 15, Fg, bold: true));
         _panel.Children.Add(Text("роль: " + RoleNames[Math.Clamp(snap.Position, 0, 5)], 11, Dim));
 
-        // шанс победы по драфту — как только известно хотя бы двое героев
-        if (data.WinProbability(snap.Mode, team, snap.Enemies, ownHero) is { } chance && chance.KnownAllies + chance.KnownEnemies >= 2)
+        // шанс победы по драфту — как только известно хотя бы двое героев и ясен режим (винрейты Турбо и обычной игры разные)
+        if (snap.Mode != null && data.WinProbability(snap.Mode, team, snap.Enemies, ownHero) is { } chance && chance.KnownAllies + chance.KnownEnemies >= 2)
         {
             var color = chance.P >= 0.52 ? Good : chance.P <= 0.48 ? Bad : Fg;
             _panel.Children.Add(Text($"Шанс победы ≈ {chance.P:0%}", 15, color, bold: true, top: 6));
@@ -120,7 +120,7 @@ sealed class TurboCard : Window
             _panel.Children.Add(Text("Ваш герой: " + data.Heroes.GetValueOrDefault(ownHero, $"#{ownHero}"), 15, Good, bold: true, top: 6));
             double own = data.PersonalBonus(ownHero, snap.Mode);
             if (data.Pool.TryGetValue(ownHero, out var pg) && pg.Games > 0)
-                _panel.Children.Add(Text($"у вас {pg.Games} игр, {100.0 * pg.Wins / pg.Games:0}% · ваша игра {own:+0.0;-0.0}", 11, Dim));
+                _panel.Children.Add(Text($"у вас {pg.Games} {Words.Plural(pg.Games, "игра", "игры", "игр")}, {100.0 * pg.Wins / pg.Games:0}% · ваша игра {own:+0.0;-0.0}", 11, Dim));
             _panel.Children.Add(Text(recognition, 10, Dim, top: 6));
             return;
         }
@@ -155,7 +155,7 @@ sealed class TurboCard : Window
         foreach (var p in mine)
         {
             var g = data.Pool[p.HeroId];
-            _panel.Children.Add(Row(data, p, $"у вас {g.Games} игр, {100.0 * g.Wins / g.Games:0}%" + (p.Rare ? " · редко на этой роли" : "")));
+            _panel.Children.Add(Row(data, p, $"у вас {g.Games} {Words.Plural(g.Games, "игра", "игры", "игр")}, {100.0 * g.Wins / g.Games:0}%" + (p.Rare ? " · редко на этой роли" : "")));
         }
 
         _panel.Children.Add(Text(snap.Position > 0 ? $"Сильные на роли «{RoleNames[snap.Position]}»" : (allPick ? "Сильные в All Pick" : "Сильные в Турбо"), 12, Dim, top: 6));

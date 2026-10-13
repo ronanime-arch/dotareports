@@ -18,6 +18,10 @@ static class Dotabuff
 
     public static string HeroCounters(string heroName) => $"{Site}/heroes/{Slug(heroName)}/counters";
 
+    public static string HeroBuilds(string heroName) => $"{Site}/heroes/{Slug(heroName)}/builds";
+
+    public static string HeroItems(string heroName) => $"{Site}/heroes/{Slug(heroName)}/items";
+
     public static string Meta => $"{Site}/heroes/meta";
 
     public static string Heroes => $"{Site}/heroes";

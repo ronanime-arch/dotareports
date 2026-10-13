@@ -258,6 +258,22 @@ sealed class DraftData
 
     static double Logit(double p) => Math.Log(p / (1 - p));
 
+    /// <summary>Винрейт героя в режиме на вашем ранге за 4 недели (Stratz) и число матчей; null — нет данных.</summary>
+    public (double Winrate, long Matches)? ModeWinrate(int hero, string? mode)
+    {
+        var key = (mode == "ALL_PICK" ? "ALL_PICK_RANKED" : "TURBO") + "_0";
+        return _modeStats.TryGetValue(key, out var overall) && overall.TryGetValue(hero, out var s) && s.N > 0
+            ? (100.0 * s.W / s.N, s.N) : null;
+    }
+
+    /// <summary>Преимущество героя над врагом, п.п. винрейта (сглаженное); null — мало матчей.</summary>
+    public double? MatchupAdvantage(int hero, int enemy, string? mode) =>
+        Advantage(hero, enemy, mode != "ALL_PICK") ?? (Advantage(enemy, hero, mode != "ALL_PICK") is double r ? -r : (double?)null);
+
+    /// <summary>Сочетание двух героев в одной команде, п.п. винрейта (сглаженное); null — мало матчей.</summary>
+    public double? PairSynergy(int a, int b, string? mode) =>
+        Synergy(a, b, mode != "ALL_PICK") ?? Synergy(b, a, mode != "ALL_PICK");
+
     /// <summary>
     /// Тренды меты по неделям Stratz (ваш ранг): последняя неделя против трёх предыдущих, герои с заметным числом матчей.
     /// Растут — первыми, падают — последними; (герой, винрейт сейчас, до того, матчей за неделю).
