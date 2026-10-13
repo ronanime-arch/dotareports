@@ -48,6 +48,12 @@ static class Updater
     /// </summary>
     public static async Task PrepareAsync()
     {
+        // папка программы должна быть доступна на запись — иначе скрипт после выхода не заменит файлы
+        var target = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var probe = Path.Combine(target, "update.probe");
+        File.WriteAllText(probe, "");
+        File.Delete(probe);
+
         var work = Path.Combine(Path.GetTempPath(), "DotaReports-update");
         if (Directory.Exists(work)) Directory.Delete(work, recursive: true);
         Directory.CreateDirectory(work);
@@ -60,7 +66,6 @@ static class Updater
         if (!File.Exists(Path.Combine(source, "DotaReports.exe")))
             throw new InvalidDataException("в архиве нет DotaReports.exe");
 
-        var target = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         var script = Path.Combine(work, "update.ps1");
         File.WriteAllText(script, Script);
         var psi = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true };
