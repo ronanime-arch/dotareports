@@ -28,7 +28,7 @@ sealed class ReminderRule
 
     public System.Windows.Media.Color DisplayColor() => ReminderColors.Of(string.IsNullOrEmpty(Color) ? ReminderColors.Guess(Text) : Color);
 
-    /// <summary>Звук: ключ из <see cref="ReminderSound.All"/>; пусто — по тексту.</summary>
+    /// <summary>Звук: ключ из <see cref="ReminderSettings.Sounds"/> или «none»; пусто — по тексту.</summary>
     public string Sound { get; set; } = "";
 
     public string SoundKey() => string.IsNullOrEmpty(Sound) ? ReminderSound.Guess(Text) : Sound;
@@ -122,6 +122,11 @@ sealed class ReminderSettings
     /// <summary>"auto" — профиль по режиму из пика; иначе имя профиля.</summary>
     public string Active { get; set; } = Auto;
     public List<ReminderProfile> Profiles { get; set; } = new();
+    /// <summary>Звуки — встроенные и свои из микшера; на их ключи ссылаются напоминания.</summary>
+    public List<ReminderSoundDef> Sounds { get; set; } = new();
+    /// <summary>Рошан: «может возродиться» и «жив» после убийства (по событию GSI), своим звуком.</summary>
+    public bool Roshan { get; set; } = true;
+    public string RoshanSound { get; set; } = "roshan";
 
     /// <summary>
     /// Профиль для матча: выбранный вручную или по режиму. Режим не определён (или под него нет профиля) — null:
@@ -145,7 +150,11 @@ sealed class ReminderSettings
         return new ReminderProfile { Name = "общие тайминги", Rules = new(rules) };
     }
 
-    public ReminderSettings Copy() => new() { Enabled = Enabled, Sound = Sound, Active = Active, Profiles = Profiles.Select(p => p.Copy()).ToList() };
+    public ReminderSettings Copy() => new()
+    {
+        Enabled = Enabled, Sound = Sound, Active = Active, Profiles = Profiles.Select(p => p.Copy()).ToList(),
+        Sounds = Sounds.Select(x => x.Copy()).ToList(), Roshan = Roshan, RoshanSound = RoshanSound,
+    };
 
     public static ReminderSettings Load()
     {
@@ -159,6 +168,10 @@ sealed class ReminderSettings
                     if (string.IsNullOrEmpty(r.Color)) r.Color = ReminderColors.Guess(r.Text);
                     if (string.IsNullOrEmpty(r.Sound)) r.Sound = ReminderSound.Guess(r.Text);
                 }
+                // встроенные звуки, которых в файле ещё нет (файл старше микшера или звук добавлен в новой версии)
+                s.Sounds ??= new();
+                foreach (var d in ReminderSound.Defaults().Where(d => s.Sounds.All(x => x.Key != d.Key)))
+                    s.Sounds.Add(d);
                 return s;
             }
         }
@@ -185,6 +198,7 @@ sealed class ReminderSettings
     // святилища мудрости (бывшие руны опыта) с 7:00 каждые 7:00, катапульта каждые 5:00, Торментор с 15:00 (в Турбо 7:30), лотосы каждые 3:00 (в Турбо 1:30).
     public static ReminderSettings Defaults() => new()
     {
+        Sounds = ReminderSound.Defaults(),
         Profiles = new()
         {
             new ReminderProfile
@@ -252,6 +266,10 @@ sealed class ReminderWindow : Window
 
     readonly ReminderSettings _edit;
     readonly ObservableCollection<ReminderProfile> _profiles;
+    // звуки правятся на вкладке «Звуки»; в списках выбора — они же и «без звука»
+    readonly ObservableCollection<ReminderSoundDef> _sounds;
+    readonly ObservableCollection<ReminderSoundDef> _soundChoices = new();
+    static readonly ReminderSoundDef Silent = new() { Key = ReminderSound.None, Label = "без звука" };
     readonly ComboBox _profileBox = new() { MinWidth = 180, DisplayMemberPath = nameof(ReminderProfile.Name) };
     readonly ComboBox _activeBox = new() { MinWidth = 220 };
     readonly TextBox _nameBox = new() { MinWidth = 180 };
@@ -273,6 +291,8 @@ sealed class ReminderWindow : Window
     {
         _edit = current.Copy();
         _profiles = new ObservableCollection<ReminderProfile>(_edit.Profiles);
+        _sounds = new ObservableCollection<ReminderSoundDef>(_edit.Sounds);
+        FillSoundChoices();
         Title = "Dota Reports — напоминания";
         Width = 1000;
         SizeToContent = SizeToContent.Height;
@@ -316,24 +336,39 @@ sealed class ReminderWindow : Window
         _grid.Columns.Add(new DataGridComboBoxColumn
         {
             Header = "Звук",
-            ItemsSource = ReminderSound.All,
-            DisplayMemberPath = nameof(ReminderSoundKind.Label),
-            SelectedValuePath = nameof(ReminderSoundKind.Key),
+            ItemsSource = _soundChoices,
+            DisplayMemberPath = nameof(ReminderSoundDef.Label),
+            SelectedValuePath = nameof(ReminderSoundDef.Key),
             SelectedValueBinding = Bind(nameof(ReminderRule.Sound)),
             Width = 100,
         });
-        // ▶ — послушать звук строки
+        // ▶ — послушать звук строки (как он сейчас в микшере, даже не сохранённый)
         var play = new FrameworkElementFactory(typeof(Button));
         play.SetValue(ContentControl.ContentProperty, "▶");
         play.SetValue(Control.PaddingProperty, new Thickness(4, 0, 4, 0));
         play.AddHandler(System.Windows.Controls.Primitives.ButtonBase.ClickEvent, new RoutedEventHandler((sender, _) =>
         {
-            if (sender is FrameworkElement { DataContext: ReminderRule rule }) ReminderSound.Play(rule.SoundKey());
+            if (sender is FrameworkElement { DataContext: ReminderRule rule }) PlaySound(rule.SoundKey());
         }));
         _grid.Columns.Add(new DataGridTemplateColumn { CellTemplate = new DataTemplate { VisualTree = play }, Width = 34 });
 
-        var panel = new StackPanel { Margin = new Thickness(14) };
+        // Рошан: по событию GSI «Рошан убит», а не по часам — отдельной строкой
+        var roshan = new CheckBox { Content = "Рошан: «может возродиться» и «жив» после убийства", IsChecked = _edit.Roshan, Margin = new Thickness(0, 0, 12, 0) };
+        roshan.Click += (_, _) => _edit.Roshan = roshan.IsChecked == true;
+        var roshanSound = new ComboBox
+        {
+            MinWidth = 120, ItemsSource = _soundChoices,
+            DisplayMemberPath = nameof(ReminderSoundDef.Label), SelectedValuePath = nameof(ReminderSoundDef.Key), SelectedValue = _edit.RoshanSound,
+        };
+        roshanSound.SelectionChanged += (_, _) =>
+        {
+            if (roshanSound.SelectedValue is string key) _edit.RoshanSound = key;
+        };
+
+        var panel = new StackPanel();
         panel.Children.Add(Row(enabled, sound));
+        panel.Children.Add(Row(roshan, new TextBlock { Text = "звук:", Margin = new Thickness(0, 0, 6, 0) }, roshanSound,
+            Button("▶", () => PlaySound(_edit.RoshanSound))));
         panel.Children.Add(Row(new TextBlock { Text = "В игре использовать:", Margin = new Thickness(0, 0, 8, 0) }, _activeBox));
         panel.Children.Add(new Separator { Margin = new Thickness(0, 10, 0, 10) });
         panel.Children.Add(Row(
@@ -350,25 +385,57 @@ sealed class ReminderWindow : Window
             Text = "Время — по часам матча, «м:сс». «Повтор» пусто — один раз; «До» пусто — до конца игры. " +
                    "«За сколько» — во сколько секунд до события показать напоминание. «Звук» — свой у каждого, ▶ — послушать. " +
                    "«Авто» выбирает профиль по режиму: с экрана пика или по доходу в первую минуту (в Турбо он вдвое выше). " +
-                   "Пока режим не определён — только тайминги, одинаковые во всех профилях. Чужие игры, повторы и кастомки — без напоминаний.",
+                   "Пока режим не определён — только тайминги, одинаковые во всех профилях. Чужие игры, повторы и кастомки — без напоминаний. " +
+                   "Сами звуки — на вкладке «Звуки».",
         });
-        var buttons = Row(Button("Добавить строку", AddRule), Button("Удалить строку", RemoveRule), Button("Вернуть стандартные", ResetDefaults));
+        panel.Children.Add(Row(Button("Добавить строку", AddRule), Button("Удалить строку", RemoveRule), Button("Вернуть стандартные", ResetDefaults)));
+
+        // Списки выбора меняем точечно: если их очистить, выпадающие списки в таблице запишут в напоминания пустой звук.
+        var mixer = new SoundMixer(_sounds);
+        _sounds.CollectionChanged += (_, e) =>
+        {
+            foreach (ReminderSoundDef d in e.OldItems ?? Array.Empty<ReminderSoundDef>()) _soundChoices.Remove(d);
+            foreach (ReminderSoundDef d in e.NewItems ?? Array.Empty<ReminderSoundDef>()) _soundChoices.Insert(_soundChoices.Count - 1, d);
+        };
+        mixer.Renamed += () =>
+        {
+            _grid.Items.Refresh();
+            roshanSound.Items.Refresh();
+        };
+        var tabs = new TabControl();
+        tabs.Items.Add(new TabItem { Header = "Напоминания", Content = new Border { Padding = new Thickness(10), Child = panel } });
+        tabs.Items.Add(new TabItem { Header = "Звуки", Content = new Border { Padding = new Thickness(10), Child = mixer } });
         var save = new Button { Content = "Сохранить", Padding = new Thickness(16, 2, 16, 2), IsDefault = true, Margin = new Thickness(0, 0, 8, 0) };
         save.Click += (_, _) => Save();
         var cancel = new Button { Content = "Отмена", Padding = new Thickness(16, 2, 16, 2), IsCancel = true };
-        var bottom = new DockPanel { Margin = new Thickness(0, 10, 0, 0) };
-        var right = Row(save, cancel);
-        DockPanel.SetDock(right, Dock.Right);
-        bottom.Children.Add(right);
-        bottom.Children.Add(buttons);
-        panel.Children.Add(bottom);
-        Content = panel;
+        var bottom = Row(save, cancel);
+        bottom.HorizontalAlignment = HorizontalAlignment.Right;
+        bottom.Margin = new Thickness(0, 10, 0, 0);
+        var root = new StackPanel { Margin = new Thickness(14) };
+        root.Children.Add(tabs);
+        root.Children.Add(bottom);
+        Content = root;
 
         FillActive();
         _profileBox.SelectedIndex = 0;
     }
 
     static Binding Bind(string path) => new(path) { Mode = BindingMode.TwoWay, UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged };
+
+    // списки выбора звука: звуки из микшера и «без звука» (последним)
+    void FillSoundChoices()
+    {
+        _soundChoices.Clear();
+        foreach (var d in _sounds) _soundChoices.Add(d);
+        _soundChoices.Add(Silent);
+    }
+
+    void PlaySound(string key)
+    {
+        if (key == ReminderSound.None) return;
+        var def = _sounds.FirstOrDefault(d => d.Key == key) ?? _sounds.FirstOrDefault(d => d.Key == "soft");
+        if (def != null) ReminderSound.Play(def);
+    }
 
     static StackPanel Row(params UIElement[] items)
     {
@@ -495,6 +562,7 @@ sealed class ReminderWindow : Window
                 r.Lead = Math.Max(0, r.Lead);
             }
         _edit.Profiles = _profiles.ToList();
+        _edit.Sounds = _sounds.ToList();
         try
         {
             _edit.Save();
@@ -509,92 +577,105 @@ sealed class ReminderWindow : Window
     }
 }
 
-/// <summary>Звук напоминания: ключ в reminders.json, подпись в окне настроек.</summary>
-sealed record ReminderSoundKind(string Key, string Label);
+/// <summary>Нота звука напоминания — то, что крутится в микшере (вкладка «Звуки»).</summary>
+sealed class SoundNote
+{
+    public double Freq { get; set; } = 392;      // основной тон, Гц
+    public double Start { get; set; }            // с от начала звука
+    public double Pan { get; set; }              // −1 слева … +1 справа
+    public double Attack { get; set; } = 0.02;   // нарастание, с
+    public double Decay { get; set; } = 0.15;    // затухание, с
+    public double H2 { get; set; } = 0.1;        // доля 2-й гармоники
+    public double H3 { get; set; }               // доля 3-й гармоники
+    public double Glide { get; set; }            // > 0 — за Glide с тон съезжает к Freq·GlideTo
+    public double GlideTo { get; set; } = 1;
+    public double Vibrato { get; set; }          // доля частоты, 5,5 Гц
+    public double? PanTo { get; set; }           // звук уплывает туда к концу; null — стоит на месте
+
+    public SoundNote Copy() => (SoundNote)MemberwiseClone();
+}
+
+/// <summary>Звук напоминания: на Key ссылаются напоминания, Label — название в настройках.</summary>
+sealed class ReminderSoundDef
+{
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+    public double Seconds { get; set; } = 0.7;
+    public List<SoundNote> Notes { get; set; } = new();
+
+    public ReminderSoundDef Copy() => new() { Key = Key, Label = Label, Seconds = Seconds, Notes = Notes.Select(n => n.Copy()).ToList() };
+}
 
 /// <summary>
-/// Звуки напоминаний — у каждого свой мотив, чтобы узнавать на слух, не глядя на экран. Все низкие и мягкие
-/// (основные тона 90–590 Гц, без звона), стерео: ноты разнесены влево-вправо. Синтезируются в памяти, тихо (пик около −10 дБ).
+/// Звуки напоминаний — у каждого свой мотив, чтобы узнавать на слух, не глядя на экран. Встроенные — низкие и мягкие
+/// (основные тона 90–590 Гц, без звона), стерео: ноты разнесены влево-вправо. Хранятся в reminders.json и правятся
+/// в микшере; синтезируются в памяти, тихо (пик около −10 дБ при любых нотах).
 /// </summary>
 static class ReminderSound
 {
     const int Rate = 44100;
     const double Peak = 0.32;
+    public const string None = "none";
 
-    public static readonly ReminderSoundKind[] All =
+    static List<ReminderSoundDef> _sounds = Defaults();
+    // собранный звук по ключу; подпись — ноты целиком: поправили в микшере — пересобрать
+    static readonly Dictionary<string, (string Sig, System.Media.SoundPlayer Player)> Players = new();
+
+    static SoundNote N(double freq, double start, double pan, double attack, double decay, double h2 = 0.1, double h3 = 0,
+        double glide = 0, double glideTo = 1, double vibrato = 0, double? panTo = null) => new()
     {
-        new("water", "капли"),
-        new("power", "подъём"),
-        new("bounty", "монетки"),
-        new("wisdom", "аккорд"),
-        new("siege", "барабан"),
-        new("tormentor", "гонг"),
-        new("lotus", "волна"),
-        new("soft", "мягкий"),
-        new("none", "без звука"),
+        Freq = freq, Start = start, Pan = pan, Attack = attack, Decay = decay, H2 = h2, H3 = h3,
+        Glide = glide, GlideTo = glideTo, Vibrato = vibrato, PanTo = panTo,
     };
 
-    // Нота: частота (Glide > 0 — за Glide с съезжает к Freq·GlideTo), начало, панорама −1…1 (PanTo — уплывает туда до конца звука),
-    // атака и затухание (с), доли 2-й и 3-й гармоник, вибрато (доля частоты, 5,5 Гц).
-    sealed record Tone(double Freq, double Start, double Pan, double Attack, double Decay,
-        double H2 = 0.1, double H3 = 0, double Glide = 0, double GlideTo = 1, double Vibrato = 0, double PanTo = double.NaN);
+    static ReminderSoundDef S(string key, string label, double seconds, params SoundNote[] notes) =>
+        new() { Key = key, Label = label, Seconds = seconds, Notes = notes.ToList() };
 
-    static readonly Dictionary<string, (double Seconds, Tone[] Tones)> Motifs = new()
+    public static List<ReminderSoundDef> Defaults() => new()
     {
         // капли: две ноты, быстро съезжающие вниз (640 → 300 Гц), слева и справа
-        ["water"] = (0.5, new[]
-        {
-            new Tone(640, 0, -0.5, 0.003, 0.07, H2: 0, Glide: 0.03, GlideTo: 0.47),
-            new Tone(560, 0.17, 0.5, 0.003, 0.07, H2: 0, Glide: 0.03, GlideTo: 0.47),
-        }),
+        S("water", "капли", 0.5,
+            N(640, 0, -0.5, 0.003, 0.07, h2: 0, glide: 0.03, glideTo: 0.47),
+            N(560, 0.17, 0.5, 0.003, 0.07, h2: 0, glide: 0.03, glideTo: 0.47)),
         // подъём: до-ми-соль снизу вверх, слева направо
-        ["power"] = (0.8, new[]
-        {
-            new Tone(261.6, 0, -0.4, 0.012, 0.16, H2: 0.15),
-            new Tone(329.6, 0.11, 0, 0.012, 0.16, H2: 0.15),
-            new Tone(392.0, 0.22, 0.4, 0.012, 0.16, H2: 0.15),
-        }),
+        S("power", "подъём", 0.8,
+            N(261.6, 0, -0.4, 0.012, 0.16, h2: 0.15),
+            N(329.6, 0.11, 0, 0.012, 0.16, h2: 0.15),
+            N(392.0, 0.22, 0.4, 0.012, 0.16, h2: 0.15)),
         // монетки: три коротких щипка, справа-слева-справа
-        ["bounty"] = (0.5, new[]
-        {
-            new Tone(523.3, 0, 0.5, 0.003, 0.07, H2: 0.25),
-            new Tone(392.0, 0.08, -0.5, 0.003, 0.07, H2: 0.25),
-            new Tone(523.3, 0.16, 0.5, 0.003, 0.07, H2: 0.25),
-        }),
+        S("bounty", "монетки", 0.5,
+            N(523.3, 0, 0.5, 0.003, 0.07, h2: 0.25),
+            N(392.0, 0.08, -0.5, 0.003, 0.07, h2: 0.25),
+            N(523.3, 0.16, 0.5, 0.003, 0.07, h2: 0.25)),
         // аккорд: до мажор медленно нарастает и проплывает слева направо
-        ["wisdom"] = (1.2, new[]
-        {
-            new Tone(261.6, 0, -0.8, 0.15, 0.45, H2: 0.08, PanTo: 0.8),
-            new Tone(329.6, 0, -0.8, 0.15, 0.45, H2: 0.08, PanTo: 0.8),
-            new Tone(392.0, 0, -0.8, 0.15, 0.45, H2: 0.08, PanTo: 0.8),
-        }),
+        S("wisdom", "аккорд", 1.2,
+            N(261.6, 0, -0.8, 0.15, 0.45, h2: 0.08, panTo: 0.8),
+            N(329.6, 0, -0.8, 0.15, 0.45, h2: 0.08, panTo: 0.8),
+            N(392.0, 0, -0.8, 0.15, 0.45, h2: 0.08, panTo: 0.8)),
         // барабан: два низких удара с падением тона (180 → 90 Гц)
-        ["siege"] = (0.6, new[]
-        {
-            new Tone(180, 0, -0.3, 0.004, 0.12, H2: 0.4, Glide: 0.05, GlideTo: 0.5),
-            new Tone(180, 0.22, 0.3, 0.004, 0.12, H2: 0.4, Glide: 0.05, GlideTo: 0.5),
-        }),
+        S("siege", "барабан", 0.6,
+            N(180, 0, -0.3, 0.004, 0.12, h2: 0.4, glide: 0.05, glideTo: 0.5),
+            N(180, 0.22, 0.3, 0.004, 0.12, h2: 0.4, glide: 0.05, glideTo: 0.5)),
         // гонг: низкие ми и до с обертонами и лёгким дрожанием, по центру
-        ["tormentor"] = (1.4, new[]
-        {
-            new Tone(164.8, 0, 0, 0.02, 0.5, H2: 0.5, H3: 0.3, Vibrato: 0.006),
-            new Tone(130.8, 0.35, 0, 0.02, 0.5, H2: 0.5, H3: 0.3, Vibrato: 0.006),
-        }),
+        S("tormentor", "гонг", 1.4,
+            N(164.8, 0, 0, 0.02, 0.5, h2: 0.5, h3: 0.3, vibrato: 0.006),
+            N(130.8, 0.35, 0, 0.02, 0.5, h2: 0.5, h3: 0.3, vibrato: 0.006)),
         // волна: две плавные ноты вверх на большую терцию с вибрато, справа налево
-        ["lotus"] = (0.9, new[]
-        {
-            new Tone(329.6, 0, 0.5, 0.06, 0.25, Vibrato: 0.01),
-            new Tone(415.3, 0.2, -0.5, 0.06, 0.25, Vibrato: 0.01),
-        }),
+        S("lotus", "волна", 0.9,
+            N(329.6, 0, 0.5, 0.06, 0.25, vibrato: 0.01),
+            N(415.3, 0.2, -0.5, 0.06, 0.25, vibrato: 0.01)),
+        // рошан: собран владельцем в микшере — две плывущие вверх ноты с вибрато и обертонами
+        S("roshan", "рошан", 0.7,
+            N(409.7, 0.15, 0.3, 0.118, 0.83, h2: 0.66, h3: 0.41, glide: 0.05, glideTo: 1.1, vibrato: 0.041),
+            N(310.7, 0.16, -0.5, 0.221, 0.24, h2: 0.51, h3: 0.29, glide: 0.03, glideTo: 1.45, vibrato: 0.037)),
         // мягкий: ля и ми вниз — для своих напоминаний
-        ["soft"] = (0.7, new[]
-        {
-            new Tone(440.0, 0, -0.3, 0.025, 0.12),
-            new Tone(329.6, 0.16, 0.3, 0.025, 0.12),
-        }),
+        S("soft", "мягкий", 0.7,
+            N(440.0, 0, -0.3, 0.025, 0.12),
+            N(329.6, 0.16, 0.3, 0.025, 0.12)),
     };
 
-    static readonly Dictionary<string, System.Media.SoundPlayer> Players = new();
+    /// <summary>Звуки из настроек — их играют напоминания.</summary>
+    public static void Use(IEnumerable<ReminderSoundDef> sounds) => _sounds = sounds.Select(s => s.Copy()).ToList();
 
     /// <summary>Звук по тексту — для правил без выбранного звука.</summary>
     public static string Guess(string? text)
@@ -605,6 +686,7 @@ static class ReminderSound
         if (t.Contains("мудрост") || t.Contains("опыт")) return "wisdom";
         if (t.Contains("катапульт")) return "siege";
         if (t.Contains("торментор")) return "tormentor";
+        if (t.Contains("рошан")) return "roshan";
         if (t.Contains("вод")) return "water";
         if (t.Contains("активн") || t.Contains("силы")) return "power";
         return "soft";
@@ -613,17 +695,26 @@ static class ReminderSound
     /// <summary>Проиграть звук по ключу, не дожидаясь конца; «без звука» — ничего, неизвестный ключ — «мягкий».</summary>
     public static void Play(string? key)
     {
-        if (key == "none") return;
-        if (key == null || !Motifs.ContainsKey(key)) key = "soft";
+        if (key == None) return;
+        var def = _sounds.FirstOrDefault(s => s.Key == key) ?? _sounds.FirstOrDefault(s => s.Key == "soft") ?? Defaults().First(s => s.Key == "soft");
+        Play(def);
+    }
+
+    /// <summary>Проиграть звук как есть — и ещё не сохранённый из микшера.</summary>
+    public static void Play(ReminderSoundDef def)
+    {
+        if (def.Key == None || def.Notes.Count == 0) return;
         try
         {
-            if (!Players.TryGetValue(key, out var player))
+            var sig = JsonSerializer.Serialize(def);
+            if (!Players.TryGetValue(def.Key, out var cached) || cached.Sig != sig)
             {
-                player = new System.Media.SoundPlayer(new MemoryStream(Wav(Motifs[key])));
+                var player = new System.Media.SoundPlayer(new MemoryStream(Wav(def)));
                 player.Load();
-                Players[key] = player;
+                cached = (sig, player);
+                Players[def.Key] = cached;
             }
-            player.Play();
+            cached.Player.Play(); // не ждёт конца звука; новый звук обрывает прежний
         }
         catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException)
         {
@@ -631,32 +722,36 @@ static class ReminderSound
         }
     }
 
+    /// <summary>Самая высокая частота в звуке (с гармониками, скольжением и вибрато), Гц — выше ~1500 звук звенит.</summary>
+    public static double Highest(ReminderSoundDef def) => def.Notes.Count == 0 ? 0 : def.Notes.Max(n =>
+        Math.Max(n.Freq, n.Glide > 0 ? n.Freq * n.GlideTo : 0) * (1 + n.Vibrato) * (n.H3 > 0.01 ? 3 : n.H2 > 0.01 ? 2 : 1));
+
     // Ноты складываются в левый и правый канал (панорама с постоянной громкостью); в конце 50 мс — в ноль.
-    static byte[] Wav((double Seconds, Tone[] Tones) motif)
+    static byte[] Wav(ReminderSoundDef def)
     {
-        int n = (int)(Rate * motif.Seconds);
+        int n = Math.Max(1, (int)(Rate * def.Seconds));
         var left = new double[n];
         var right = new double[n];
-        foreach (var tone in motif.Tones)
+        foreach (var note in def.Notes)
         {
-            double phase = 0, length = Math.Max(motif.Seconds - tone.Start, 1e-3);
-            for (int i = (int)(tone.Start * Rate); i < n; i++)
+            double phase = 0, length = Math.Max(def.Seconds - note.Start, 1e-3), attack = Math.Max(note.Attack, 1e-4), decay = Math.Max(note.Decay, 1e-3);
+            for (int i = Math.Max(0, (int)(note.Start * Rate)); i < n; i++)
             {
-                double tt = (double)i / Rate - tone.Start;
-                double f = tone.Freq * (tone.Glide > 0 ? tone.GlideTo + (1 - tone.GlideTo) * Math.Exp(-tt / tone.Glide) : 1)
-                           * (1 + tone.Vibrato * Math.Sin(2 * Math.PI * 5.5 * tt));
+                double tt = (double)i / Rate - note.Start;
+                double f = note.Freq * (note.Glide > 0 ? note.GlideTo + (1 - note.GlideTo) * Math.Exp(-tt / note.Glide) : 1)
+                           * (1 + note.Vibrato * Math.Sin(2 * Math.PI * 5.5 * tt));
                 phase += 2 * Math.PI * f / Rate;
-                double env = Math.Min(tt / tone.Attack, 1) * Math.Exp(-tt / tone.Decay);
-                double v = env * (Math.Sin(phase) + tone.H2 * Math.Sin(2 * phase) + tone.H3 * Math.Sin(3 * phase));
-                double pan = double.IsNaN(tone.PanTo) ? tone.Pan : tone.Pan + (tone.PanTo - tone.Pan) * Math.Min(tt / length, 1);
-                double a = (pan + 1) * Math.PI / 4;
+                double env = Math.Min(tt / attack, 1) * Math.Exp(-tt / decay);
+                double v = env * (Math.Sin(phase) + note.H2 * Math.Sin(2 * phase) + note.H3 * Math.Sin(3 * phase));
+                double pan = note.PanTo is double to ? note.Pan + (to - note.Pan) * Math.Min(tt / length, 1) : note.Pan;
+                double a = (Math.Clamp(pan, -1, 1) + 1) * Math.PI / 4;
                 left[i] += v * Math.Cos(a);
                 right[i] += v * Math.Sin(a);
             }
         }
         double peak = 1e-9;
         for (int i = 0; i < n; i++) peak = Math.Max(peak, Math.Max(Math.Abs(left[i]), Math.Abs(right[i])));
-        int fade = Rate / 20;
+        int fade = Math.Min(n, Rate / 20);
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         // WAV: PCM, 16 бит, стерео
@@ -671,5 +766,50 @@ static class ReminderSound
         }
         w.Flush();
         return ms.ToArray();
+    }
+}
+
+/// <summary>
+/// Рошан: GSI присылает игроку событие roshan_killed (раздел events) со временем игры — состояние Рошана видят только
+/// зрители. Возрождается через 8–11 мин после убийства (в Турбо 4–5:30). Напоминаем дважды: когда может возродиться
+/// и когда точно жив. Часы — те же, что у напоминаний: на паузе стоят.
+/// </summary>
+sealed class RoshanTimer
+{
+    string? _match;
+    readonly HashSet<int> _seen = new();   // время игры уже учтённых убийств
+    int? _may, _sure;                      // по часам матча
+
+    public (string Title, string Detail)? Update(GsiState s, int clock, string? mode)
+    {
+        if (s.MatchId != _match)
+        {
+            _match = s.MatchId;
+            _seen.Clear();
+            _may = _sure = null;
+        }
+        bool turbo = mode == "TURBO";
+        foreach (var t in s.RoshanKills ?? Array.Empty<int>())
+        {
+            if (!_seen.Add(t)) continue;
+            // момент убийства по часам: сейчас минус сколько прошло времени игры с события
+            int killed = s.GameTime is int now ? clock - Math.Max(0, now - t) : clock;
+            _may = killed + (turbo ? 240 : 480);
+            _sure = killed + (turbo ? 330 : 660);
+            Log.Write($"Рошан убит в {ReminderTime.Format(Math.Max(0, killed))}: может возродиться в {ReminderTime.Format(_may.Value)}, точно жив в {ReminderTime.Format(_sure.Value)}");
+            if (clock >= _sure) _may = _sure = null; // старое убийство (программу запустили позже) — давно жив
+        }
+        if (_may is int may && clock >= may)
+        {
+            _may = null;
+            return ("Рошан может возродиться", (_sure is int sure ? $"точно жив в {ReminderTime.Format(sure)} · " : "") +
+                (turbo ? "в Турбо через 4–5:30 после убийства" : "через 8–11 мин после убийства"));
+        }
+        if (_sure is int alive && clock >= alive)
+        {
+            _sure = null;
+            return ("Рошан жив", "окно возрождения закончилось — он точно на месте");
+        }
+        return null;
     }
 }

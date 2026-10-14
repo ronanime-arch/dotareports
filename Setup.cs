@@ -31,6 +31,7 @@ static class Setup
         		"abilities"    "1"
         		"items"        "1"
         		"draft"        "1"
+        		"events"       "1"
         	}
         }
         """;

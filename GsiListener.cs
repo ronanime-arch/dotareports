@@ -13,10 +13,11 @@ namespace DotaReports;
 /// <summary>
 /// Что важно из сообщения GSI: фаза игры, ваша сторона, ваш герой (0 — ещё не выбран), матч, часы матча в секундах
 /// (до горна — меньше нуля); зритель (повтор, DotaTV — у player вместо полей игрока команды team2/team3),
-/// кастомная игра (map.customgamename), пассивный доход с начала матча (player.gold_from_income).
+/// кастомная игра (map.customgamename), пассивный доход с начала матча (player.gold_from_income),
+/// время игры (map.game_time) и когда убивали Рошана (events: roshan_killed, по времени игры).
 /// </summary>
 sealed record GsiState(string GameState, string? Team, int HeroId, string? MatchId, int TeamSlot, int? ClockTime = null,
-    bool Spectating = false, string? CustomGame = null, int? GoldFromIncome = null)
+    bool Spectating = false, string? CustomGame = null, int? GoldFromIncome = null, int? GameTime = null, IReadOnlyList<int>? RoshanKills = null)
 {
     /// <summary>Вы играете сами: есть герой и сторона, не смотрите чужую игру и не в кастомке.</summary>
     public bool OwnGame => HeroId > 0 && !Spectating && string.IsNullOrEmpty(CustomGame) &&
@@ -130,7 +131,14 @@ sealed class GsiListener
             bool spectating = hasPlayer && (pl.TryGetProperty("team2", out _) || pl.TryGetProperty("team3", out _));
             string? custom = hasMap && map.TryGetProperty("customgamename", out var cg) && cg.ValueKind == JsonValueKind.String ? cg.GetString() : null;
             int? income = hasPlayer && pl.TryGetProperty("gold_from_income", out var gi) && gi.ValueKind == JsonValueKind.Number ? gi.GetInt32() : null;
-            parsed = new GsiState(state, team, hero, matchId, teamSlot, clock, spectating, custom, income);
+            int? gameTime = hasMap && map.TryGetProperty("game_time", out var gt) && gt.ValueKind == JsonValueKind.Number ? (int)gt.GetDouble() : null;
+            var roshanKills = new List<int>();
+            if (root.TryGetProperty("events", out var events) && events.ValueKind == JsonValueKind.Array)
+                foreach (var e in events.EnumerateArray())
+                    if (e.ValueKind == JsonValueKind.Object && e.TryGetProperty("event_type", out var et) && et.ValueKind == JsonValueKind.String && et.GetString() == "roshan_killed"
+                        && e.TryGetProperty("game_time", out var egt) && egt.ValueKind == JsonValueKind.Number)
+                        roshanKills.Add((int)egt.GetDouble());
+            parsed = new GsiState(state, team, hero, matchId, teamSlot, clock, spectating, custom, income, gameTime, roshanKills);
         }
         catch (JsonException)
         {
