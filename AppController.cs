@@ -58,6 +58,7 @@ sealed class AppController
     // напоминания по часам матча: режим берём из пика (Турбо / All Pick)
     ReminderSettings _reminders = ReminderSettings.Load();
     readonly ReminderEngine _reminderEngine = new();
+    readonly RoshanTimer _roshan = new();   // «может возродиться» и «жив» после убийства — по событию GSI
     OverlayWindow _reminderOverlay = null!;
     ReminderWindow? _reminderWindow;
     readonly MatchMode _mode = MatchMode.Load(); // режим матча: экран пика + доход из GSI
@@ -97,6 +98,7 @@ sealed class AppController
     public async Task StartAsync()
     {
         Directory.CreateDirectory(Paths.Root);
+        ReminderSound.Use(_reminders.Sounds); // звуки напоминаний — из настроек (микшер)
         // Приёмник GSI — первым делом: окно токена и вход в Steam могут ждать сколько угодно, а Dota уже шлёт данные.
         string? gsiError = null;
         try
@@ -275,6 +277,11 @@ sealed class AppController
             _reminderEngine.Reset();
             return;
         }
+        if (_roshan.Update(s, clock, _mode.Mode) is { } roshan && _reminders.Roshan)
+        {
+            _reminderOverlay.ShowPopup(roshan.Title, OverlayWindow.White, new[] { (roshan.Detail, OverlayWindow.Gray) }, TimeSpan.FromSeconds(8));
+            if (_reminders.Sound) ReminderSound.Play(_reminders.RoshanSound);
+        }
         // режим не определён — только общие для всех профилей тайминги, а не первый профиль
         var profile = _reminders.Pick(_mode.Mode);
         // общие тайминги — только пока режим не ясен; ясен, но профиля под него нет — молчим
@@ -400,6 +407,7 @@ sealed class AppController
         {
             _reminders = s;
             _reminderEngine.Reset();
+            ReminderSound.Use(s.Sounds);
         };
         _reminderWindow.Closed += (_, _) => _reminderWindow = null;
         _reminderWindow.Show();
