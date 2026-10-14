@@ -51,18 +51,36 @@ sealed class SlotReader
     public (int Hero, double Score, double Gap) Read(ScreenFrame f, int slotX)
     {
         if (!Enabled) return (0, 0, 0);
-        var v = Normalize(BoxResize((x, y) => f.At(slotX + SlotDx + x, SlotY + y), SlotW, SlotH));
+        var v = Look(f, slotX);
         int best = 0;
         double s1 = double.MinValue, s2 = double.MinValue;
         foreach (var (hero, p) in _portraits)
         {
-            double s = 0;
-            for (int i = 0; i < v.Length; i++) s += v[i] * p[i];
-            s /= v.Length;
+            double s = Dot(v, p);
             if (s > s1) { s2 = s1; s1 = s; best = hero; }
             else if (s > s2) s2 = s;
         }
         return s1 >= MinScore && s1 - s2 >= MinGap ? (best, s1, s1 - s2) : (0, s1, s1 - s2);
+    }
+
+    /// <summary>Совпадение слота с портретами только этих героев, без порогов.</summary>
+    public List<(int Hero, double Score)> Scores(ScreenFrame f, int slotX, IEnumerable<int> heroes)
+    {
+        var result = new List<(int, double)>();
+        if (!Enabled) return result;
+        var v = Look(f, slotX);
+        foreach (var hero in heroes)
+            if (_portraits.TryGetValue(hero, out var p)) result.Add((hero, Dot(v, p)));
+        return result;
+    }
+
+    static double[] Look(ScreenFrame f, int slotX) => Normalize(BoxResize((x, y) => f.At(slotX + SlotDx + x, SlotY + y), SlotW, SlotH));
+
+    static double Dot(double[] v, double[] p)
+    {
+        double s = 0;
+        for (int i = 0; i < v.Length; i++) s += v[i] * p[i];
+        return s / v.Length;
     }
 
     // Уменьшение до VW×VH усреднением по прямоугольникам (одинаково для экрана и портретов).
