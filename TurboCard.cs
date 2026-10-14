@@ -17,6 +17,7 @@ sealed class TurboCard : Window
     const int PoolRows = 5;
     const int MetaRows = 5;
     const int MinPoolGames = 2;
+    const double DraftFitGap = 1.0; // «Под этот драфт» — если поправки за драфт лучше, чем у «Бери», хотя бы на 1 п.п.
 
     static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xF2, 0xF2, 0xF2));
     static readonly Brush Dim = new SolidColorBrush(Color.FromRgb(0x9A, 0xA4, 0xB0));
@@ -128,7 +129,7 @@ sealed class TurboCard : Window
         var blocked = new HashSet<int>(snap.Unavailable.Concat(snap.Planned));
         var picks = data.TurboPicks(snap.Mode, snap.Position, blocked, snap.Enemies, team);
         bool Playable(TurboPick p) => data.Pool.TryGetValue(p.HeroId, out var g) && g.Games >= MinPoolGames;
-        double Score(TurboPick p) => p.Total + data.PersonalBonus(p.HeroId, snap.Mode);
+        double Score(TurboPick p) => data.PickScore(p, snap.Mode);
 
         // Главное: кого брать. Из ваших героев (не «редко на роли») — с лучшим итогом, включая вашу игру на нём.
         var best = picks.Where(p => !p.Rare && Playable(p)).OrderByDescending(Score).FirstOrDefault()
@@ -137,16 +138,24 @@ sealed class TurboCard : Window
         if (best != null)
         {
             _panel.Children.Add(Text("Бери: " + data.Heroes.GetValueOrDefault(best.HeroId, $"#{best.HeroId}"), 17, Good, bold: true, top: 6));
-            var why = new List<string> { $"{best.Winrate:0.0}% " + (snap.Position > 0 ? "на роли" : allPick ? "в All Pick" : "в Турбо") };
-            if (Math.Abs(best.VsRevealed) >= 0.05) why.Add($"против врагов {best.VsRevealed:+0.0;-0.0}");
-            if (Math.Abs(best.WithAllies) >= 0.05) why.Add($"с союзниками {best.WithAllies:+0.0;-0.0}");
-            if (Math.Abs(best.Composition) >= 0.05) why.Add($"состав {best.Composition:+0.0;-0.0}");
-            if (Math.Abs(best.CounterRisk) >= 0.05) why.Add($"риск контрпика {best.CounterRisk:+0.0;-0.0}");
+            string scope = snap.Position > 0 ? "на роли" : allPick ? "в All Pick" : "в Турбо";
+            var why = new List<string> { $"{best.Winrate:0.0}% {scope}" };
+            why.AddRange(Corrections(best));
             double personal = data.PersonalBonus(best.HeroId, snap.Mode);
             if (Math.Abs(personal) >= 0.05) why.Add($"ваша игра {personal:+0.0;-0.0}");
             _panel.Children.Add(Text(string.Join(" · ", why), 11, Dim));
             if (bestAny != null && bestAny.HeroId != best.HeroId && bestAny.Total - best.Total >= 1.5)
                 _panel.Children.Add(Text($"по статистике сильнее {data.Heroes.GetValueOrDefault(bestAny.HeroId)} ({bestAny.Winrate:0.0}% {bestAny.Bonus:+0.0;-0.0}), но вы на нём почти не играете", 11, Dim, top: 2));
+
+            // Под этот драфт: из ваших героев — лучший только по поправкам за врагов, союзников, состав и риск контрпика,
+            // без общего винрейта героя и вашей игры на нём. Когда это не «Бери» и под драфт он заметно лучше.
+            var fit = team.Count + snap.Enemies.Count == 0 ? null
+                : picks.Where(p => !p.Rare && Playable(p)).OrderByDescending(p => p.Bonus).ThenByDescending(Score).FirstOrDefault();
+            if (fit != null && fit.HeroId != best.HeroId && fit.Bonus > 0 && fit.Bonus - best.Bonus >= DraftFitGap)
+            {
+                _panel.Children.Add(Text($"Под этот драфт: {data.Heroes.GetValueOrDefault(fit.HeroId, $"#{fit.HeroId}")} {fit.Bonus:+0.0;-0.0}", 13, Accent, bold: true, top: 4));
+                _panel.Children.Add(Text(string.Join(" · ", Corrections(fit).Append($"{fit.Winrate:0.0}% {scope}")), 11, Dim));
+            }
         }
 
         var mine = picks.Where(Playable).OrderBy(p => p.Rare).ThenByDescending(Score).Take(PoolRows).ToList();
@@ -166,6 +175,17 @@ sealed class TurboCard : Window
         bool allModes = snap.Enemies.Count + snap.Allies.Count > 0 && (allPick || !data.TurboMatchups);
         var notes = data.TurboLabel + (allModes ? "; поправка за союзников и врагов — по всем режимам" : "");
         _panel.Children.Add(Text(notes, 10, Dim, top: 2));
+    }
+
+    // Поправки к винрейту героя за драфт, п.п.: что заметно — подписью.
+    static List<string> Corrections(TurboPick p)
+    {
+        var parts = new List<string>();
+        if (Math.Abs(p.VsRevealed) >= 0.05) parts.Add($"против врагов {p.VsRevealed:+0.0;-0.0}");
+        if (Math.Abs(p.WithAllies) >= 0.05) parts.Add($"с союзниками {p.WithAllies:+0.0;-0.0}");
+        if (Math.Abs(p.Composition) >= 0.05) parts.Add($"состав {p.Composition:+0.0;-0.0}");
+        if (Math.Abs(p.CounterRisk) >= 0.05) parts.Add($"риск контрпика {p.CounterRisk:+0.0;-0.0}");
+        return parts;
     }
 
     UIElement Row(DraftData data, TurboPick p, string? note)
