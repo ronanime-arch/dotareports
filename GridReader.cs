@@ -80,6 +80,10 @@ sealed class GridReader
     // Слот, где портрет не узнан, — среди взятых героев без слота: совпадение и запас до второго кандидата и до другого слота.
     // Мягче общих порогов (0,40 / 0,08), потому что кандидатов два-три, а не 127. Пороги не выверены на записанных пиках.
     const double TakenScore = 0.25, TakenGap = 0.08;
+    // Предвыбор союзника Dota рисует серым: насыщенность слота ниже 45 (на скриншоте: предвыбор 28, пустые 25–28, взятые 65–152).
+    // Такой слот своей команды сравниваем с портретами по яркости; серый портрет бледнее — пороги уверенности мягче
+    // (0,5 / 0,10 против 0,6 / 0,12 у цветного). Не выверены на записанных пиках.
+    const double GraySat = 45, SureGrayScore = 0.5, SureGrayGap = 0.10;
 
     readonly List<(int HeroId, int X, int Y)> _cells = new();
     readonly Dictionary<int, bool[]> _masks = new();     // пиксели клетки, которые не сравниваем (перекрыты интерфейсом)
@@ -99,6 +103,7 @@ sealed class GridReader
     readonly int[] _slotRaw = new int[10];      // последний узнанный герой в слоте
     readonly int[] _slotHero = new int[10];     // подтверждённый двумя кадрами подряд
     readonly HashSet<int> _takenLogged = new();   // узнанные среди взятых — в журнал по разу за пик
+    readonly HashSet<(int Slot, int Hero)> _grayLogged = new(); // серый предвыбор — тоже
     readonly double[]?[] _slotEmpty = new double[10][]; // как слот выглядел в начале пика (пустой: плашка ранга)
     readonly List<int> _assocAllies = new(), _assocEnemies = new();
     double? _firstValidAt;
@@ -154,6 +159,7 @@ sealed class GridReader
         _iconEnemies.Clear();
         Array.Clear(_slotHero);
         _takenLogged.Clear();
+        _grayLogged.Clear();
         _modeVotes.Clear();
         Mode = null;
         Position = 0;
@@ -281,19 +287,26 @@ sealed class GridReader
         {
             if (s == ownIndex) continue;
             int x = SlotX(s);
-            var (hero, score, gap) = _slotReader.Read(f, x);
+            // серый слот — пустой или предвыбор (у своей команды), но не взятый герой
+            bool faded = SlotReader.Saturation(f, x) < GraySat;
+            bool gray = faded && (s < 5) == radiant;
+            var (hero, score, gap) = gray ? _slotReader.ReadGray(f, x) : _slotReader.Read(f, x);
             // Пустой слот с плашкой ранга похож на Shadow Demon (0,44–0,45): героя признаём, только если слот
-            // изменился с начала пика (средняя разница ≥ 25) или совпадение очень уверенное.
+            // изменился с начала пика (средняя разница ≥ 25; серый предвыбор от плашки — 35) или совпадение очень уверенное.
+            // Серый слот — только изменившийся: по одной яркости плашка похожа на портреты сильнее, чем по цвету.
             var look = SlotVector(f, x);
             _slotEmpty[s] ??= look;
             double diff = 0;
             for (int i = 0; i < look.Length; i++) diff += Math.Abs(look[i] - _slotEmpty[s]![i]);
             bool changed = diff / look.Length >= EmptySlotDiff;
-            if (!changed && score < SureSlotScore) hero = 0;
+            if (!changed && (gray || score < SureSlotScore)) hero = 0;
+            if (gray && Taken.Contains(hero)) hero = 0; // предвыбор — всегда свободный герой: взятый тут — ложное совпадение
             heroes[s] = hero;
-            sure[s] = score >= SurePlanScore && gap >= SurePlanGap;
-            // в Турбо вражеские пики скрыты — там ищем только в слотах своей команды
-            if (hero == 0 && changed && (Mode == "ALL_PICK" || (s < 5) == radiant)) open.Add(s);
+            sure[s] = gray ? score >= SureGrayScore && gap >= SureGrayGap : score >= SurePlanScore && gap >= SurePlanGap;
+            if (gray && hero != 0 && _grayLogged.Add((s, hero)))
+                Log.Write($"Пик: серый предвыбор {(s < 5 ? "R" : "D")}{s % 5 + 1} — герой {hero} ({score:0.00}; запас {gap:0.00}{(sure[s] ? "" : ", не уверенно")})");
+            // среди взятых — только цветные слоты; в Турбо вражеские пики скрыты — только слоты своей команды
+            if (hero == 0 && changed && !faded && (Mode == "ALL_PICK" || (s < 5) == radiant)) open.Add(s);
         }
         MatchTaken(f, heroes, open, ownHero);
         for (int s = 0; s < 10; s++)
