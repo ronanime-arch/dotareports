@@ -293,7 +293,7 @@ sealed class AppController
         var color = due.Count == 1 ? due[0].Rule.DisplayColor() : OverlayWindow.White;
         _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", color, lines, TimeSpan.FromSeconds(8),
             due.Count == 1 ? color : due[0].Rule.DisplayColor());
-        if (_reminders.Sound) ReminderSound.Play();
+        if (_reminders.Sound) ReminderSound.Play(due[0].Rule.SoundKey()); // несколько сразу — звук первого
     }
 
     // Турбо: звания игроков матча. Valve их там не показывает; кто в матче — новые в «Недавно играли вместе»
