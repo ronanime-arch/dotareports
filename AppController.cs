@@ -23,7 +23,9 @@ sealed class AppController
     const uint VK_D = 0x44;
     static readonly TimeSpan PopupTime = TimeSpan.FromSeconds(6);
     // звания в Турбо: «Недавно играли вместе» в матче проверяем раз в 40 с, пока не появятся его игроки (не дольше 8 раз)
-    const int RanksMaxTries = 8, MaxOthers = 9;
+    // В Турбо 5 на 5: новых в списке не больше 9 и не меньше 5 (даже с полной группой — пятеро врагов).
+    // 1–4 новых — не этот матч: Steam дописал кого-то из прошлых игр (было: 4 чужих ника вместо 9 игроков).
+    const int RanksMaxTries = 8, MaxOthers = 9, MinFresh = 5;
     static readonly TimeSpan RanksRetry = TimeSpan.FromSeconds(40);
     static readonly TimeSpan RanksShowTime = TimeSpan.FromSeconds(20);
     // Steam мог добавить игроков ещё при принятии матча — прочитанное за последнюю минуту перед матчем не годится
@@ -321,7 +323,7 @@ sealed class AppController
         List<CoplayPlayer>? players = null;
         try
         {
-            players = await _coplay.ReadAsync();
+            players = await _coplay.ReadAsync(Paths.CoplayMatchDump);
         }
         catch (Exception ex)
         {
@@ -333,8 +335,15 @@ sealed class AppController
         }
         if (matchId != _ranksMatch) return; // пока читали, начался другой матч
         var fresh = players?.Where(p => !before.Contains(p.AccountId)).ToList() ?? new();
-        if (fresh.Count == 0)
+        if (fresh.Count < MinFresh)
         {
+            // мало новых — не игроки этого матча: запоминаем их как уже бывших и ждём дальше
+            if (fresh.Count > 0)
+            {
+                Log.Write($"Звания: новых в «Недавно играли вместе» {fresh.Count} — меньше, чем в матче, не показываю: " +
+                          string.Join(", ", fresh.Select(p => $"{p.AccountId} «{p.Name}»")));
+                before.UnionWith(fresh.Select(p => p.AccountId));
+            }
             if (_ranksTries >= RanksMaxTries)
                 Log.Write($"Звания: Steam не добавил игроков матча в «Недавно играли вместе» за {RanksMaxTries} проверок");
             return;
@@ -347,7 +356,7 @@ sealed class AppController
             return;
         }
         var ranks = await Ranks.FetchAsync(fresh);
-        Log.Write($"Звания в матче {matchId}: " + string.Join(", ", ranks.Select(r => $"{r.AccountId} {r.RankTier?.ToString() ?? "?"}")));
+        Log.Write($"Звания в матче {matchId}: " + string.Join(", ", ranks.Select(r => $"{r.AccountId} «{r.Name}» {r.RankTier?.ToString() ?? "?"}")));
         if (matchId == _ranksMatch && _gameState is "DOTA_GAMERULES_STATE_PRE_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
             _rankStrip.ShowRanks(ranks, RanksShowTime);
     }
