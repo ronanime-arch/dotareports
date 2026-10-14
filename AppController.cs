@@ -22,6 +22,12 @@ sealed class AppController
     const uint VK_R = 0x52;
     const uint VK_D = 0x44;
     static readonly TimeSpan PopupTime = TimeSpan.FromSeconds(6);
+    // звания в Турбо: «Недавно играли вместе» в матче проверяем раз в 40 с, пока не появятся его игроки (не дольше 8 раз)
+    const int RanksMaxTries = 8, MaxOthers = 9;
+    static readonly TimeSpan RanksRetry = TimeSpan.FromSeconds(40);
+    static readonly TimeSpan RanksShowTime = TimeSpan.FromSeconds(20);
+    // Steam мог добавить игроков ещё при принятии матча — прочитанное за последнюю минуту перед матчем не годится
+    static readonly TimeSpan CoplayMargin = TimeSpan.FromSeconds(60);
 
     readonly System.Windows.Application _app;
     readonly DispatcherTimer _poll = new() { Interval = TimeSpan.FromMinutes(1) }; // пока открыта Dota — сводка жалоб и ваши отправленные жалобы
@@ -56,6 +62,15 @@ sealed class AppController
     // Dota присылает данные хоть раз с запуска программы; нет — после пары минут подсказать, почему
     DateTime? _lastGsi;
     bool _gsiHintShown;
+    // Звания игроков в Турбо: кто был в «Недавно играли вместе» в меню перед матчем; новые там во время матча — его игроки
+    CoplayReader _coplay = null!;
+    RankStrip _rankStrip = null!;
+    readonly List<(DateTime At, HashSet<string> Ids)> _coplayMenu = new();
+    HashSet<string>? _coplayBefore;
+    bool _coplayFailing;
+    string? _ranksMatch;
+    int _ranksTries;
+    DateTime _ranksNext;
 
     ConductSummary? _latest;
     bool _busy, _dotaWasRunning;
@@ -95,6 +110,7 @@ sealed class AppController
         _reminderOverlay = new OverlayWindow(top: 330, backgroundAlpha: 0x99); // полупрозрачное: игра под ним видна
         _draft = new DraftWindow(_draftData) { OpenUrl = url => OpenAnalytics(url) };
         _turboCard = new TurboCard();
+        _rankStrip = new RankStrip();
         _rating = new RatingWindow();
         // после матча история в GCPD обновляется не сразу — читаем профиль через минуту после выхода в меню
         _profileTimer.Tick += async (_, _) =>
@@ -130,6 +146,7 @@ sealed class AppController
         _browser = new SteamBrowser();
         await _browser.InitAsync();
         _reader = new GcpdReader(_browser);
+        _coplay = new CoplayReader(_browser);
         RegisterHotkey();
 
         _poll.Tick += async (_, _) => await OnPollAsync();
@@ -145,6 +162,7 @@ sealed class AppController
         }
         await RefreshAsync(interactive: true, manual: false);
         await RefreshProfileAsync();
+        await RefreshCoplayAsync(); // кто был в «Недавно играли вместе» до первого матча
     }
 
     // Пик начался — карточка и запись кадров; закончился — убрать.
@@ -155,8 +173,11 @@ sealed class AppController
         _mode.Update(s);
         if (s.GameState.Length == 0 && _gameState is "DOTA_GAMERULES_STATE_POST_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
             _profileTimer.Start();
+        if (s.GameState.Length > 0 && _gameState.Length == 0)
+            _coplayBefore = _coplayMenu.LastOrDefault(r => r.At <= DateTime.Now - CoplayMargin).Ids; // из меню в матч
         _gameState = s.GameState;
         CheckReminders(s);
+        CheckRanks(s);
         // карточка — и в пике, и во время стратегии: тогда видны все герои, и прогноз по драфту полный
         bool picking = s.GameState is "DOTA_GAMERULES_STATE_HERO_SELECTION" or "DOTA_GAMERULES_STATE_STRATEGY_TIME";
         if (picking && s.HeroId != _ownHero)
@@ -273,6 +294,89 @@ sealed class AppController
         if (_reminders.Sound) System.Media.SystemSounds.Exclamation.Play();
     }
 
+    // Турбо: звания игроков матча. Valve их там не показывает; кто в матче — новые в «Недавно играли вместе»
+    // с последнего чтения в меню, звания — OpenDota. Команды и героев Steam не сообщает — полоска со всеми.
+    void CheckRanks(GsiState s)
+    {
+        if (s.GameState is not ("DOTA_GAMERULES_STATE_PRE_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS") || !s.OwnGame
+            || s.MatchId is not { Length: > 0 } id || id == "0" || _mode.Mode != "TURBO") return;
+        if (id != _ranksMatch)
+        {
+            _ranksMatch = id;
+            _ranksTries = 0;
+            _ranksNext = DateTime.MinValue;
+            if (_coplayBefore == null) Log.Write("Звания: нет списка «Недавно играли вместе» из меню перед матчем — в этом матче не ищу");
+        }
+        if (_coplayBefore == null || _ranksTries >= RanksMaxTries || _busy || DateTime.Now < _ranksNext) return;
+        _ = ReadRanksAsync(id, _coplayBefore);
+    }
+
+    async Task ReadRanksAsync(string matchId, HashSet<string> before)
+    {
+        _busy = true;
+        _ranksTries++;
+        _ranksNext = DateTime.Now + RanksRetry;
+        List<CoplayPlayer>? players = null;
+        try
+        {
+            players = await _coplay.ReadAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Write("Звания: «Недавно играли вместе» не прочитан: " + ex.Message);
+        }
+        finally
+        {
+            _busy = false;
+        }
+        if (matchId != _ranksMatch) return; // пока читали, начался другой матч
+        var fresh = players?.Where(p => !before.Contains(p.AccountId)).ToList() ?? new();
+        if (fresh.Count == 0)
+        {
+            if (_ranksTries >= RanksMaxTries)
+                Log.Write($"Звания: Steam не добавил игроков матча в «Недавно играли вместе» за {RanksMaxTries} проверок");
+            return;
+        }
+        _ranksTries = RanksMaxTries; // в этом матче больше не ищем
+        // больше, чем игроков в матче, — в списке и игроки прошлых матчей: показывать их как этих нельзя
+        if (fresh.Count > MaxOthers)
+        {
+            Log.Write($"Звания: новых в «Недавно играли вместе» {fresh.Count} — больше, чем игроков в матче, не показываю");
+            return;
+        }
+        var ranks = await Ranks.FetchAsync(fresh);
+        Log.Write($"Звания в матче {matchId}: " + string.Join(", ", ranks.Select(r => $"{r.AccountId} {r.RankTier?.ToString() ?? "?"}")));
+        if (matchId == _ranksMatch && _gameState is "DOTA_GAMERULES_STATE_PRE_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+            _rankStrip.ShowRanks(ranks, RanksShowTime);
+    }
+
+    // В меню, пока открыта Dota: кто уже есть в «Недавно играли вместе» — с этим сравнивается список во время матча.
+    async Task RefreshCoplayAsync()
+    {
+        if (_busy || _gameState.Length > 0) return;
+        _busy = true;
+        try
+        {
+            if (await _coplay.ReadAsync() is { } players)
+            {
+                _coplayMenu.Add((DateTime.Now, players.Select(p => p.AccountId).ToHashSet()));
+                if (_coplayMenu.Count > 3) _coplayMenu.RemoveAt(0);
+            }
+            if (_coplayFailing) Log.Write("«Недавно играли вместе» снова читается");
+            _coplayFailing = false;
+        }
+        catch (Exception ex)
+        {
+            // раз в минуту — в журнал только первую ошибку подряд
+            if (!_coplayFailing) Log.Write("«Недавно играли вместе» не прочитан: " + ex.Message);
+            _coplayFailing = true;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
     void OpenReminders()
     {
         if (_reminderWindow != null)
@@ -330,6 +434,7 @@ sealed class AppController
             _profilePending = false;
             await RefreshProfileAsync();
         }
+        if (running) await RefreshCoplayAsync(); // только в меню: для званий в следующем Турбо
     }
 
     // Dota открыта больше двух минут, а данных GSI нет ни разу — один раз объяснить причину.
@@ -568,16 +673,12 @@ sealed class AppController
         _historyWindow.Activate();
     }
 
-    static readonly string[] MedalNames = { "", "Рекрут", "Страж", "Рыцарь", "Герой", "Легенда", "Властелин", "Божество", "Титан" };
-
     void RenderRating()
     {
         var lines = new List<(string, Color)>();
         int lp = _profile.LowPriorityGames;
         if (lp > 0) lines.Add(($"Low priority: осталось {lp} {Plural(lp, "игра", "игры", "игр")}", OverlayWindow.Red));
-        string medal = _draftData.Medal is >= 1 and <= 8
-            ? MedalNames[_draftData.Medal] + (_draftData.RankTier % 10 is >= 1 and <= 5 ? " " + new[] { "", "I", "II", "III", "IV", "V" }[_draftData.RankTier % 10] : "")
-            : "неизвестен";
+        string medal = Ranks.Name(_draftData.RankTier) ?? "неизвестен";
         if (_profile.Calibration() is { } cal)
         {
             lines.Add(($"На калибровке: {cal.Games}{(cal.AtLeast ? "+" : "")} {Plural(cal.Games, "игра", "игры", "игр")} · {cal.Wins}–{cal.Games - cal.Wins} ({100.0 * cal.Wins / cal.Games:0}%)", OverlayWindow.Green));
@@ -845,6 +946,7 @@ sealed class AppController
         _analytics?.Close();
         _draft.Close();
         _turboCard.Close();
+        _rankStrip.Close();
         _rating.Close();
         _browser.Close();
         _app.Shutdown();
