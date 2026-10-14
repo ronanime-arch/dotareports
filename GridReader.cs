@@ -77,6 +77,13 @@ sealed class GridReader
     const double EmptySlotDiff = 25, SureSlotScore = 0.6;
     // Бледный предвыбор узнаётся хуже (ложные Io, AA) — «собираются взять» только при уверенном узнавании (Razor: 0,70 / 0,22).
     const double SurePlanScore = 0.6, SurePlanGap = 0.12;
+    // Слот, где портрет не узнан, — среди взятых героев без слота: совпадение и запас до второго кандидата и до другого слота.
+    // Мягче общих порогов (0,40 / 0,08), потому что кандидатов два-три, а не 127. Пороги не выверены на записанных пиках.
+    const double TakenScore = 0.25, TakenGap = 0.08;
+    // Предвыбор союзника Dota рисует серым: насыщенность слота ниже 45 (на скриншоте: предвыбор 28, пустые 25–28, взятые 65–152).
+    // Такой слот своей команды сравниваем с портретами по яркости; серый портрет бледнее — пороги уверенности мягче
+    // (0,5 / 0,10 против 0,6 / 0,12 у цветного). Не выверены на записанных пиках.
+    const double GraySat = 45, SureGrayScore = 0.5, SureGrayGap = 0.10;
 
     readonly List<(int HeroId, int X, int Y)> _cells = new();
     readonly Dictionary<int, bool[]> _masks = new();     // пиксели клетки, которые не сравниваем (перекрыты интерфейсом)
@@ -95,6 +102,8 @@ sealed class GridReader
     readonly bool[] _slotSure = new bool[10];     // узнан уверенно — годится для «собираются взять»
     readonly int[] _slotRaw = new int[10];      // последний узнанный герой в слоте
     readonly int[] _slotHero = new int[10];     // подтверждённый двумя кадрами подряд
+    readonly HashSet<int> _takenLogged = new();   // узнанные среди взятых — в журнал по разу за пик
+    readonly HashSet<(int Slot, int Hero)> _grayLogged = new(); // серый предвыбор — тоже
     readonly double[]?[] _slotEmpty = new double[10][]; // как слот выглядел в начале пика (пустой: плашка ранга)
     readonly List<int> _assocAllies = new(), _assocEnemies = new();
     double? _firstValidAt;
@@ -149,6 +158,8 @@ sealed class GridReader
         Array.Clear(_slotSure);
         _iconEnemies.Clear();
         Array.Clear(_slotHero);
+        _takenLogged.Clear();
+        _grayLogged.Clear();
         _modeVotes.Clear();
         Mode = null;
         Position = 0;
@@ -259,33 +270,80 @@ sealed class GridReader
             }
         }
 
-        ReadSlotHeroes(f, ownIndex);   // сначала портреты: узнанный слот закрепляет свой скачок за своим героем
+        ReadSlotHeroes(f, ownIndex, ownHero, radiant);   // сначала портреты: узнанный слот закрепляет свой скачок за своим героем
         UpdateSlots(f, t, radiant, ownHero, ownIndex);
         changed |= Combine(radiant, ownHero, ownIndex);
         return changed;
     }
 
     // Портрет в слоте: подтверждаем двумя кадрами подряд, чтобы не цеплять кадры перехода.
-    void ReadSlotHeroes(ScreenFrame f, int ownIndex)
+    void ReadSlotHeroes(ScreenFrame f, int ownIndex, int ownHero, bool radiant)
     {
         if (!_slotReader.Enabled) return;
+        var heroes = new int[10];
+        var sure = new bool[10];
+        var open = new List<int>(); // слот изменился с начала пика, а герой в нём не узнан
         for (int s = 0; s < 10; s++)
         {
             if (s == ownIndex) continue;
-            int x = s < 5 ? RadiantSlotX[s] : DireSlotX[s - 5];
-            var (hero, score, gap) = _slotReader.Read(f, x);
+            int x = SlotX(s);
+            // серый слот — пустой или предвыбор (у своей команды), но не взятый герой
+            bool faded = SlotReader.Saturation(f, x) < GraySat;
+            bool gray = faded && (s < 5) == radiant;
+            var (hero, score, gap) = gray ? _slotReader.ReadGray(f, x) : _slotReader.Read(f, x);
             // Пустой слот с плашкой ранга похож на Shadow Demon (0,44–0,45): героя признаём, только если слот
-            // изменился с начала пика (средняя разница ≥ 25) или совпадение очень уверенное.
+            // изменился с начала пика (средняя разница ≥ 25; серый предвыбор от плашки — 35) или совпадение очень уверенное.
+            // Серый слот — только изменившийся: по одной яркости плашка похожа на портреты сильнее, чем по цвету.
             var look = SlotVector(f, x);
             _slotEmpty[s] ??= look;
             double diff = 0;
             for (int i = 0; i < look.Length; i++) diff += Math.Abs(look[i] - _slotEmpty[s]![i]);
-            if (diff / look.Length < EmptySlotDiff && score < SureSlotScore) hero = 0;
-            if (hero != 0 && hero == _slotRaw[s]) { _slotHero[s] = hero; _slotSure[s] = score >= SurePlanScore && gap >= SurePlanGap; }
+            bool changed = diff / look.Length >= EmptySlotDiff;
+            if (!changed && (gray || score < SureSlotScore)) hero = 0;
+            if (gray && Taken.Contains(hero)) hero = 0; // предвыбор — всегда свободный герой: взятый тут — ложное совпадение
+            heroes[s] = hero;
+            sure[s] = gray ? score >= SureGrayScore && gap >= SureGrayGap : score >= SurePlanScore && gap >= SurePlanGap;
+            if (gray && hero != 0 && _grayLogged.Add((s, hero)))
+                Log.Write($"Пик: серый предвыбор {(s < 5 ? "R" : "D")}{s % 5 + 1} — герой {hero} ({score:0.00}; запас {gap:0.00}{(sure[s] ? "" : ", не уверенно")})");
+            // среди взятых — только цветные слоты; в Турбо вражеские пики скрыты — только слоты своей команды
+            if (hero == 0 && changed && !faded && (Mode == "ALL_PICK" || (s < 5) == radiant)) open.Add(s);
+        }
+        MatchTaken(f, heroes, open, ownHero);
+        for (int s = 0; s < 10; s++)
+        {
+            if (s == ownIndex) continue;
+            int hero = heroes[s];
+            if (hero != 0 && hero == _slotRaw[s]) { _slotHero[s] = hero; _slotSure[s] = sure[s]; }
             else if (hero == 0 && _slotRaw[s] == 0) _slotHero[s] = 0;
             _slotRaw[s] = hero;
         }
     }
+
+    // Портрет не узнан среди всех героев (облик из набора, персона), а в сетке есть взятые герои без слота:
+    // такие слоты сравниваем только с ними. Пара — когда слот и герой лучшие друг для друга с запасом:
+    // так в слот не попадёт чужой герой, если его настоящий слот похож на портрет ещё хуже.
+    // Не по времени пика: связь «скачок слота — серая клетка» теряется, если кадр пика пропущен.
+    void MatchTaken(ScreenFrame f, int[] heroes, List<int> open, int ownHero)
+    {
+        if (open.Count == 0) return;
+        var placed = Enumerable.Range(0, 10).Select(s => heroes[s] != 0 || open.Contains(s) ? heroes[s] : _slotHero[s]).ToHashSet();
+        var free = Taken.Where(h => h != ownHero && !placed.Contains(h)).ToList();
+        if (free.Count == 0) return;
+        var table = open.Select(s => (Slot: s, Scores: _slotReader.Scores(f, SlotX(s), free).ToDictionary(p => p.Hero, p => p.Score))).ToList();
+        foreach (var (slot, scores) in table)
+        {
+            var ranked = scores.OrderByDescending(kv => kv.Value).ToList();
+            if (ranked.Count == 0) continue;
+            var (hero, score) = (ranked[0].Key, ranked[0].Value);
+            if (score < TakenScore || (ranked.Count > 1 && score - ranked[1].Value < TakenGap)) continue;
+            if (table.Any(o => o.Slot != slot && o.Scores.TryGetValue(hero, out var other) && score - other < TakenGap)) continue;
+            heroes[slot] = hero;
+            if (_takenLogged.Add(hero))
+                Log.Write($"Пик: слот {(slot < 5 ? "R" : "D")}{slot % 5 + 1} — герой {hero} среди взятых без слота ({score:0.00}; кандидатов {free.Count}, слотов {open.Count})");
+        }
+    }
+
+    static int SlotX(int s) => s < 5 ? RadiantSlotX[s] : DireSlotX[s - 5];
 
     // Итог: союзники и враги — по скачкам слотов и по узнанным портретам; предвыбор — портрет союзника, чей герой ещё свободен.
     bool Combine(bool radiant, int ownHero, int ownIndex)

@@ -308,6 +308,17 @@ sealed class DraftData
         return result.OrderByDescending(r => r.Item2 - r.Item3).ToList();
     }
 
+    // В Турбо общий винрейт героя перевешивал драфт: сильный на ранге герой — сразу +5 п.п., поправки за врагов и союзников — ±1–2.
+    // В выборе «кого брать» он там идёт с половинным весом; в All Pick — как есть.
+    const double TurboBaseWeight = 0.5;
+
+    /// <summary>
+    /// Кого брать — чем больше, тем лучше: винрейт героя в режиме (в Турбо и пока режим не ясен — с половинным весом),
+    /// поправки за драфт и ваша игра на нём.
+    /// </summary>
+    public double PickScore(TurboPick p, string? mode) =>
+        (mode == "ALL_PICK" ? 1 : TurboBaseWeight) * (p.Winrate - 50) + p.Bonus + PersonalBonus(p.HeroId, mode);
+
     const long MinModeMatches = 2000, MinRoleMatches = 300;
     const double MinRoleShare = 0.008; // Skywrath на миде ≈ 1% пиков — должен считаться мидером
 

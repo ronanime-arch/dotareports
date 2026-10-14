@@ -35,6 +35,7 @@ static class Paths
     public static string ConductHistory => Path.Combine(Root, "conduct_history.json");
     public static string MatchMode => Path.Combine(Root, "match_mode.json");
     public static string Predictions => Path.Combine(Root, "predictions.json");
+    public static string CoplayDump => Path.Combine(Root, "last_coplay.json");
 }
 
 static class Words

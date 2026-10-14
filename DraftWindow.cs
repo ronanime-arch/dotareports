@@ -166,7 +166,7 @@ sealed class DraftWindow : Window
         if (_enemies.Ids.Count + _allies.Ids.Count == 0)
             _best.Children.Add(Label("Без героев — просто сильные в режиме. Добавьте врагов и союзников.", 12, Dim));
         var picks = _data.TurboPicks(Mode, Position, new HashSet<int>(_allies.Ids), _enemies.Ids, _allies.Ids);
-        double Score(TurboPick p) => p.Total + _data.PersonalBonus(p.HeroId, Mode);
+        double Score(TurboPick p) => _data.PickScore(p, Mode);
         var mine = picks.Where(p => _data.Pool.TryGetValue(p.HeroId, out var g) && g.Games >= MinPoolGames)
             .OrderBy(p => p.Rare).ThenByDescending(Score).Take(TopCount).ToList();
         if (mine.Count == 0) _mine.Children.Add(Label("Нет героев с 2+ играми.", 13, Dim));
