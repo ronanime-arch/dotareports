@@ -30,8 +30,8 @@ sealed class CoplayReader
 
     public CoplayReader(SteamBrowser browser) => _b = browser;
 
-    /// <summary>Игроки Dota 2 со страницы (без вас); null — нужен вход в Steam.</summary>
-    public async Task<List<CoplayPlayer>?> ReadAsync()
+    /// <summary>Игроки Dota 2 со страницы (без вас); null — нужен вход в Steam. Разобранная страница — в dumpPath.</summary>
+    public async Task<List<CoplayPlayer>?> ReadAsync(string? dumpPath = null)
     {
         await _b.NavigateAsync(Url, NavTimeout);
         JsonElement page = default;
@@ -53,7 +53,7 @@ sealed class CoplayReader
         }
         if (state == "login") return null;
         if (state != "ok") throw new InvalidOperationException($"Страница «Недавно играли вместе» не открылась (открыто: {_b.Source}).");
-        Dump(page);
+        Dump(page, dumpPath ?? Paths.CoplayDump);
 
         var me = File.Exists(Paths.Account) ? File.ReadAllText(Paths.Account).Trim() : null;
         var players = new List<CoplayPlayer>();
@@ -72,10 +72,10 @@ sealed class CoplayReader
     static string Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
 
-    static void Dump(JsonElement page)
+    static void Dump(JsonElement page, string path)
     {
         var options = new JsonSerializerOptions { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-        File.WriteAllText(Paths.CoplayDump, JsonSerializer.Serialize(new { fetchedAt = DateTime.Now.ToString("s"), page }, options));
+        File.WriteAllText(path, JsonSerializer.Serialize(new { fetchedAt = DateTime.Now.ToString("s"), page }, options));
     }
 
     // Блок игрока — внешний элемент с data-steamid / data-miniprofile (внутри бывает аватар с тем же номером).

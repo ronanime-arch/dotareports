@@ -28,6 +28,11 @@ sealed class ReminderRule
 
     public System.Windows.Media.Color DisplayColor() => ReminderColors.Of(string.IsNullOrEmpty(Color) ? ReminderColors.Guess(Text) : Color);
 
+    /// <summary>Звук: ключ из <see cref="ReminderSound.All"/>; пусто — по тексту.</summary>
+    public string Sound { get; set; } = "";
+
+    public string SoundKey() => string.IsNullOrEmpty(Sound) ? ReminderSound.Guess(Text) : Sound;
+
     /// <summary>Моменты событий (секунды часов матча), у которых время показа попадает в (from, to].</summary>
     public IEnumerable<int> DueBetween(int from, int to)
     {
@@ -148,9 +153,12 @@ sealed class ReminderSettings
         {
             if (File.Exists(Paths.Reminders) && JsonSerializer.Deserialize<ReminderSettings>(File.ReadAllText(Paths.Reminders)) is { Profiles.Count: > 0 } s)
             {
-                // правила из файла до появления цветов — цвет по тексту
-                foreach (var r in s.Profiles.SelectMany(p => p.Rules).Where(r => string.IsNullOrEmpty(r.Color)))
-                    r.Color = ReminderColors.Guess(r.Text);
+                // правила из файла до появления цветов и звуков — цвет и звук по тексту
+                foreach (var r in s.Profiles.SelectMany(p => p.Rules))
+                {
+                    if (string.IsNullOrEmpty(r.Color)) r.Color = ReminderColors.Guess(r.Text);
+                    if (string.IsNullOrEmpty(r.Sound)) r.Sound = ReminderSound.Guess(r.Text);
+                }
                 return s;
             }
         }
@@ -172,6 +180,7 @@ sealed class ReminderSettings
     }
 
     // Цвета: вода и руна силы — зелёные, баунти — жёлтые, мудрость — фиолетовая, катапульта — красная, лотосы — синие.
+    // Звуки — у каждого свой: капли, подъём, монетки, аккорд, барабан, гонг, волна.
     // Тайминги патча 7.41: руны воды 2:00 и 4:00, руна силы с 6:00 каждые 2:00, баунти каждые 4:00,
     // святилища мудрости (бывшие руны опыта) с 7:00 каждые 7:00, катапульта каждые 5:00, Торментор с 15:00 (в Турбо 7:30), лотосы каждые 3:00 (в Турбо 1:30).
     public static ReminderSettings Defaults() => new()
@@ -183,13 +192,13 @@ sealed class ReminderSettings
                 Name = "Обычная игра", Mode = "ALL_PICK",
                 Rules = new()
                 {
-                    new() { Text = "Руна воды — река", Color = "green", At = "2:00", Every = "2:00", Until = "4:00", Lead = 20 },
-                    new() { Text = "Баунти-руны", Color = "yellow", At = "4:00", Every = "4:00", Lead = 20 },
-                    new() { Text = "Активная руна — река у мида", Color = "green", At = "6:00", Every = "2:00", Lead = 20 },
-                    new() { Text = "Святилище мудрости — драться за опыт", Color = "purple", At = "7:00", Every = "7:00", Lead = 30 },
-                    new() { Text = "Катапульта выходит на линию", Color = "red", At = "5:00", Every = "5:00", Lead = 10 },
-                    new() { Text = "Торментор — собирайтесь", Color = "green", At = "15:00", Lead = 60 },
-                    new() { Enabled = false, Text = "Лотосы в пруду", Color = "blue", At = "3:00", Every = "3:00", Lead = 15 },
+                    new() { Text = "Руна воды — река", Color = "green", Sound = "water", At = "2:00", Every = "2:00", Until = "4:00", Lead = 20 },
+                    new() { Text = "Баунти-руны", Color = "yellow", Sound = "bounty", At = "4:00", Every = "4:00", Lead = 20 },
+                    new() { Text = "Активная руна — река у мида", Color = "green", Sound = "power", At = "6:00", Every = "2:00", Lead = 20 },
+                    new() { Text = "Святилище мудрости — драться за опыт", Color = "purple", Sound = "wisdom", At = "7:00", Every = "7:00", Lead = 30 },
+                    new() { Text = "Катапульта выходит на линию", Color = "red", Sound = "siege", At = "5:00", Every = "5:00", Lead = 10 },
+                    new() { Text = "Торментор — собирайтесь", Color = "green", Sound = "tormentor", At = "15:00", Lead = 60 },
+                    new() { Enabled = false, Text = "Лотосы в пруду", Color = "blue", Sound = "lotus", At = "3:00", Every = "3:00", Lead = 15 },
                 },
             },
             new ReminderProfile
@@ -197,13 +206,13 @@ sealed class ReminderSettings
                 Name = "Турбо", Mode = "TURBO",
                 Rules = new()
                 {
-                    new() { Text = "Руна воды — река", Color = "green", At = "2:00", Every = "2:00", Until = "4:00", Lead = 20 },
-                    new() { Text = "Баунти-руны", Color = "yellow", At = "4:00", Every = "4:00", Lead = 20 },
-                    new() { Text = "Активная руна — река у мида", Color = "green", At = "6:00", Every = "2:00", Lead = 20 },
-                    new() { Text = "Святилище мудрости — драться за опыт", Color = "purple", At = "7:00", Every = "7:00", Lead = 30 },
-                    new() { Text = "Катапульта выходит на линию", Color = "red", At = "5:00", Every = "5:00", Lead = 10 },
-                    new() { Text = "Торментор — собирайтесь", Color = "green", At = "7:30", Lead = 45 },
-                    new() { Enabled = false, Text = "Лотосы в пруду", Color = "blue", At = "1:30", Every = "1:30", Lead = 15 },
+                    new() { Text = "Руна воды — река", Color = "green", Sound = "water", At = "2:00", Every = "2:00", Until = "4:00", Lead = 20 },
+                    new() { Text = "Баунти-руны", Color = "yellow", Sound = "bounty", At = "4:00", Every = "4:00", Lead = 20 },
+                    new() { Text = "Активная руна — река у мида", Color = "green", Sound = "power", At = "6:00", Every = "2:00", Lead = 20 },
+                    new() { Text = "Святилище мудрости — драться за опыт", Color = "purple", Sound = "wisdom", At = "7:00", Every = "7:00", Lead = 30 },
+                    new() { Text = "Катапульта выходит на линию", Color = "red", Sound = "siege", At = "5:00", Every = "5:00", Lead = 10 },
+                    new() { Text = "Торментор — собирайтесь", Color = "green", Sound = "tormentor", At = "7:30", Lead = 45 },
+                    new() { Enabled = false, Text = "Лотосы в пруду", Color = "blue", Sound = "lotus", At = "1:30", Every = "1:30", Lead = 15 },
                 },
             },
         },
@@ -265,7 +274,7 @@ sealed class ReminderWindow : Window
         _edit = current.Copy();
         _profiles = new ObservableCollection<ReminderProfile>(_edit.Profiles);
         Title = "Dota Reports — напоминания";
-        Width = 860;
+        Width = 1000;
         SizeToContent = SizeToContent.Height;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         ResizeMode = ResizeMode.CanMinimize;
@@ -304,6 +313,24 @@ sealed class ReminderWindow : Window
             SelectedValueBinding = Bind(nameof(ReminderRule.Color)),
             Width = 100,
         });
+        _grid.Columns.Add(new DataGridComboBoxColumn
+        {
+            Header = "Звук",
+            ItemsSource = ReminderSound.All,
+            DisplayMemberPath = nameof(ReminderSoundKind.Label),
+            SelectedValuePath = nameof(ReminderSoundKind.Key),
+            SelectedValueBinding = Bind(nameof(ReminderRule.Sound)),
+            Width = 100,
+        });
+        // ▶ — послушать звук строки
+        var play = new FrameworkElementFactory(typeof(Button));
+        play.SetValue(ContentControl.ContentProperty, "▶");
+        play.SetValue(Control.PaddingProperty, new Thickness(4, 0, 4, 0));
+        play.AddHandler(System.Windows.Controls.Primitives.ButtonBase.ClickEvent, new RoutedEventHandler((sender, _) =>
+        {
+            if (sender is FrameworkElement { DataContext: ReminderRule rule }) ReminderSound.Play(rule.SoundKey());
+        }));
+        _grid.Columns.Add(new DataGridTemplateColumn { CellTemplate = new DataTemplate { VisualTree = play }, Width = 34 });
 
         var panel = new StackPanel { Margin = new Thickness(14) };
         panel.Children.Add(Row(enabled, sound));
@@ -321,7 +348,7 @@ sealed class ReminderWindow : Window
             TextWrapping = TextWrapping.Wrap,
             Foreground = System.Windows.Media.Brushes.DimGray,
             Text = "Время — по часам матча, «м:сс». «Повтор» пусто — один раз; «До» пусто — до конца игры. " +
-                   "«За сколько» — во сколько секунд до события показать напоминание. " +
+                   "«За сколько» — во сколько секунд до события показать напоминание. «Звук» — свой у каждого, ▶ — послушать. " +
                    "«Авто» выбирает профиль по режиму: с экрана пика или по доходу в первую минуту (в Турбо он вдвое выше). " +
                    "Пока режим не определён — только тайминги, одинаковые во всех профилях. Чужие игры, повторы и кастомки — без напоминаний.",
         });
@@ -429,7 +456,7 @@ sealed class ReminderWindow : Window
     void AddRule()
     {
         if (_profileBox.SelectedItem is not ReminderProfile p) return;
-        var rule = new ReminderRule { Text = "Новое напоминание", At = "10:00", Color = "green" };
+        var rule = new ReminderRule { Text = "Новое напоминание", At = "10:00", Color = "green", Sound = "soft" };
         p.Rules.Add(rule);
         _grid.SelectedItem = rule;
         _grid.ScrollIntoView(rule);
@@ -479,5 +506,170 @@ sealed class ReminderWindow : Window
         }
         Saved?.Invoke(_edit);
         Close();
+    }
+}
+
+/// <summary>Звук напоминания: ключ в reminders.json, подпись в окне настроек.</summary>
+sealed record ReminderSoundKind(string Key, string Label);
+
+/// <summary>
+/// Звуки напоминаний — у каждого свой мотив, чтобы узнавать на слух, не глядя на экран. Все низкие и мягкие
+/// (основные тона 90–590 Гц, без звона), стерео: ноты разнесены влево-вправо. Синтезируются в памяти, тихо (пик около −10 дБ).
+/// </summary>
+static class ReminderSound
+{
+    const int Rate = 44100;
+    const double Peak = 0.32;
+
+    public static readonly ReminderSoundKind[] All =
+    {
+        new("water", "капли"),
+        new("power", "подъём"),
+        new("bounty", "монетки"),
+        new("wisdom", "аккорд"),
+        new("siege", "барабан"),
+        new("tormentor", "гонг"),
+        new("lotus", "волна"),
+        new("soft", "мягкий"),
+        new("none", "без звука"),
+    };
+
+    // Нота: частота (Glide > 0 — за Glide с съезжает к Freq·GlideTo), начало, панорама −1…1 (PanTo — уплывает туда до конца звука),
+    // атака и затухание (с), доли 2-й и 3-й гармоник, вибрато (доля частоты, 5,5 Гц).
+    sealed record Tone(double Freq, double Start, double Pan, double Attack, double Decay,
+        double H2 = 0.1, double H3 = 0, double Glide = 0, double GlideTo = 1, double Vibrato = 0, double PanTo = double.NaN);
+
+    static readonly Dictionary<string, (double Seconds, Tone[] Tones)> Motifs = new()
+    {
+        // капли: две ноты, быстро съезжающие вниз (640 → 300 Гц), слева и справа
+        ["water"] = (0.5, new[]
+        {
+            new Tone(640, 0, -0.5, 0.003, 0.07, H2: 0, Glide: 0.03, GlideTo: 0.47),
+            new Tone(560, 0.17, 0.5, 0.003, 0.07, H2: 0, Glide: 0.03, GlideTo: 0.47),
+        }),
+        // подъём: до-ми-соль снизу вверх, слева направо
+        ["power"] = (0.8, new[]
+        {
+            new Tone(261.6, 0, -0.4, 0.012, 0.16, H2: 0.15),
+            new Tone(329.6, 0.11, 0, 0.012, 0.16, H2: 0.15),
+            new Tone(392.0, 0.22, 0.4, 0.012, 0.16, H2: 0.15),
+        }),
+        // монетки: три коротких щипка, справа-слева-справа
+        ["bounty"] = (0.5, new[]
+        {
+            new Tone(523.3, 0, 0.5, 0.003, 0.07, H2: 0.25),
+            new Tone(392.0, 0.08, -0.5, 0.003, 0.07, H2: 0.25),
+            new Tone(523.3, 0.16, 0.5, 0.003, 0.07, H2: 0.25),
+        }),
+        // аккорд: до мажор медленно нарастает и проплывает слева направо
+        ["wisdom"] = (1.2, new[]
+        {
+            new Tone(261.6, 0, -0.8, 0.15, 0.45, H2: 0.08, PanTo: 0.8),
+            new Tone(329.6, 0, -0.8, 0.15, 0.45, H2: 0.08, PanTo: 0.8),
+            new Tone(392.0, 0, -0.8, 0.15, 0.45, H2: 0.08, PanTo: 0.8),
+        }),
+        // барабан: два низких удара с падением тона (180 → 90 Гц)
+        ["siege"] = (0.6, new[]
+        {
+            new Tone(180, 0, -0.3, 0.004, 0.12, H2: 0.4, Glide: 0.05, GlideTo: 0.5),
+            new Tone(180, 0.22, 0.3, 0.004, 0.12, H2: 0.4, Glide: 0.05, GlideTo: 0.5),
+        }),
+        // гонг: низкие ми и до с обертонами и лёгким дрожанием, по центру
+        ["tormentor"] = (1.4, new[]
+        {
+            new Tone(164.8, 0, 0, 0.02, 0.5, H2: 0.5, H3: 0.3, Vibrato: 0.006),
+            new Tone(130.8, 0.35, 0, 0.02, 0.5, H2: 0.5, H3: 0.3, Vibrato: 0.006),
+        }),
+        // волна: две плавные ноты вверх на большую терцию с вибрато, справа налево
+        ["lotus"] = (0.9, new[]
+        {
+            new Tone(329.6, 0, 0.5, 0.06, 0.25, Vibrato: 0.01),
+            new Tone(415.3, 0.2, -0.5, 0.06, 0.25, Vibrato: 0.01),
+        }),
+        // мягкий: ля и ми вниз — для своих напоминаний
+        ["soft"] = (0.7, new[]
+        {
+            new Tone(440.0, 0, -0.3, 0.025, 0.12),
+            new Tone(329.6, 0.16, 0.3, 0.025, 0.12),
+        }),
+    };
+
+    static readonly Dictionary<string, System.Media.SoundPlayer> Players = new();
+
+    /// <summary>Звук по тексту — для правил без выбранного звука.</summary>
+    public static string Guess(string? text)
+    {
+        var t = (text ?? "").ToLowerInvariant();
+        if (t.Contains("лотос")) return "lotus";
+        if (t.Contains("баунти") || t.Contains("золот")) return "bounty";
+        if (t.Contains("мудрост") || t.Contains("опыт")) return "wisdom";
+        if (t.Contains("катапульт")) return "siege";
+        if (t.Contains("торментор")) return "tormentor";
+        if (t.Contains("вод")) return "water";
+        if (t.Contains("активн") || t.Contains("силы")) return "power";
+        return "soft";
+    }
+
+    /// <summary>Проиграть звук по ключу, не дожидаясь конца; «без звука» — ничего, неизвестный ключ — «мягкий».</summary>
+    public static void Play(string? key)
+    {
+        if (key == "none") return;
+        if (key == null || !Motifs.ContainsKey(key)) key = "soft";
+        try
+        {
+            if (!Players.TryGetValue(key, out var player))
+            {
+                player = new System.Media.SoundPlayer(new MemoryStream(Wav(Motifs[key])));
+                player.Load();
+                Players[key] = player;
+            }
+            player.Play();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException)
+        {
+            Log.Write("Звук напоминания не проигран: " + ex.Message);
+        }
+    }
+
+    // Ноты складываются в левый и правый канал (панорама с постоянной громкостью); в конце 50 мс — в ноль.
+    static byte[] Wav((double Seconds, Tone[] Tones) motif)
+    {
+        int n = (int)(Rate * motif.Seconds);
+        var left = new double[n];
+        var right = new double[n];
+        foreach (var tone in motif.Tones)
+        {
+            double phase = 0, length = Math.Max(motif.Seconds - tone.Start, 1e-3);
+            for (int i = (int)(tone.Start * Rate); i < n; i++)
+            {
+                double tt = (double)i / Rate - tone.Start;
+                double f = tone.Freq * (tone.Glide > 0 ? tone.GlideTo + (1 - tone.GlideTo) * Math.Exp(-tt / tone.Glide) : 1)
+                           * (1 + tone.Vibrato * Math.Sin(2 * Math.PI * 5.5 * tt));
+                phase += 2 * Math.PI * f / Rate;
+                double env = Math.Min(tt / tone.Attack, 1) * Math.Exp(-tt / tone.Decay);
+                double v = env * (Math.Sin(phase) + tone.H2 * Math.Sin(2 * phase) + tone.H3 * Math.Sin(3 * phase));
+                double pan = double.IsNaN(tone.PanTo) ? tone.Pan : tone.Pan + (tone.PanTo - tone.Pan) * Math.Min(tt / length, 1);
+                double a = (pan + 1) * Math.PI / 4;
+                left[i] += v * Math.Cos(a);
+                right[i] += v * Math.Sin(a);
+            }
+        }
+        double peak = 1e-9;
+        for (int i = 0; i < n; i++) peak = Math.Max(peak, Math.Max(Math.Abs(left[i]), Math.Abs(right[i])));
+        int fade = Rate / 20;
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        // WAV: PCM, 16 бит, стерео
+        w.Write("RIFF"u8); w.Write(36 + n * 4); w.Write("WAVE"u8);
+        w.Write("fmt "u8); w.Write(16); w.Write((short)1); w.Write((short)2); w.Write(Rate); w.Write(Rate * 4); w.Write((short)4); w.Write((short)16);
+        w.Write("data"u8); w.Write(n * 4);
+        for (int i = 0; i < n; i++)
+        {
+            double k = Peak / peak * (i >= n - fade ? (n - i) / (double)fade : 1);
+            w.Write((short)Math.Round(left[i] * k * 32767));
+            w.Write((short)Math.Round(right[i] * k * 32767));
+        }
+        w.Flush();
+        return ms.ToArray();
     }
 }

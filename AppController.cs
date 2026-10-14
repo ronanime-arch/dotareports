@@ -23,7 +23,9 @@ sealed class AppController
     const uint VK_D = 0x44;
     static readonly TimeSpan PopupTime = TimeSpan.FromSeconds(6);
     // звания в Турбо: «Недавно играли вместе» в матче проверяем раз в 40 с, пока не появятся его игроки (не дольше 8 раз)
-    const int RanksMaxTries = 8, MaxOthers = 9;
+    // В Турбо 5 на 5: новых в списке не больше 9 и не меньше 5 (даже с полной группой — пятеро врагов).
+    // 1–4 новых — не этот матч: Steam дописал кого-то из прошлых игр (было: 4 чужих ника вместо 9 игроков).
+    const int RanksMaxTries = 8, MaxOthers = 9, MinFresh = 5;
     static readonly TimeSpan RanksRetry = TimeSpan.FromSeconds(40);
     static readonly TimeSpan RanksShowTime = TimeSpan.FromSeconds(20);
     // Steam мог добавить игроков ещё при принятии матча — прочитанное за последнюю минуту перед матчем не годится
@@ -81,6 +83,8 @@ sealed class AppController
     BehaviorHistoryWindow? _historyWindow;
     AnalyticsWindow? _analytics;
     Forms.ToolStripMenuItem _updateItem = null!;
+    Forms.ToolStripMenuItem _loginItem = null!; // «Войти в Steam…» — виден, только когда вход слетел
+    const string LoginTip = "Нужно войти в Steam: нажмите на это уведомление или значок в трее → «Войти в Steam…».";
 
     public AppController(System.Windows.Application app)
     {
@@ -291,7 +295,7 @@ sealed class AppController
         var color = due.Count == 1 ? due[0].Rule.DisplayColor() : OverlayWindow.White;
         _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", color, lines, TimeSpan.FromSeconds(8),
             due.Count == 1 ? color : due[0].Rule.DisplayColor());
-        if (_reminders.Sound) System.Media.SystemSounds.Exclamation.Play();
+        if (_reminders.Sound) ReminderSound.Play(due[0].Rule.SoundKey()); // несколько сразу — звук первого
     }
 
     // Турбо: звания игроков матча. Valve их там не показывает; кто в матче — новые в «Недавно играли вместе»
@@ -319,7 +323,7 @@ sealed class AppController
         List<CoplayPlayer>? players = null;
         try
         {
-            players = await _coplay.ReadAsync();
+            players = await _coplay.ReadAsync(Paths.CoplayMatchDump);
         }
         catch (Exception ex)
         {
@@ -331,8 +335,15 @@ sealed class AppController
         }
         if (matchId != _ranksMatch) return; // пока читали, начался другой матч
         var fresh = players?.Where(p => !before.Contains(p.AccountId)).ToList() ?? new();
-        if (fresh.Count == 0)
+        if (fresh.Count < MinFresh)
         {
+            // мало новых — не игроки этого матча: запоминаем их как уже бывших и ждём дальше
+            if (fresh.Count > 0)
+            {
+                Log.Write($"Звания: новых в «Недавно играли вместе» {fresh.Count} — меньше, чем в матче, не показываю: " +
+                          string.Join(", ", fresh.Select(p => $"{p.AccountId} «{p.Name}»")));
+                before.UnionWith(fresh.Select(p => p.AccountId));
+            }
             if (_ranksTries >= RanksMaxTries)
                 Log.Write($"Звания: Steam не добавил игроков матча в «Недавно играли вместе» за {RanksMaxTries} проверок");
             return;
@@ -345,7 +356,7 @@ sealed class AppController
             return;
         }
         var ranks = await Ranks.FetchAsync(fresh);
-        Log.Write($"Звания в матче {matchId}: " + string.Join(", ", ranks.Select(r => $"{r.AccountId} {r.RankTier?.ToString() ?? "?"}")));
+        Log.Write($"Звания в матче {matchId}: " + string.Join(", ", ranks.Select(r => $"{r.AccountId} «{r.Name}» {r.RankTier?.ToString() ?? "?"}")));
         if (matchId == _ranksMatch && _gameState is "DOTA_GAMERULES_STATE_PRE_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
             _rankStrip.ShowRanks(ranks, RanksShowTime);
     }
@@ -461,11 +472,11 @@ sealed class AppController
         try
         {
             var res = await _reader.ReadIncomingAsync(interactive);
+            _loginItem.Visible = res.NeedLogin;
             if (res.NeedLogin)
             {
                 SetTrayText("нужно войти в Steam");
-                _tray.ShowBalloonTip(8000, "Dota Reports",
-                    "Нужно войти в Steam: правый клик по значку → «Проверить сейчас».", Forms.ToolTipIcon.Warning);
+                _tray.ShowBalloonTip(8000, "Dota Reports", LoginTip, Forms.ToolTipIcon.Warning);
                 return;
             }
 
@@ -837,25 +848,30 @@ sealed class AppController
         return IntPtr.Zero;
     }
 
+    // Вход в Steam слетел: окно входа, затем сводка жалоб и профиль.
+    async Task LoginAsync()
+    {
+        await RefreshAsync(interactive: true, manual: true);
+        await RefreshProfileAsync();
+    }
+
     void CreateTray()
     {
         var menu = new Forms.ContextMenuStrip();
+        _loginItem = new Forms.ToolStripMenuItem("Войти в Steam…", null, async (_, _) => await LoginAsync()) { Visible = false };
+        menu.Items.Add(_loginItem);
         menu.Items.Add("Помощник в пике (Ctrl+Alt+D)", null, (_, _) => _draft.Toggle());
         menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
         menu.Items.Add("Напоминания…", null, (_, _) => OpenReminders());
         menu.Items.Add("История поведения…", null, (_, _) => OpenHistory());
         menu.Items.Add("Аналитика и Dotabuff…", null, (_, _) => OpenAnalytics());
-        menu.Items.Add("Проверить сейчас", null, async (_, _) => await RefreshAsync(interactive: true, manual: true));
         menu.Items.Add("Папка с данными", null, (_, _) => Process.Start("explorer.exe", Paths.Root));
         menu.Items.Add("Токен Stratz…", null, async (_, _) =>
         {
             Setup.AskStratzToken();
             await LoadDraftAsync();
         });
-        var autostart = new Forms.ToolStripMenuItem("Запускать с Windows") { Checked = Setup.AutostartEnabled, CheckOnClick = true };
-        autostart.CheckedChanged += (_, _) => Setup.AutostartEnabled = autostart.Checked;
-        menu.Items.Add(autostart);
         _updateItem = new Forms.ToolStripMenuItem($"Обновить DotaReports (у вас {Updater.Current})", null, async (_, _) => await UpdateAsync(manual: true));
         menu.Items.Add(_updateItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
@@ -869,6 +885,10 @@ sealed class AppController
             Visible = true,
         };
         _tray.DoubleClick += (_, _) => ShowLatest();
+        _tray.BalloonTipClicked += async (_, _) =>
+        {
+            if (_tray.BalloonTipText == LoginTip) await LoginAsync();
+        };
     }
 
     // Кнопка «Обновить» в трее: последний релиз с GitHub, файлы заменяет скрипт после выхода, программа запускается снова.

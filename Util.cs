@@ -36,6 +36,7 @@ static class Paths
     public static string MatchMode => Path.Combine(Root, "match_mode.json");
     public static string Predictions => Path.Combine(Root, "predictions.json");
     public static string CoplayDump => Path.Combine(Root, "last_coplay.json");
+    public static string CoplayMatchDump => Path.Combine(Root, "last_coplay_match.json"); // прочитанное во время матча
 }
 
 static class Words
