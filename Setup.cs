@@ -9,11 +9,9 @@ using Microsoft.Win32;
 
 namespace DotaReports;
 
-/// <summary>Первый запуск на чужом компьютере: стартовые данные, конфиг GSI в папке Dota, автозапуск, токен Stratz.</summary>
+/// <summary>Первый запуск на чужом компьютере: стартовые данные, конфиг GSI в папке Dota, токен Stratz.</summary>
 static class Setup
 {
-    const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    const string RunName = "DotaReports";
     const string GsiFile = "gamestate_integration_dotareports.cfg";
 
     static readonly string GsiConfig = $$"""
@@ -118,17 +116,6 @@ static class Setup
         return libraries.Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(lib => Path.Combine(lib, "steamapps", "common", "dota 2 beta"))
             .FirstOrDefault(Directory.Exists);
-    }
-
-    public static bool AutostartEnabled
-    {
-        get => Registry.CurrentUser.OpenSubKey(RunKey)?.GetValue(RunName) != null;
-        set
-        {
-            using var key = Registry.CurrentUser.CreateSubKey(RunKey);
-            if (value) key.SetValue(RunName, $"\"{Environment.ProcessPath}\"");
-            else key.DeleteValue(RunName, throwOnMissingValue: false);
-        }
     }
 
     /// <summary>Распознавание экрана пика размечено под 1920×1080.</summary>

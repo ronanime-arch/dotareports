@@ -81,6 +81,8 @@ sealed class AppController
     BehaviorHistoryWindow? _historyWindow;
     AnalyticsWindow? _analytics;
     Forms.ToolStripMenuItem _updateItem = null!;
+    Forms.ToolStripMenuItem _loginItem = null!; // «Войти в Steam…» — виден, только когда вход слетел
+    const string LoginTip = "Нужно войти в Steam: нажмите на это уведомление или значок в трее → «Войти в Steam…».";
 
     public AppController(System.Windows.Application app)
     {
@@ -291,7 +293,7 @@ sealed class AppController
         var color = due.Count == 1 ? due[0].Rule.DisplayColor() : OverlayWindow.White;
         _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", color, lines, TimeSpan.FromSeconds(8),
             due.Count == 1 ? color : due[0].Rule.DisplayColor());
-        if (_reminders.Sound) System.Media.SystemSounds.Exclamation.Play();
+        if (_reminders.Sound) ReminderSound.Play();
     }
 
     // Турбо: звания игроков матча. Valve их там не показывает; кто в матче — новые в «Недавно играли вместе»
@@ -461,11 +463,11 @@ sealed class AppController
         try
         {
             var res = await _reader.ReadIncomingAsync(interactive);
+            _loginItem.Visible = res.NeedLogin;
             if (res.NeedLogin)
             {
                 SetTrayText("нужно войти в Steam");
-                _tray.ShowBalloonTip(8000, "Dota Reports",
-                    "Нужно войти в Steam: правый клик по значку → «Проверить сейчас».", Forms.ToolTipIcon.Warning);
+                _tray.ShowBalloonTip(8000, "Dota Reports", LoginTip, Forms.ToolTipIcon.Warning);
                 return;
             }
 
@@ -837,25 +839,30 @@ sealed class AppController
         return IntPtr.Zero;
     }
 
+    // Вход в Steam слетел: окно входа, затем сводка жалоб и профиль.
+    async Task LoginAsync()
+    {
+        await RefreshAsync(interactive: true, manual: true);
+        await RefreshProfileAsync();
+    }
+
     void CreateTray()
     {
         var menu = new Forms.ContextMenuStrip();
+        _loginItem = new Forms.ToolStripMenuItem("Войти в Steam…", null, async (_, _) => await LoginAsync()) { Visible = false };
+        menu.Items.Add(_loginItem);
         menu.Items.Add("Помощник в пике (Ctrl+Alt+D)", null, (_, _) => _draft.Toggle());
         menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
         menu.Items.Add("Напоминания…", null, (_, _) => OpenReminders());
         menu.Items.Add("История поведения…", null, (_, _) => OpenHistory());
         menu.Items.Add("Аналитика и Dotabuff…", null, (_, _) => OpenAnalytics());
-        menu.Items.Add("Проверить сейчас", null, async (_, _) => await RefreshAsync(interactive: true, manual: true));
         menu.Items.Add("Папка с данными", null, (_, _) => Process.Start("explorer.exe", Paths.Root));
         menu.Items.Add("Токен Stratz…", null, async (_, _) =>
         {
             Setup.AskStratzToken();
             await LoadDraftAsync();
         });
-        var autostart = new Forms.ToolStripMenuItem("Запускать с Windows") { Checked = Setup.AutostartEnabled, CheckOnClick = true };
-        autostart.CheckedChanged += (_, _) => Setup.AutostartEnabled = autostart.Checked;
-        menu.Items.Add(autostart);
         _updateItem = new Forms.ToolStripMenuItem($"Обновить DotaReports (у вас {Updater.Current})", null, async (_, _) => await UpdateAsync(manual: true));
         menu.Items.Add(_updateItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
@@ -869,6 +876,10 @@ sealed class AppController
             Visible = true,
         };
         _tray.DoubleClick += (_, _) => ShowLatest();
+        _tray.BalloonTipClicked += async (_, _) =>
+        {
+            if (_tray.BalloonTipText == LoginTip) await LoginAsync();
+        };
     }
 
     // Кнопка «Обновить» в трее: последний релиз с GitHub, файлы заменяет скрипт после выхода, программа запускается снова.

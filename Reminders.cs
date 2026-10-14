@@ -481,3 +481,66 @@ sealed class ReminderWindow : Window
         Close();
     }
 }
+
+/// <summary>
+/// Звук напоминания: две короткие низкие ноты (A4 и E4, через 0,16 с), почти чистый синус с плавной атакой —
+/// без звона и высоких частот, тихо (пик около −10 дБ), 0,7 с. Синтезируется в памяти; системный звук Windows посреди игры резкий.
+/// </summary>
+static class ReminderSound
+{
+    const int Rate = 44100;
+    const double Seconds = 0.7, Peak = 0.32, Attack = 0.025, Decay = 0.12;
+    static readonly (double Freq, double Start)[] Notes = { (440.0, 0), (329.6, 0.16) };
+    static readonly Lazy<System.Media.SoundPlayer> Player = new(() =>
+    {
+        var p = new System.Media.SoundPlayer(new MemoryStream(Wav()));
+        p.Load();
+        return p;
+    });
+
+    public static void Play()
+    {
+        try
+        {
+            Player.Value.Play(); // не ждёт конца звука
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException)
+        {
+            Log.Write("Звук напоминания не проигран: " + ex.Message);
+        }
+    }
+
+    // Нота — основной тон и 10% второй гармоники (для теплоты), атака 25 мс, затухание 0,12 с; в конце 50 мс — в ноль.
+    static byte[] Wav()
+    {
+        int n = (int)(Rate * Seconds);
+        var s = new double[n];
+        double peak = 0;
+        for (int i = 0; i < n; i++)
+        {
+            double t = (double)i / Rate;
+            foreach (var (f, start) in Notes)
+            {
+                double tt = t - start;
+                if (tt < 0) continue;
+                double env = Math.Min(tt / Attack, 1) * Math.Exp(-tt / Decay);
+                s[i] += env * (Math.Sin(2 * Math.PI * f * tt) + 0.1 * Math.Sin(4 * Math.PI * f * tt));
+            }
+            peak = Math.Max(peak, Math.Abs(s[i]));
+        }
+        int fade = Rate / 20;
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        // WAV: PCM, 16 бит, моно
+        w.Write("RIFF"u8); w.Write(36 + n * 2); w.Write("WAVE"u8);
+        w.Write("fmt "u8); w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(Rate); w.Write(Rate * 2); w.Write((short)2); w.Write((short)16);
+        w.Write("data"u8); w.Write(n * 2);
+        for (int i = 0; i < n; i++)
+        {
+            double v = s[i] * Peak / peak * (i >= n - fade ? (n - i) / (double)fade : 1);
+            w.Write((short)Math.Round(v * 32767));
+        }
+        w.Flush();
+        return ms.ToArray();
+    }
+}
