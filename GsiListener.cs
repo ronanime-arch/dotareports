@@ -33,6 +33,7 @@ sealed class GsiListener
 {
     public const int Port = 38461;
     const int MaxSamples = 400;
+    const int KeepSamples = 300; // за все запуски: старые образцы удаляем, иначе папка растёт без конца
     const int MaxPerLateState = 5;
     const string InProgress = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS";
     static readonly HashSet<string> SkipStates = new() { "DOTA_GAMERULES_STATE_POST_GAME" };
@@ -53,8 +54,28 @@ sealed class GsiListener
 
     public void Start()
     {
+        PruneSamples();
         _listener.Start();
         _ = AcceptLoopAsync();
+    }
+
+    // Имена образцов начинаются с даты — по имени и сортируем, новые в конце.
+    static void PruneSamples()
+    {
+        var dir = Path.Combine(Paths.Root, "gsi_samples");
+        if (!Directory.Exists(dir)) return;
+        try
+        {
+            var files = Directory.GetFiles(dir, "*.json").OrderBy(f => Path.GetFileName(f), StringComparer.Ordinal).ToList();
+            int extra = files.Count - KeepSamples;
+            if (extra <= 0) return;
+            foreach (var f in files.Take(extra)) File.Delete(f);
+            Log.Write($"GSI: удалено старых образцов: {extra}, осталось {KeepSamples}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Write("GSI: старые образцы не удалены: " + ex.Message);
+        }
     }
 
     public void Stop() => _listener.Stop();
