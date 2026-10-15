@@ -957,26 +957,33 @@ sealed class AppController
         _tray.Text = text.Length > 120 ? text[..120] : text;
     }
 
+    // Выход бывает и до конца запуска (обновление закрывает копию, которая ещё ждёт Dota) — окон и браузера тогда нет.
     void Exit()
     {
         _poll.Stop();
         _confTimer.Stop();
         _gsi.Stop();
-        Native.UnregisterHotKey(_browser.Handle, HotkeyId);
-        Native.UnregisterHotKey(_browser.Handle, DraftHotkeyId);
-        Native.UnregisterHotKey(_browser.Handle, RatingHotkeyId);
-        _tray.Visible = false;
-        _tray.Dispose();
-        _overlay.Close();
-        _reminderOverlay.Close();
+        if (_browser != null)
+        {
+            Native.UnregisterHotKey(_browser.Handle, HotkeyId);
+            Native.UnregisterHotKey(_browser.Handle, DraftHotkeyId);
+            Native.UnregisterHotKey(_browser.Handle, RatingHotkeyId);
+        }
+        if (_tray != null)
+        {
+            _tray.Visible = false;
+            _tray.Dispose();
+        }
+        _overlay?.Close();
+        _reminderOverlay?.Close();
         _reminderWindow?.Close();
         _historyWindow?.Close();
         _analytics?.Close();
-        _draft.Close();
-        _turboCard.Close();
-        _rankStrip.Close();
-        _rating.Close();
-        _browser.Close();
+        _draft?.Close();
+        _turboCard?.Close();
+        _rankStrip?.Close();
+        _rating?.Close();
+        _browser?.Close();
         _app.Shutdown();
     }
 }

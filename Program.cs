@@ -218,9 +218,13 @@ static class Program
         using var mutex = new Mutex(true, @"Local\DotaReports.SingleInstance", out bool first);
         if (!first)
         {
+            // копия из автозагрузки, которая ждёт Dota, — разбудить
+            if (EventWaitHandle.TryOpenExisting(Autostart.WakeEventName, out var wake)) using (wake) wake.Set();
             MessageBox.Show("Dota Reports уже запущен — значок в трее.", "Dota Reports");
             return;
         }
+        Autostart.Ensure();
+        bool background = args.Contains(Autostart.BackgroundArg); // из автозагрузки Windows: до запуска Dota спать
 
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         var controller = new AppController(app);
@@ -233,6 +237,11 @@ static class Program
         {
             try
             {
+                if (background && !await Autostart.WaitForDotaAsync(app))
+                {
+                    app.Shutdown();
+                    return;
+                }
                 await controller.StartAsync();
             }
             catch (Exception ex)
