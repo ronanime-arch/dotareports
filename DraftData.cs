@@ -503,7 +503,12 @@ sealed class DraftData
                 await Task.Delay(wait < TimeSpan.FromSeconds(60) ? wait : TimeSpan.FromSeconds(60));
                 continue;
             }
-            resp.EnsureSuccessStatusCode();
+            if (!resp.IsSuccessStatusCode)
+            {
+                // в ответе Stratz пишет причину (например, неверный запрос) — без неё в log.txt виден только код
+                var text = (await resp.Content.ReadAsStringAsync()).Replace('\n', ' ').Trim();
+                throw new HttpRequestException($"Stratz: {code} {resp.ReasonPhrase}" + (text.Length > 0 ? ": " + (text.Length > 300 ? text[..300] + "…" : text) : ""));
+            }
             return CheckErrors(await resp.Content.ReadAsByteArrayAsync());
         }
     }
