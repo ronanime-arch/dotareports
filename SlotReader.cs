@@ -19,6 +19,12 @@ sealed class SlotReader
     static readonly Rectangle PortraitCrop = new(40, 0, 200, 112);
     // Пустой слот: лучший до ~0,52, но отрыв от второго ≤ 0,07; узнанный герой: 0,43–0,81 с отрывом 0,08–0,35.
     const double MinScore = 0.40, MinGap = 0.08;
+    // Поверх портрета Dota рисует плашку звания (рейтинговый All Pick: «Страж IV», экран y 45–62) и значок уровня героя
+    // справа (x+84 и дальше, y от ~14) — одинаковые у разных героев, они только сбивали сравнение (Snapfire под «Страж IV»
+    // не узнавалась). Эти клетки не сравниваем ни у слота, ни у портрета: в координатах области слота (100×56) —
+    // y ≥ 43 и (x ≥ 80 при y ≥ 12).
+    static readonly bool[] Covered = BuildCovered();
+    static readonly int OpenCells = Covered.Count(c => !c);
 
     readonly Dictionary<int, double[]> _portraits = new();
     readonly Dictionary<int, double[]> _gray = new();   // те же портреты по яркости
@@ -40,8 +46,8 @@ sealed class SlotReader
                     var c = bmp.GetPixel(PortraitCrop.X + x, PortraitCrop.Y + y);
                     return (c.R, c.G, c.B);
                 }, PortraitCrop.Width, PortraitCrop.Height);
-                _portraits[hero] = Normalize(rgb);
-                _gray[hero] = Normalize(Gray(rgb));
+                _portraits[hero] = Normalize(rgb, 3);
+                _gray[hero] = Normalize(Gray(rgb), 1);
             }
             catch (ArgumentException ex)
             {
@@ -54,7 +60,7 @@ sealed class SlotReader
     public (int Hero, double Score, double Gap) Read(ScreenFrame f, int slotX) => Best(Look(f, slotX), _portraits);
 
     /// <summary>То же только по яркости — для серого предвыбора союзника: цвет там только мешает.</summary>
-    public (int Hero, double Score, double Gap) ReadGray(ScreenFrame f, int slotX) => Best(Normalize(Gray(Raw(f, slotX))), _gray);
+    public (int Hero, double Score, double Gap) ReadGray(ScreenFrame f, int slotX) => Best(Normalize(Gray(Raw(f, slotX)), 1), _gray);
 
     (int Hero, double Score, double Gap) Best(double[] v, Dictionary<int, double[]> portraits)
     {
@@ -101,7 +107,7 @@ sealed class SlotReader
 
     static double[] Raw(ScreenFrame f, int slotX) => BoxResize((x, y) => f.At(slotX + SlotDx + x, SlotY + y), SlotW, SlotH);
 
-    static double[] Look(ScreenFrame f, int slotX) => Normalize(Raw(f, slotX));
+    static double[] Look(ScreenFrame f, int slotX) => Normalize(Raw(f, slotX), 3);
 
     // RGB по клеткам → яркость клетки
     static double[] Gray(double[] rgb)
@@ -111,11 +117,25 @@ sealed class SlotReader
         return v;
     }
 
+    // Корреляция по открытым клеткам: у закрытых в обоих векторах нули.
     static double Dot(double[] v, double[] p)
     {
         double s = 0;
         for (int i = 0; i < v.Length; i++) s += v[i] * p[i];
-        return s / v.Length;
+        return s / (OpenCells * (v.Length / Covered.Length));
+    }
+
+    static bool[] BuildCovered()
+    {
+        var covered = new bool[VW * VH];
+        for (int oy = 0; oy < VH; oy++)
+            for (int ox = 0; ox < VW; ox++)
+            {
+                // середина клетки в координатах области слота
+                double x = (ox + 0.5) * SlotW / VW, y = (oy + 0.5) * SlotH / VH;
+                covered[oy * VW + ox] = y >= 43 || (x >= 80 && y >= 12);
+            }
+        return covered;
     }
 
     // Уменьшение до VW×VH усреднением по прямоугольникам (одинаково для экрана и портретов).
@@ -143,11 +163,21 @@ sealed class SlotReader
         return v;
     }
 
-    static double[] Normalize(double[] v)
+    // Среднее и разброс — только по открытым клеткам (channels значений на клетку: 3 — RGB, 1 — яркость); закрытые — нули.
+    static double[] Normalize(double[] v, int channels)
     {
-        double m = v.Average();
-        double sd = Math.Sqrt(v.Sum(a => (a - m) * (a - m)) / v.Length);
+        bool IsOpen(int i) => !Covered[i / channels];
+        double sum = 0, sq = 0;
+        int n = 0;
+        for (int i = 0; i < v.Length; i++)
+            if (IsOpen(i)) { sum += v[i]; n++; }
+        double m = sum / Math.Max(n, 1);
+        for (int i = 0; i < v.Length; i++)
+            if (IsOpen(i)) sq += (v[i] - m) * (v[i] - m);
+        double sd = Math.Sqrt(sq / Math.Max(n, 1));
         if (sd < 1e-6) sd = 1;
-        return v.Select(a => (a - m) / sd).ToArray();
+        var r = new double[v.Length];
+        for (int i = 0; i < v.Length; i++) r[i] = IsOpen(i) ? (v[i] - m) / sd : 0;
+        return r;
     }
 }
