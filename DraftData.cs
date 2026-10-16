@@ -35,6 +35,7 @@ sealed class DraftData
     // матчап сглаживается к нулю по числу матчей: 300 матчей — вдвое, 3000 — почти как есть; меньше 30 — не учитываем
     const int ShrinkMatches = 300, MinShrunkMatches = 30;
     const double PpToLogit = 0.04; // 1 п.п. винрейта около 50% ≈ 0,04 логита
+    const double OwnPrior = 30;    // ваши игры на герое и против него: общий винрейт весит как 30 игр
     static readonly TimeSpan MatchupsMaxAge = TimeSpan.FromHours(24);
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(60) };
 
@@ -208,6 +209,7 @@ sealed class DraftData
     /// <summary>
     /// Шанс победы по драфту: логистическая модель по винрейтам героев в режиме на вашем ранге, матчапам между командами,
     /// сочетаниям внутри команд и вашей игре на своём герое и против их героев. Неизвестные герои — как средние (0).
+    /// Ваш герой — по вашим играм на нём: общий винрейт лишь отправная точка, как будто ещё 30 игр (OwnPrior).
     /// Только драфт: исход решает игра, поэтому прогноз держится в пределах 15–85%.
     /// </summary>
     public WinChance? WinProbability(string? mode, IReadOnlyCollection<int> allies, IReadOnlyCollection<int> enemies, int ownHero)
@@ -218,8 +220,9 @@ sealed class DraftData
         var team = allies.Concat(ownHero > 0 ? new[] { ownHero } : Array.Empty<int>()).Distinct().ToList();
         if (team.Count + enemies.Count == 0) return null;
 
-        // винрейт героя, сглаженный к 50% ещё 100 матчами, — в логитах
-        double Base(int h) => overall.TryGetValue(h, out var s) ? Logit((s.W + 50.0) / (s.N + 100.0)) : 0;
+        // винрейт героя, сглаженный к 50% ещё 100 матчами
+        double Rate(int h) => overall.TryGetValue(h, out var s) ? (s.W + 50.0) / (s.N + 100.0) : 0.5;
+        double Base(int h) => Logit(Rate(h));
         double PairSum(List<int> side)
         {
             double sum = 0;
@@ -236,14 +239,19 @@ sealed class DraftData
         double heroes = team.Sum(Base) - enemyList.Sum(Base);
         double matchups = team.Sum(a => enemyList.Sum(e => Advantage(a, e, turbo) ?? (Advantage(e, a, turbo) is double r ? -r : 0))) * PpToLogit;
         double synergy = (PairSum(team) - PairSum(enemyList)) * PpToLogit;
-        // ваша игра: на своём герое (как будто ещё 20 игр с 50%) и против их героев (Dota Plus, GCPD) — с малым весом
+        // Ваша игра — поправка к общему винрейту: на своём герое ваши игры заменяют его (было: прибавлялись сверху —
+        // Wraith King 57,5% давал +7,5 п.п. при ваших 49% за 75 игр), против их героев — сверх того,
+        // чего ждать по их общему винрейту (Dota Plus, GCPD), с половинным весом.
         double personal = 0;
-        if (ownHero > 0 && _pool.TryGetValue(ownHero, out var own))
-            personal += 0.5 * Logit((own.Wins + 10.0) / (own.Games + 20.0));
+        if (ownHero > 0 && _pool.TryGetValue(ownHero, out var own) && own.Games > 0)
+            personal += Logit((own.Wins + OwnPrior * Rate(ownHero)) / (own.Games + OwnPrior)) - Base(ownHero);
         if (Profile is { Loaded: true } prof)
             foreach (var e in enemyList)
-                if (prof.AgainstHero.TryGetValue(e, out var r))
-                    personal += 0.3 * Logit((r.Wins + 10.0) / (r.Wins + r.Losses + 20.0));
+                if (prof.AgainstHero.TryGetValue(e, out var r) && r.Wins + r.Losses > 0)
+                {
+                    double expect = 1 - Rate(e);
+                    personal += 0.5 * (Logit((r.Wins + OwnPrior * expect) / (r.Wins + r.Losses + OwnPrior)) - Logit(expect));
+                }
         double logit = heroes + matchups + synergy + personal;
         double p = Math.Clamp(1 / (1 + Math.Exp(-logit)), 0.15, 0.85);
         // доли в п.п. (около 50% один логит ≈ 25 п.п.)

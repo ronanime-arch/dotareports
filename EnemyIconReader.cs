@@ -59,10 +59,10 @@ sealed class EnemyIconReader
         }
     }
 
-    /// <summary>Вражеские герои из блока «ПОЗИЦИИ ВРАГА»; пусто, если блока на экране нет.</summary>
-    public List<int> Read(ScreenFrame f)
+    /// <summary>Герои в ячейках блока «ПОЗИЦИИ ВРАГА» по порядку вражеских слотов; 0 — ячейка пуста или не узнана.</summary>
+    public int[] Read(ScreenFrame f)
     {
-        var found = new List<int>();
+        var found = new int[5];
         if (!Enabled) return found;
         for (int k = 0; k < 5; k++)
         {
@@ -79,7 +79,7 @@ sealed class EnemyIconReader
                 if (s > s1) { s2 = s1; s1 = s; best = hero; }
                 else if (s > s2) s2 = s;
             }
-            if (s1 >= MinScore && s1 - s2 >= MinGap) found.Add(best);
+            if (s1 >= MinScore && s1 - s2 >= MinGap) found[k] = best;
         }
         return found;
     }

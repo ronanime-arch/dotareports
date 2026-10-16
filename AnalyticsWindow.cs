@@ -160,6 +160,9 @@ sealed class AnalyticsWindow : Window
                 Margin = new Thickness(0, 4, 0, 0),
             });
             if (c.Parts.Count > 0) panel.Children.Add(Note(string.Join(" · ", c.Parts)));
+            // не всех героев узнали с экрана — прогноз неполный, неизвестные в нём как средние
+            if (c.KnownAllies < 5 || c.KnownEnemies < 5)
+                panel.Children.Add(Note($"узнано героев: ваших {c.KnownAllies} из 5, их {c.KnownEnemies} из 5 — остальные считаются средними"));
         }
 
         var links = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };

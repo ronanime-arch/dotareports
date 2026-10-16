@@ -98,8 +98,10 @@ sealed class GridReader
     readonly Dictionary<int, (int Pos, int Offset, bool[,] Mask)> _roleTemplates = new();
     readonly SlotReader _slotReader = new();
     readonly EnemyIconReader _iconReader = new();
-    readonly HashSet<int> _iconEnemies = new();   // из блока «ПОЗИЦИИ ВРАГА» на экране героя
+    // блок «ПОЗИЦИИ ВРАГА» на экране героя: ячейка k — вражеский слот k; герой подтверждён двумя кадрами подряд
+    readonly int[] _iconRaw = new int[5], _iconHero = new int[5];
     readonly bool[] _slotSure = new bool[10];     // узнан уверенно — годится для «собираются взять»
+    readonly bool[] _slotFaded = new bool[10];    // портрет бледный: пустой слот или предвыбор, а не взятый герой
     readonly int[] _slotRaw = new int[10];      // последний узнанный герой в слоте
     readonly int[] _slotHero = new int[10];     // подтверждённый двумя кадрами подряд
     readonly HashSet<int> _takenLogged = new();   // узнанные среди взятых — в журнал по разу за пик
@@ -156,7 +158,9 @@ sealed class GridReader
         Array.Clear(_slotRaw);
         Array.Clear(_slotEmpty);
         Array.Clear(_slotSure);
-        _iconEnemies.Clear();
+        Array.Clear(_iconRaw);
+        Array.Clear(_iconHero);
+        Array.Clear(_slotFaded);
         Array.Clear(_slotHero);
         _takenLogged.Clear();
         _grayLogged.Clear();
@@ -175,11 +179,11 @@ sealed class GridReader
         if (!Enabled) return changed;
         if (!GridVisible(f))
         {
-            // После вашего пика сетки нет — врагов берём из блока «ПОЗИЦИИ ВРАГА» на экране героя.
-            int before = _iconEnemies.Count;
-            foreach (var hero in _iconReader.Read(f)) _iconEnemies.Add(hero);
-            if (_iconEnemies.Count != before) changed |= Combine(radiant, ownHero, ownIndex);
-            return changed;
+            // После вашего пика сетки нет: врагов берём из блока «ПОЗИЦИИ ВРАГА» на экране героя, а союзников,
+            // выбравших после вас, — из верхней полосы (она на экране и до конца стратегии).
+            ReadIcons(f);
+            if (TopBarVisible(f, ownIndex, ownHero)) ReadSlotHeroes(f, ownIndex, ownHero, radiant);
+            return Combine(radiant, ownHero, ownIndex) | changed;
         }
 
         var lumRatios = new List<double>();
@@ -282,13 +286,16 @@ sealed class GridReader
         if (!_slotReader.Enabled) return;
         var heroes = new int[10];
         var sure = new bool[10];
+        var pale = new bool[10];
         var open = new List<int>(); // слот изменился с начала пика, а герой в нём не узнан
         for (int s = 0; s < 10; s++)
         {
             if (s == ownIndex) continue;
+            // в Турбо пики врага в полосе скрыты — там только ложные совпадения; враги — из «ПОЗИЦИИ ВРАГА»
+            if (Mode == "TURBO" && (s < 5) != radiant) continue;
             int x = SlotX(s);
             // серый слот — пустой или предвыбор (у своей команды), но не взятый герой
-            bool faded = SlotReader.Saturation(f, x) < GraySat;
+            bool faded = pale[s] = SlotReader.Saturation(f, x) < GraySat;
             bool gray = faded && (s < 5) == radiant;
             var (hero, score, gap) = gray ? _slotReader.ReadGray(f, x) : _slotReader.Read(f, x);
             // Пустой слот с плашкой ранга похож на Shadow Demon (0,44–0,45): героя признаём, только если слот
@@ -313,7 +320,7 @@ sealed class GridReader
         {
             if (s == ownIndex) continue;
             int hero = heroes[s];
-            if (hero != 0 && hero == _slotRaw[s]) { _slotHero[s] = hero; _slotSure[s] = sure[s]; }
+            if (hero != 0 && hero == _slotRaw[s]) { _slotHero[s] = hero; _slotSure[s] = sure[s]; _slotFaded[s] = pale[s]; }
             else if (hero == 0 && _slotRaw[s] == 0) _slotHero[s] = 0;
             _slotRaw[s] = hero;
         }
@@ -345,29 +352,54 @@ sealed class GridReader
 
     static int SlotX(int s) => s < 5 ? RadiantSlotX[s] : DireSlotX[s - 5];
 
-    // Итог: союзники и враги — по скачкам слотов и по узнанным портретам; предвыбор — портрет союзника, чей герой ещё свободен.
+    void ReadIcons(ScreenFrame f)
+    {
+        var cells = _iconReader.Read(f);
+        for (int k = 0; k < 5; k++)
+        {
+            if (cells[k] != 0 && cells[k] == _iconRaw[k]) _iconHero[k] = cells[k];
+            _iconRaw[k] = cells[k];
+        }
+    }
+
+    // Без сетки верхняя полоса — та же, что в пике, если ваш слот узнаётся как ваш герой или хоть один
+    // узнанный раньше слот выглядит так же. Иначе поверх игры другое окно — слоты не читаем.
+    bool TopBarVisible(ScreenFrame f, int ownIndex, int ownHero)
+    {
+        if (!_slotReader.Enabled) return false;
+        if (ownIndex >= 0 && ownHero > 0 && _slotReader.Read(f, SlotX(ownIndex)).Hero == ownHero) return true;
+        for (int s = 0; s < 10; s++)
+            if (s != ownIndex && _slotHero[s] != 0 && !_slotFaded[s] && _slotReader.Read(f, SlotX(s)).Hero == _slotHero[s]) return true;
+        return false;
+    }
+
+    // Итог: союзники и враги — по узнанным портретам и по скачкам слотов; предвыбор — бледный портрет союзника, чей герой ещё свободен.
     bool Combine(bool radiant, int ownHero, int ownIndex)
     {
         // Узнанный в слоте портрет точнее сопоставления по времени (одновременные пики обеих команд) — он и решает сторону.
         var slotSide = new Dictionary<int, bool>();   // герой → враг?
         var planned = new List<int>();
+        var enemySlots = new int[5];
         for (int s = 0; s < 10; s++)
         {
             int hero = _slotHero[s];
             if (hero == 0 || s == ownIndex || hero == ownHero || Banned.Contains(hero)) continue;
-            bool enemy = (s < 5) != radiant;
-            if (enemy || Taken.Contains(hero)) slotSide[hero] = enemy;
+            if ((s < 5) != radiant) enemySlots[s % 5] = hero;
+            // цветной портрет своей команды, узнанный уверенно, — уже взятый герой (после вашего пика в «заняты» он не попадёт: сетки нет)
+            else if (Taken.Contains(hero) || (!_slotFaded[s] && _slotSure[s])) slotSide[hero] = false;
             else if (_slotSure[s] && !planned.Contains(hero)) planned.Add(hero);
         }
-        foreach (var hero in _iconEnemies)
-            if (hero != ownHero && !Banned.Contains(hero)) slotSide[hero] = true;
-        var allies = _assocAllies.Where(h => !slotSide.TryGetValue(h, out var e) || !e).ToList();
-        var enemies = _assocEnemies.Where(h => !slotSide.TryGetValue(h, out var e) || e).ToList();
-        foreach (var (hero, enemy) in slotSide)
-        {
-            var list = enemy ? enemies : allies;
-            if (!list.Contains(hero)) list.Add(hero);
-        }
+        // ячейка «ПОЗИЦИИ ВРАГА» — тот же вражеский слот, и она надёжнее портрета в полосе: в Турбо пики врага там скрыты
+        for (int k = 0; k < 5; k++)
+            if (_iconHero[k] != 0 && _iconHero[k] != ownHero && !Banned.Contains(_iconHero[k])) enemySlots[k] = _iconHero[k];
+        foreach (var hero in enemySlots)
+            if (hero != 0) slotSide[hero] = true;
+        // сначала узнанные в слотах, потом сопоставленные по времени — и не больше, чем мест в команде
+        // (было: шестой враг Undying, которого в матче не было)
+        var enemies = slotSide.Where(kv => kv.Value).Select(kv => kv.Key)
+            .Concat(_assocEnemies.Where(h => !slotSide.ContainsKey(h))).Distinct().Take(5).ToList();
+        var allies = slotSide.Where(kv => !kv.Value).Select(kv => kv.Key)
+            .Concat(_assocAllies.Where(h => !slotSide.ContainsKey(h))).Distinct().Take(4).ToList();
         if (allies.SequenceEqual(Allies) && enemies.SequenceEqual(Enemies) && planned.SequenceEqual(Planned)) return false;
         Allies.Clear(); Allies.AddRange(allies);
         Enemies.Clear(); Enemies.AddRange(enemies);
