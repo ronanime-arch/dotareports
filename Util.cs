@@ -27,7 +27,7 @@ static class Paths
     public static string Frames => Path.Combine(Root, "frames");
     public static string HeroList => Path.Combine(Root, "herolist_ru.json");
     public static string Portraits => Path.Combine(Root, "portraits");
-    public static string SlotRefs => Path.Combine(Root, "slots"); // свои эталоны слотов: облики, которых нет среди портретов
+    public static string SlotRefs => Path.Combine(Root, "slots"); // свои эталоны слотов: как герой выглядит в полосе, если не как на портрете
     public static string Icons => Path.Combine(Root, "icons");
     public static string ProfileTables => Path.Combine(Root, "profile_tables.json");
     public static string RankConfidence => Path.Combine(Root, "rank_confidence.txt");
