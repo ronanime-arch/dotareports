@@ -40,7 +40,7 @@ static class Setup
     public static void EnsureSeed()
     {
         var seed = Path.Combine(AppContext.BaseDirectory, "seed");
-        foreach (var sub in new[] { "refs", "roles" })
+        foreach (var sub in new[] { "refs", "roles", "slots" })
         {
             var from = Path.Combine(seed, sub);
             if (!Directory.Exists(from)) continue;

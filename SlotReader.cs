@@ -10,7 +10,9 @@ namespace DotaReports;
 /// Узнаёт героя в слоте верхней полосы по официальному портрету Valve (portraits\{id}.png, 256×144).
 /// Калибровка (topbar_calib.py): область слота x+4..x+104, y 2..58 ↔ портрет x 40..240, y 0..112;
 /// 12 из 13 известных пиков узнаны первыми из 127. Предвыбор союзника Dota рисует серым полупрозрачным портретом —
-/// его сравниваем только по яркости (ReadGray). Не узнаются особые облики героев (персоны, арканы) — у них другой портрет.
+/// его сравниваем только по яркости (ReadGray). Если герой в полосе на портрет не похож (Shadow Fiend даже в обычном
+/// облике, а также арканы и персоны), — свои эталоны: вырезка области слота 100×56 со скриншота, slots\{id}_{что}.png
+/// (Shadow Fiend: 0,99 между двумя скриншотами, с другими героями того матча — не больше 0,26).
 /// </summary>
 sealed class SlotReader
 {
@@ -26,8 +28,9 @@ sealed class SlotReader
     static readonly bool[] Covered = BuildCovered();
     static readonly int OpenCells = Covered.Count(c => !c);
 
-    readonly Dictionary<int, double[]> _portraits = new();
-    readonly Dictionary<int, double[]> _gray = new();   // те же портреты по яркости
+    // у героя может быть несколько эталонов: портрет Valve и свои вырезки слотов
+    readonly Dictionary<int, List<double[]>> _portraits = new();
+    readonly Dictionary<int, List<double[]>> _gray = new();   // те же облики по яркости
 
     public bool Enabled => _portraits.Count > 0;
 
@@ -46,14 +49,43 @@ sealed class SlotReader
                     var c = bmp.GetPixel(PortraitCrop.X + x, PortraitCrop.Y + y);
                     return (c.R, c.G, c.B);
                 }, PortraitCrop.Width, PortraitCrop.Height);
-                _portraits[hero] = Normalize(rgb, 3);
-                _gray[hero] = Normalize(Gray(rgb), 1);
+                Add(hero, rgb);
             }
             catch (ArgumentException ex)
             {
                 Log.Write($"Портрет {file} не прочитан: {ex.Message}");
             }
         }
+        // без портретов Valve один эталон узнавался бы в любом слоте (отрыв не до кого)
+        if (_portraits.Count == 0) return;
+        // и из папки данных, и из seed рядом с программой: в папку данных seed копируется уже после создания читателя
+        var files = new[] { Paths.SlotRefs, Path.Combine(AppContext.BaseDirectory, "seed", "slots") }
+            .Where(Directory.Exists).SelectMany(d => Directory.GetFiles(d, "*.png"))
+            .GroupBy(f => Path.GetFileName(f)).Select(g => g.First());
+        foreach (var file in files)
+        {
+            if (!int.TryParse(Path.GetFileNameWithoutExtension(file).Split('_')[0], out var hero)) continue;
+            try
+            {
+                using var bmp = new Bitmap(file);
+                if (bmp.Width != SlotW || bmp.Height != SlotH) continue;
+                Add(hero, BoxResize((x, y) =>
+                {
+                    var c = bmp.GetPixel(x, y);
+                    return (c.R, c.G, c.B);
+                }, SlotW, SlotH));
+            }
+            catch (ArgumentException ex)
+            {
+                Log.Write($"Эталон слота {file} не прочитан: {ex.Message}");
+            }
+        }
+    }
+
+    void Add(int hero, double[] rgb)
+    {
+        (_portraits.TryGetValue(hero, out var looks) ? looks : _portraits[hero] = new()).Add(Normalize(rgb, 3));
+        (_gray.TryGetValue(hero, out var grays) ? grays : _gray[hero] = new()).Add(Normalize(Gray(rgb), 1));
     }
 
     /// <summary>Герой в слоте (x — начало цветной полоски слота) или 0, если не узнан уверенно.</summary>
@@ -62,14 +94,15 @@ sealed class SlotReader
     /// <summary>То же только по яркости — для серого предвыбора союзника: цвет там только мешает.</summary>
     public (int Hero, double Score, double Gap) ReadGray(ScreenFrame f, int slotX) => Best(Normalize(Gray(Raw(f, slotX)), 1), _gray);
 
-    (int Hero, double Score, double Gap) Best(double[] v, Dictionary<int, double[]> portraits)
+    // отрыв — до лучшего другого героя: облики одного героя друг другу не соперники
+    (int Hero, double Score, double Gap) Best(double[] v, Dictionary<int, List<double[]>> portraits)
     {
         if (!Enabled) return (0, 0, 0);
         int best = 0;
         double s1 = double.MinValue, s2 = double.MinValue;
-        foreach (var (hero, p) in portraits)
+        foreach (var (hero, looks) in portraits)
         {
-            double s = Dot(v, p);
+            double s = looks.Max(p => Dot(v, p));
             if (s > s1) { s2 = s1; s1 = s; best = hero; }
             else if (s > s2) s2 = s;
         }
@@ -101,7 +134,7 @@ sealed class SlotReader
         if (!Enabled) return result;
         var v = Look(f, slotX);
         foreach (var hero in heroes)
-            if (_portraits.TryGetValue(hero, out var p)) result.Add((hero, Dot(v, p)));
+            if (_portraits.TryGetValue(hero, out var looks)) result.Add((hero, looks.Max(p => Dot(v, p))));
         return result;
     }
 

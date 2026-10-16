@@ -13,7 +13,7 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
   </ItemGroup>
   <ItemGroup>
-    <!-- эталоны клеток сетки и образцы подписей ролей: копируются в папку данных при первом запуске -->
+    <!-- эталоны клеток сетки и слотов верхней полосы, образцы подписей ролей: копируются в папку данных при первом запуске -->
     <None Include="seed\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Compile Remove="testdata\**;dist\**;app\**" />
     <None Remove="testdata\**;dist\**;app\**" />
