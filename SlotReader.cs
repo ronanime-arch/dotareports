@@ -69,18 +69,27 @@ sealed class SlotReader
             try
             {
                 using var bmp = new Bitmap(file);
-                if (bmp.Width != SlotW || bmp.Height != SlotH) continue;
-                Add(hero, BoxResize((x, y) =>
-                {
-                    var c = bmp.GetPixel(x, y);
-                    return (c.R, c.G, c.B);
-                }, SlotW, SlotH));
+                AddRef(hero, bmp);
             }
             catch (ArgumentException ex)
             {
                 Log.Write($"Эталон слота {file} не прочитан: {ex.Message}");
             }
         }
+    }
+
+    /// <summary>Область слота на экране (x — начало цветной полоски слота).</summary>
+    public static Rectangle Area(int slotX) => new(slotX + SlotDx, SlotY, SlotW, SlotH);
+
+    /// <summary>Вид слота (вырезка 100×56) — ещё один эталон героя, сразу, без перезапуска.</summary>
+    public void AddRef(int hero, Bitmap crop)
+    {
+        if (crop.Width != SlotW || crop.Height != SlotH) return;
+        Add(hero, BoxResize((x, y) =>
+        {
+            var c = crop.GetPixel(x, y);
+            return (c.R, c.G, c.B);
+        }, SlotW, SlotH));
     }
 
     void Add(int hero, double[] rgb)

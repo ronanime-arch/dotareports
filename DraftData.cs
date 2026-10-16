@@ -509,6 +509,50 @@ sealed class DraftData
     static string[] MedalBrackets(int medal) =>
         medal == 0 ? Medals : new[] { Medals[medal - 1], Medals[medal < 8 ? medal : medal - 2] };
 
+    /// <summary>
+    /// Герои всех десяти игроков матча по порядку слотов верхней полосы (0–4 Силы Света, 5–9 Силы Тьмы).
+    /// Сначала Stratz, нет там — OpenDota; null — матча ещё нет нигде (появляется через несколько минут после конца).
+    /// </summary>
+    public static async Task<int[]?> MatchHeroesAsync(long matchId)
+    {
+        var players = new List<(bool Radiant, int Slot, int Hero)>();
+        try
+        {
+            using var doc = JsonDocument.Parse(await StratzAsync($"{{ match(id: {matchId}) {{ players {{ heroId isRadiant playerSlot }} }} }}"));
+            foreach (var p in doc.RootElement.GetProperty("data").GetProperty("match").GetProperty("players").EnumerateArray())
+                players.Add((p.GetProperty("isRadiant").GetBoolean(), p.GetProperty("playerSlot").GetInt32(), p.GetProperty("heroId").GetInt32()));
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            Log.Write($"Матч {matchId}: Stratz не отдал героев: {ex.Message}");
+        }
+        if (!Complete(players))
+        {
+            players.Clear();
+            try
+            {
+                using var resp = await Http.GetAsync($"https://api.opendota.com/api/matches/{matchId}");
+                if (resp.IsSuccessStatusCode)
+                {
+                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                    foreach (var p in doc.RootElement.GetProperty("players").EnumerateArray())
+                    {
+                        int slot = p.GetProperty("player_slot").GetInt32(); // 0–4 и 128–132
+                        players.Add((slot < 128, slot, p.GetProperty("hero_id").GetInt32()));
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or InvalidOperationException or KeyNotFoundException)
+            {
+                Log.Write($"Матч {matchId}: OpenDota не отдал героев: {ex.Message}");
+            }
+        }
+        return Complete(players) ? players.OrderBy(p => !p.Radiant).ThenBy(p => p.Slot).Select(p => p.Hero).ToArray() : null;
+
+        static bool Complete(List<(bool Radiant, int Slot, int Hero)> list) =>
+            list.Count == 10 && list.Count(p => p.Radiant) == 5 && list.All(p => p.Hero > 0);
+    }
+
     // Stratz ограничивает частоту: на 429 и сбои сервера — ещё две попытки с паузой (или сколько попросит Retry-After)
     static async Task<byte[]> StratzAsync(string query)
     {
