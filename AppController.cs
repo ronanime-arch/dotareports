@@ -230,7 +230,7 @@ sealed class AppController
         _overlay.ShowPopup((chance.KnownEnemies == 0 ? "Ваш драфт" : "Шанс победы") + $" ≈ {chance.P:0%}", color, lines, PopupTime, color);
         // в журнал — только когда враг известен: иначе это не прогноз матча
         if (chance.KnownEnemies >= 3 && s.MatchId is { Length: > 0 } id && id != "0")
-            PredictionLog.Add(new Prediction(id, mode, chance.P, chance.KnownAllies, chance.KnownEnemies, DateTime.Now));
+            PredictionLog.Add(new Prediction(id, mode, chance.P, chance.KnownAllies, chance.KnownEnemies, DateTime.Now, chance.Logit));
     }
 
     // Разбор матча в «Аналитике»: открытое окно обновляется без перехвата фокуса, закрытое открывается свёрнутым.
