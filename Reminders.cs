@@ -588,9 +588,11 @@ sealed class SoundNote
     public double H2 { get; set; } = 0.1;        // доля 2-го обертона
     public double H3 { get; set; }               // доля 3-го обертона
     // Металл: 0 — обертоны ×2 и ×3, ровный тон (чистые гармоники звучат как пищалка старой приставки);
-    // 1 — ×2,33 и ×3,91, как у металлической пластинки или монеты, и верхние затухают быстрее — звон.
+    // 1 — моды монеты (пластинки): ×1,73 и ×2,33 (их доля — «2-й обертон»), ×3,91, ×4,11 и ×6,71 («3-й»),
+    // каждая — парой близких частот, и верхние гаснут быстрее: звон.
     public double Metal { get; set; }
     public double Noise { get; set; }            // щелчок удара в начале: шум без низких частот, гаснет за ~4 мс
+    public double Volume { get; set; } = 1;      // громкость ноты относительно других
     public double Glide { get; set; }            // > 0 — за Glide с тон съезжает к Freq·GlideTo
     public double GlideTo { get; set; } = 1;
     public double Vibrato { get; set; }          // доля частоты, 5,5 Гц
@@ -626,10 +628,11 @@ static class ReminderSound
     static readonly Dictionary<string, (string Sig, System.Media.SoundPlayer Player)> Players = new();
 
     static SoundNote N(double freq, double start, double pan, double attack, double decay, double h2 = 0.1, double h3 = 0,
-        double glide = 0, double glideTo = 1, double vibrato = 0, double? panTo = null, double metal = 0, double noise = 0) => new()
+        double glide = 0, double glideTo = 1, double vibrato = 0, double? panTo = null, double metal = 0, double noise = 0,
+        double volume = 1) => new()
     {
         Freq = freq, Start = start, Pan = pan, Attack = attack, Decay = decay, H2 = h2, H3 = h3,
-        Glide = glide, GlideTo = glideTo, Vibrato = vibrato, PanTo = panTo, Metal = metal, Noise = noise,
+        Glide = glide, GlideTo = glideTo, Vibrato = vibrato, PanTo = panTo, Metal = metal, Noise = noise, Volume = volume,
     };
 
     static ReminderSoundDef S(string key, string label, double seconds, params SoundNote[] notes) =>
@@ -672,13 +675,18 @@ static class ReminderSound
         S("roshan", "рошан", 0.7,
             N(409.7, 0.15, 0.3, 0.118, 0.83, h2: 0.66, h3: 0.41, glide: 0.05, glideTo: 1.1, vibrato: 0.041),
             N(310.7, 0.16, -0.5, 0.221, 0.24, h2: 0.51, h3: 0.29, glide: 0.03, glideTo: 1.45, vibrato: 0.037)),
-        // звон монет: пять коротких металлических ударов 2,4–3,6 кГц вразнобой слева-справа; звенит, зато узнаётся сразу
-        S("coins", "звон монет", 0.75,
-            N(2650, 0, -0.4, 0.001, 0.2, h2: 0.45, h3: 0.25, metal: 1, noise: 0.35),
-            N(3180, 0.07, 0.5, 0.001, 0.13, h2: 0.4, h3: 0.2, metal: 1, noise: 0.3),
-            N(2380, 0.13, -0.1, 0.001, 0.24, h2: 0.45, h3: 0.25, metal: 1, noise: 0.3),
-            N(3560, 0.21, 0.35, 0.001, 0.11, h2: 0.35, h3: 0.2, metal: 1, noise: 0.25),
-            N(2900, 0.3, -0.5, 0.001, 0.16, h2: 0.4, h3: 0.2, metal: 1, noise: 0.25)),
+        // звон монет: монета упала и подпрыгивает — удары одного тона (5,2 кГц) всё чаще и тише, чуть слева-справа;
+        // металл: моды монеты и щелчок удара (выбран на слух из трёх вариантов: «горсть в руке», «пониже», «упала»)
+        S("coins", "звон монет", 0.9,
+            N(5200, 0, 0.1, 0.001, 0.35, h2: 0.8, h3: 0.5, metal: 1, noise: 0.6),
+            N(5200, 0.16, -0.1, 0.001, 0.12, h2: 0.8, h3: 0.5, metal: 1, noise: 0.6, volume: 0.8),
+            N(5200, 0.275, 0.1, 0.001, 0.12, h2: 0.8, h3: 0.5, metal: 1, noise: 0.6, volume: 0.64),
+            N(5200, 0.358, -0.1, 0.001, 0.12, h2: 0.8, h3: 0.5, metal: 1, noise: 0.6, volume: 0.51),
+            N(5200, 0.418, 0.1, 0.001, 0.12, h2: 0.8, h3: 0.5, metal: 1, noise: 0.6, volume: 0.41),
+            N(5200, 0.461, -0.1, 0.001, 0.12, h2: 0.8, h3: 0.5, metal: 1, noise: 0.6, volume: 0.33),
+            N(5200, 0.492, 0.1, 0.001, 0.12, h2: 0.8, h3: 0.5, metal: 1, noise: 0.6, volume: 0.26),
+            N(5200, 0.514, -0.1, 0.001, 0.12, h2: 0.8, h3: 0.5, metal: 1, noise: 0.6, volume: 0.21),
+            N(5200, 0.53, 0.1, 0.001, 0.12, h2: 0.8, h3: 0.5, metal: 1, noise: 0.6, volume: 0.17)),
         // мягкий: ля и ми вниз — для своих напоминаний
         S("soft", "мягкий", 0.7,
             N(440.0, 0, -0.3, 0.025, 0.12),
@@ -735,11 +743,31 @@ static class ReminderSound
 
     /// <summary>Самая высокая частота в звуке (с гармониками, скольжением и вибрато), Гц — выше ~1500 звук звенит.</summary>
     public static double Highest(ReminderSoundDef def) => def.Notes.Count == 0 ? 0 : def.Notes.Max(n =>
-        Math.Max(n.Freq, n.Glide > 0 ? n.Freq * n.GlideTo : 0) * (1 + n.Vibrato) * (n.H3 > 0.01 ? R3(n) : n.H2 > 0.01 ? R2(n) : 1));
+        Math.Min(MaxPartial, Math.Max(n.Freq, n.Glide > 0 ? n.Freq * n.GlideTo : 0) * (1 + n.Vibrato) * Partials(n).Max(p => p.Ratio)));
 
-    // обертоны: у тона ×2 и ×3, у металла — как у пластинки
-    static double R2(SoundNote n) => 2 + 0.33 * Math.Clamp(n.Metal, 0, 1);
-    static double R3(SoundNote n) => 3 + 0.91 * Math.Clamp(n.Metal, 0, 1);
+    // Выше не синтезируем: там уже почти не слышно, а ближе к 22 кГц (половина частоты записи) — искажения.
+    const double MaxPartial = 18000;
+    // моды монеты относительно первой (свободная круглая пластинка): доля от «2-го обертона» или «3-го»
+    static readonly (double Ratio, bool Second, double Share)[] MetalModes =
+        { (1.73, true, 0.8), (2.33, true, 1), (3.91, false, 1), (4.11, false, 0.7), (6.71, false, 0.4) };
+
+    // Составляющие ноты: основной тон, обертоны тона (их доля — 1 − металл) и моды металла парами близких частот
+    // (мерцание), гаснут быстрее основного — как √отношения частот.
+    static List<(double Ratio, double Amp, double Decay)> Partials(SoundNote n)
+    {
+        double metal = Math.Clamp(n.Metal, 0, 1), decay = Math.Max(n.Decay, 1e-3);
+        var list = new List<(double, double, double)> { (1, 1, decay) };
+        if (n.H2 * (1 - metal) > 1e-4) list.Add((2, n.H2 * (1 - metal), decay));
+        if (n.H3 * (1 - metal) > 1e-4) list.Add((3, n.H3 * (1 - metal), decay));
+        foreach (var (ratio, second, share) in MetalModes)
+        {
+            double amp = (second ? n.H2 : n.H3) * share * metal;
+            if (amp <= 1e-4) continue;
+            list.Add((ratio, amp / 2, decay / Math.Sqrt(ratio)));
+            list.Add((ratio * 1.002, amp / 2, decay / Math.Sqrt(ratio)));
+        }
+        return list.Where(p => p.Item1 == 1 || n.Freq * p.Item1 < MaxPartial).ToList(); // основной тон — всегда
+    }
 
     // Ноты складываются в левый и правый канал (панорама с постоянной громкостью); в конце 50 мс — в ноль.
     static byte[] Wav(ReminderSoundDef def)
@@ -750,20 +778,21 @@ static class ReminderSound
         for (int k = 0; k < def.Notes.Count; k++)
         {
             var note = def.Notes[k];
-            double phase = 0, length = Math.Max(def.Seconds - note.Start, 1e-3), attack = Math.Max(note.Attack, 1e-4), decay = Math.Max(note.Decay, 1e-3);
-            double metal = Math.Clamp(note.Metal, 0, 1), r2 = R2(note), r3 = R3(note);
-            // у металла верхние обертоны гаснут быстрее основного
-            double decay2 = decay / Math.Pow(r2, 0.5 * metal), decay3 = decay / Math.Pow(r3, 0.5 * metal);
+            double phase = 0, length = Math.Max(def.Seconds - note.Start, 1e-3), attack = Math.Max(note.Attack, 1e-4);
+            var partials = Partials(note);
+            double fadeOut = Math.Max(0.05, 7 * partials.Max(p => p.Decay)); // дальше нота тише −60 дБ — не считаем
             var rnd = new Random(k * 7919 + (int)note.Freq); // шум удара одинаковый при каждой сборке
             double prevNoise = 0;
             for (int i = Math.Max(0, (int)(note.Start * Rate)); i < n; i++)
             {
                 double tt = (double)i / Rate - note.Start;
+                if (tt > fadeOut) break;
                 double f = note.Freq * (note.Glide > 0 ? note.GlideTo + (1 - note.GlideTo) * Math.Exp(-tt / note.Glide) : 1)
                            * (1 + note.Vibrato * Math.Sin(2 * Math.PI * 5.5 * tt));
                 phase += 2 * Math.PI * f / Rate;
-                double v = Math.Min(tt / attack, 1) * (Math.Exp(-tt / decay) * Math.Sin(phase)
-                    + note.H2 * Math.Exp(-tt / decay2) * Math.Sin(r2 * phase) + note.H3 * Math.Exp(-tt / decay3) * Math.Sin(r3 * phase));
+                double v = 0;
+                foreach (var (ratio, amp, partDecay) in partials) v += amp * Math.Exp(-tt / partDecay) * Math.Sin(ratio * phase);
+                v *= Math.Min(tt / attack, 1);
                 if (note.Noise > 0 && tt < 0.05)
                 {
                     // разность соседних отсчётов белого шума — без низа: щелчок, а не шипение
@@ -771,6 +800,7 @@ static class ReminderSound
                     v += note.Noise * 0.5 * (white - prevNoise) * Math.Exp(-tt / 0.004);
                     prevNoise = white;
                 }
+                v *= Math.Clamp(note.Volume, 0, 1);
                 double pan = note.PanTo is double to ? note.Pan + (to - note.Pan) * Math.Min(tt / length, 1) : note.Pan;
                 double a = (Math.Clamp(pan, -1, 1) + 1) * Math.PI / 4;
                 left[i] += v * Math.Cos(a);
