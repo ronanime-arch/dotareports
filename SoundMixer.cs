@@ -124,13 +124,16 @@ sealed class SoundMixer : Grid
         });
         remove.IsEnabled = d.Notes.Count > 1;
         box.Children.Add(Line(title, remove));
-        box.Children.Add(SliderRow("Частота", 40, 1000, 0.1, n.Freq, v => $"{v:0.#} Гц", v => { n.Freq = v; Title(); }));
+        box.Children.Add(SliderRow("Частота", 40, 6000, 0.1, n.Freq, v => $"{v:0.#} Гц", v => { n.Freq = v; Title(); }, log: true));
         box.Children.Add(SliderRow("Начало", 0, 1.5, 0.01, n.Start, v => $"{v:0.00} с", v => n.Start = v));
         box.Children.Add(SliderRow("Панорама", -1, 1, 0.1, n.Pan, PanText, v => n.Pan = v));
         box.Children.Add(SliderRow("Атака", 0.001, 0.3, 0.001, n.Attack, v => $"{v * 1000:0} мс", v => n.Attack = v));
         box.Children.Add(SliderRow("Затухание", 0.02, 1, 0.01, n.Decay, v => $"{v:0.00} с", v => n.Decay = v));
-        box.Children.Add(SliderRow("2-я гармоника", 0, 1, 0.01, n.H2, v => $"{v * 100:0}%", v => n.H2 = v));
-        box.Children.Add(SliderRow("3-я гармоника", 0, 1, 0.01, n.H3, v => $"{v * 100:0}%", v => n.H3 = v));
+        box.Children.Add(SliderRow("2-й обертон", 0, 1, 0.01, n.H2, v => $"{v * 100:0}%", v => n.H2 = v));
+        box.Children.Add(SliderRow("3-й обертон", 0, 1, 0.01, n.H3, v => $"{v * 100:0}%", v => n.H3 = v));
+        // 0 — ровный тон (обертоны ×2, ×3), 100% — металл (×2,33, ×3,91, как у монеты): звон вместо «пищалки»
+        box.Children.Add(SliderRow("Металл", 0, 1, 0.01, n.Metal, v => $"{v * 100:0}%", v => n.Metal = v));
+        box.Children.Add(SliderRow("Удар (шум)", 0, 1, 0.01, n.Noise, v => $"{v * 100:0}%", v => n.Noise = v));
         box.Children.Add(SliderRow("Вибрато", 0, 0.05, 0.001, n.Vibrato, v => $"{v * 100:0.#}%", v => n.Vibrato = v));
 
         // скольжение тона: включается галочкой, скорость помним и когда выключено
@@ -176,8 +179,12 @@ sealed class SoundMixer : Grid
         };
     }
 
-    FrameworkElement SliderRow(string caption, double min, double max, double step, double value, Func<double, string> show, Action<double> set)
+    // log — ползунок по логарифму: у частоты октава одной длины и внизу, и вверху (иначе 40–6000 Гц не настроить)
+    FrameworkElement SliderRow(string caption, double min, double max, double step, double value, Func<double, string> show, Action<double> set,
+        bool log = false)
     {
+        Func<double, double> to = log ? v => Math.Log(v) : v => v;
+        Func<double, double> from = log ? v => Math.Exp(v) : v => v;
         var row = new Grid { Margin = new Thickness(0, 1, 0, 1) };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(160) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -185,13 +192,13 @@ sealed class SoundMixer : Grid
         var text = new TextBlock { Text = caption, VerticalAlignment = VerticalAlignment.Center };
         var slider = new Slider
         {
-            Minimum = min, Maximum = max, SmallChange = step, LargeChange = step * 10, TickFrequency = step, IsSnapToTickEnabled = true,
-            Value = value, VerticalAlignment = VerticalAlignment.Center,
+            Minimum = to(min), Maximum = to(max), SmallChange = log ? 0.005 : step, LargeChange = log ? 0.05 : step * 10,
+            TickFrequency = step, IsSnapToTickEnabled = !log, Value = to(value), VerticalAlignment = VerticalAlignment.Center,
         };
         var output = new TextBlock { Text = show(value), TextAlignment = TextAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
         slider.ValueChanged += (_, e) =>
         {
-            double v = Math.Round(e.NewValue, 4);
+            double v = log ? Math.Round(from(e.NewValue), 1) : Math.Round(e.NewValue, 4);
             set(v);
             output.Text = show(v);
             UpdateInfo();
