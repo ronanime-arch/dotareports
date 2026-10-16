@@ -163,6 +163,9 @@ sealed class AnalyticsWindow : Window
             // не всех героев узнали с экрана — прогноз неполный, неизвестные в нём как средние
             if (c.KnownAllies < 5 || c.KnownEnemies < 5)
                 panel.Children.Add(Note($"узнано героев: ваших {c.KnownAllies} из 5, их {c.KnownEnemies} из 5 — остальные считаются средними"));
+            panel.Children.Add(Note($"доверие к драфту ×{c.Trust:0.00}: сумма винрейтов, матчапов и сочетаний перехваливает драфт — " +
+                (c.TrustMatches > 0 ? $"уточнено по {c.TrustMatches} {Words.Plural(c.TrustMatches, "вашему матчу", "вашим матчам", "вашим матчам")} с исходом"
+                    : "уточнится по вашим матчам с исходом")));
         }
 
         var links = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };

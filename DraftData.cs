@@ -22,8 +22,11 @@ sealed record TurboPick(int HeroId, double Winrate, double VsRevealed, double Wi
     public double Bonus => VsRevealed + WithAllies + Composition + CounterRisk;
 }
 
-/// <summary>Прогноз по драфту: вероятность победы, сколько героев известно с каждой стороны и из чего сложилось (п.п.).</summary>
-sealed record WinChance(double P, int KnownAllies, int KnownEnemies, IReadOnlyList<string> Parts);
+/// <summary>
+/// Прогноз по драфту: вероятность победы, сколько героев известно с каждой стороны и из чего сложилось (п.п., уже с доверием).
+/// Logit — сумма драфта до доверия (для журнала прогнозов), Trust — доверие к драфту и по скольким вашим матчам оно уточнено.
+/// </summary>
+sealed record WinChance(double P, int KnownAllies, int KnownEnemies, IReadOnlyList<string> Parts, double Logit, double Trust, int TrustMatches);
 
 /// <summary>
 /// Данные для пика: герои (OpenDota), матчапы герой-против-героя по вашему брекету (Stratz, кэш на сутки),
@@ -66,6 +69,9 @@ sealed class DraftData
     public int RankTier { get; private set; }
     /// <summary>Ваши данные Valve (GCPD): точные победы на героях и счёт против героев.</summary>
     public ProfileData? Profile { get; private set; }
+    (double K, int N) _trust;
+    static readonly List<MatchRow> NoMatches = new();
+    (DateTime File, List<MatchRow>? Matches) _trustKey = (DateTime.MinValue, null);
 
     public async Task LoadAsync()
     {
@@ -253,15 +259,29 @@ sealed class DraftData
                     personal += 0.5 * (Logit((r.Wins + OwnPrior * expect) / (r.Wins + r.Losses + OwnPrior)) - Logit(expect));
                 }
         double logit = heroes + matchups + synergy + personal;
-        double p = Math.Clamp(1 / (1 + Math.Exp(-logit)), 0.15, 0.85);
-        // доли в п.п. (около 50% один логит ≈ 25 п.п.)
+        var (trust, trustN) = Trust();
+        double p = Math.Clamp(1 / (1 + Math.Exp(-trust * logit)), 0.15, 0.85);
+        // доли в п.п. (около 50% один логит ≈ 25 п.п.) — с доверием, чтобы складывались в показанный шанс
         var parts = new List<string>();
-        void Part(string name, double l) { if (Math.Abs(l * 25) >= 0.1) parts.Add($"{name} {l * 25:+0.0;-0.0}"); }
+        void Part(string name, double l) { if (Math.Abs(l * trust * 25) >= 0.1) parts.Add($"{name} {l * trust * 25:+0.0;-0.0}"); }
         Part("герои", heroes);
         Part("матчапы", matchups);
         Part("сочетания", synergy);
         Part("ваша игра", personal);
-        return new WinChance(p, team.Count, enemyList.Count, parts);
+        return new WinChance(p, team.Count, enemyList.Count, parts, logit, trust, trustN);
+    }
+
+    // Доверие к драфту — по журналу прогнозов и истории матчей; пересчёт, только когда что-то из них обновилось.
+    (double K, int N) Trust()
+    {
+        var matches = Profile is { Loaded: true } prof ? prof.Matches : NoMatches;
+        var file = File.Exists(Paths.Predictions) ? File.GetLastWriteTimeUtc(Paths.Predictions) : DateTime.MinValue;
+        if (_trustKey.Matches == null || _trustKey.File != file || !ReferenceEquals(_trustKey.Matches, matches))
+        {
+            _trust = PredictionLog.Trust(matches);
+            _trustKey = (file, matches);
+        }
+        return _trust;
     }
 
     static double Logit(double p) => Math.Log(p / (1 - p));
