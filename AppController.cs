@@ -34,6 +34,7 @@ sealed class AppController
     readonly DraftData _draftData = new();
     readonly GsiListener _gsi = new();
     readonly PickWatcher _watcher = new();
+    readonly SlotLearner _slotLearner;   // после матча — эталоны слотов, где союзники не узнались
     readonly DispatcherTimer _frameTimer = new() { Interval = TimeSpan.FromSeconds(0.5) };
     TurboCard _turboCard = null!;
     RatingWindow _rating = null!;
@@ -74,6 +75,7 @@ sealed class AppController
     public AppController(System.Windows.Application app)
     {
         _app = app;
+        _slotLearner = new SlotLearner(_watcher);
         // «DotaReports.exe --exit» из другой копии: обычный выход с закрытием WebView2 (куки входа в Steam сохраняются)
         var exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ExitEventName);
         ThreadPool.RegisterWaitForSingleObject(exitEvent, (_, _) => _app.Dispatcher.BeginInvoke(Exit), null, Timeout.Infinite, executeOnlyOnce: true);
@@ -342,6 +344,7 @@ sealed class AppController
             _profilePending = false;
             await RefreshProfileAsync();
         }
+        if (!_picking) await _slotLearner.TickAsync();
     }
 
     // Dota открыта десять минут, а данных GSI нет ни разу — один раз объяснить причину.

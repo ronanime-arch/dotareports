@@ -12,7 +12,8 @@ namespace DotaReports;
 /// 12 из 13 известных пиков узнаны первыми из 127. Предвыбор союзника Dota рисует серым полупрозрачным портретом —
 /// его сравниваем только по яркости (ReadGray). Если герой в полосе на портрет не похож (Shadow Fiend даже в обычном
 /// облике, а также арканы и персоны), — свои эталоны: вырезка области слота 100×56 со скриншота, slots\{id}_{что}.png
-/// (Shadow Fiend: 0,99 между двумя скриншотами, с другими героями того матча — не больше 0,26).
+/// (Shadow Fiend: 0,99 между двумя скриншотами, с другими героями того матча — не больше 0,26; Riki и Lich —
+/// с другими слотами обоих скриншотов не больше 0,34).
 /// </summary>
 sealed class SlotReader
 {
@@ -68,18 +69,27 @@ sealed class SlotReader
             try
             {
                 using var bmp = new Bitmap(file);
-                if (bmp.Width != SlotW || bmp.Height != SlotH) continue;
-                Add(hero, BoxResize((x, y) =>
-                {
-                    var c = bmp.GetPixel(x, y);
-                    return (c.R, c.G, c.B);
-                }, SlotW, SlotH));
+                AddRef(hero, bmp);
             }
             catch (ArgumentException ex)
             {
                 Log.Write($"Эталон слота {file} не прочитан: {ex.Message}");
             }
         }
+    }
+
+    /// <summary>Область слота на экране (x — начало цветной полоски слота).</summary>
+    public static Rectangle Area(int slotX) => new(slotX + SlotDx, SlotY, SlotW, SlotH);
+
+    /// <summary>Вид слота (вырезка 100×56) — ещё один эталон героя, сразу, без перезапуска.</summary>
+    public void AddRef(int hero, Bitmap crop)
+    {
+        if (crop.Width != SlotW || crop.Height != SlotH) return;
+        Add(hero, BoxResize((x, y) =>
+        {
+            var c = crop.GetPixel(x, y);
+            return (c.R, c.G, c.B);
+        }, SlotW, SlotH));
     }
 
     void Add(int hero, double[] rgb)

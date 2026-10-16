@@ -56,6 +56,17 @@ sealed class PickWatcher
         lock (_grid) _grid.SaveRefs();
     }
 
+    /// <summary>См. GridReader.SlotsToLearn — под замком: кадры пика читают тот же SlotReader в фоне.</summary>
+    public List<(int Slot, int Hero, string Was)>? SlotsToLearn(ScreenFrame f, int[] truth, bool radiant)
+    {
+        lock (_grid) return _grid.SlotsToLearn(f, truth, radiant);
+    }
+
+    public void AddSlotRef(int hero, Bitmap crop)
+    {
+        lock (_grid) _grid.AddSlotRef(hero, crop);
+    }
+
     public void Update(GsiState s)
     {
         _team = s.Team;

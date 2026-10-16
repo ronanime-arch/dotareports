@@ -352,6 +352,35 @@ sealed class GridReader
 
     static int SlotX(int s) => s < 5 ? RadiantSlotX[s] : DireSlotX[s - 5];
 
+    /// <summary>Область слота s (0–4 Силы Света, 5–9 Силы Тьмы) на экране.</summary>
+    public static Rectangle SlotArea(int s) => SlotReader.Area(SlotX(s));
+
+    /// <summary>На кадре взяты все герои вашей команды: её пять слотов цветные (не пустые и не серый предвыбор).</summary>
+    public static bool TeamPicked(ScreenFrame f, bool radiant) =>
+        Enumerable.Range(radiant ? 0 : 5, 5).All(s => SlotReader.Saturation(f, SlotX(s)) >= GraySat);
+
+    /// <summary>
+    /// Слоты вашей команды, которые запомнить как эталоны героев, известных после матча (truth — 10 героев по слотам):
+    /// там, где герой не узнан уверенно. null — порядок слотов не сходится (уверенно узнанный слот — не тот герой)
+    /// или проверить его не по чему (ни одного уверенного совпадения): учить по такому — портить эталоны.
+    /// </summary>
+    public List<(int Slot, int Hero, string Was)>? SlotsToLearn(ScreenFrame f, int[] truth, bool radiant)
+    {
+        var learn = new List<(int, int, string)>();
+        int confirmed = 0;
+        for (int s = radiant ? 0 : 5; s < (radiant ? 5 : 10); s++)
+        {
+            var (hero, score, gap) = _slotReader.Read(f, SlotX(s));
+            bool sure = hero != 0 && score >= SurePlanScore && gap >= SurePlanGap;
+            if (sure && hero != truth[s]) return null;
+            if (sure) confirmed++;
+            else learn.Add((s, truth[s], hero != 0 ? $"узнан как {hero}, {score:0.00}" : $"не узнан, {score:0.00}"));
+        }
+        return confirmed > 0 ? learn : null;
+    }
+
+    public void AddSlotRef(int hero, Bitmap crop) => _slotReader.AddRef(hero, crop);
+
     void ReadIcons(ScreenFrame f)
     {
         var cells = _iconReader.Read(f);
