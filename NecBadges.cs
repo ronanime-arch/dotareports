@@ -46,8 +46,14 @@ sealed class AvatarMatcher
     public int Count => _candidates.Count;
 
     /// <summary>Игрок с этой аватаркой; null — не узнан уверенно или это вы. Debug — лучший и второй счёт.</summary>
-    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug)
+    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug) => Match(image, area, out debug, out _);
+
+    /// <param name="sure">Узнан уверенно — игрок или вы (для подбора сдвига строк, где ваша строка тоже в счёт).</param>
+    /// <param name="small">Аватарка 32 px (выбор команды): совпадения ниже — 0,67–0,72 у игроков при отрыве 0,4+,
+    /// чужие и «?» — до 0,58 при отрыве до 0,27 (снимок 17.10), поэтому пороги свои.</param>
+    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug, out bool sure, bool small = false)
     {
+        double minScore = small ? 0.62 : MinScore, minGap = small ? 0.3 : MinGap;
         var v = Vector(image, area);
         double s1 = double.MinValue, s2 = double.MinValue;
         NecPlayer? best = null;
@@ -59,7 +65,8 @@ sealed class AvatarMatcher
             else if (s > s2) s2 = s;
         }
         debug = $"{(own ? "вы" : best?.Name ?? "-")} {s1:0.00}/{s1 - s2:0.00}";
-        return !own && s1 >= MinScore && s1 - s2 >= MinGap ? best : null;
+        sure = s1 >= minScore && s1 - s2 >= minGap;
+        return !own && sure ? best : null;
     }
 
     double[]? Load(string file)
@@ -109,37 +116,165 @@ sealed class AvatarMatcher
     }
 }
 
+
+/// <summary>Какой экран кастомки: подключение (список из 10), выбор команды (две колонки по 5), выбор героя (карточки).</summary>
+enum NecLayout { Connect, Teams, Cards }
+
 /// <summary>
-/// Где на экране кастомки (1920×1080, по снимкам IM Пробуждение 17.10) аватарки игроков и куда ставить плашку со званием.
-/// Экран подключения: справа список из 10 строк, аватарка 48×48 в (1556, 312 + 60·i), плашка — левее списка.
-/// Выбор героя: карточки вашей команды по x = 63 + 353·i, аватарка ~61×61 в (карточка + 6, 214), плашка — в шапке справа под ником.
+/// Что и где нарисовать: иконка ранга (и текст — в плашке), X/Y — левый край (Right — правый, Center — середина) и верх,
+/// px экрана; Icon 0 — плашка без иконки.
+/// </summary>
+sealed record BadgeSpot(int X, int Y, bool Right, int RankTier, string? Text, Color Color, double Icon,
+    bool Center = false, double FontSize = 14);
+
+/// <summary>
+/// Где на экране кастомки (1920×1080, по снимкам IM Пробуждение 17.10) аватарки игроков и куда ставить значок ранга.
+/// Подключение: справа список из 10 строк, аватарка 48×48 в (1556, 312 + 60·i) — иконка перед аватаркой.
+/// Выбор команды: «Силы Света» и «Силы Тьмы» по 5 строк, аватарка 32×32 в (1146, 412 + 34·i) и (1146, 635 + 34·i) —
+/// иконка перед аватаркой; панель может сидеть выше или ниже (без кнопки «Заполнить слоты ботами»), сдвиг подбираем.
+/// Выбор героя: карточки вашей команды по x = 63 + 353·i, аватарка ~61×61 в (карточка + 6, 214); слева соседняя
+/// карточка, поэтому значок с текстом — в шапке справа под ником.
 /// </summary>
 static class NecScreen
 {
     public static readonly Rectangle SetupStrip = new(1556, 312, 48, 60 * 9 + 48);
     public static readonly Rectangle CardStrip = new(63, 214, 353 * 4 + 345, 62);
+    const int TeamsTop = 412, DireTop = 635, TeamsRow = 34, TeamsShiftUp = 60, TeamsShiftDown = 20;
+    // снимаем с запасом по вертикали: сдвиг панели подбирается по тому, где аватарки узнаются лучше
+    public static readonly Rectangle TeamsStrip = new(1146, TeamsTop - TeamsShiftUp, 32, DireTop + 4 * TeamsRow + 32 - TeamsTop + TeamsShiftUp + TeamsShiftDown);
 
-    /// <summary>Узнанные игроки: номер строки (экран подключения) или карточки (выбор героя) и кто там.</summary>
-    public static List<(int Index, NecPlayer Player, string Debug)> Read(Bitmap strip, bool setup, AvatarMatcher matcher)
+    public static Rectangle Strip(NecLayout layout) => layout switch
     {
-        var found = new List<(int, NecPlayer, string)>();
-        int count = setup ? 10 : 5;
+        NecLayout.Connect => SetupStrip,
+        NecLayout.Teams => TeamsStrip,
+        _ => CardStrip,
+    };
+
+    /// <summary>Узнанные игроки: номер строки или карточки, кто там, значки и счёт сравнения (Debug).</summary>
+    public static List<(int Index, NecPlayer Player, BadgeSpot[] Spots, string Debug)> Read(Bitmap strip, NecLayout layout, AvatarMatcher matcher)
+    {
+        int shift = layout == NecLayout.Teams ? TeamsShift(strip, matcher) : 0;
+        var found = new List<(int, NecPlayer, BadgeSpot[], string)>();
+        int count = layout == NecLayout.Cards ? 5 : 10;
         for (int i = 0; i < count; i++)
         {
-            // внутри рамки аватарки: в строке рамка 1 px, у карточки — подсветка своего игрока до 3 px
-            var area = setup ? new Rectangle(3, 3 + 60 * i, 42, 42) : new Rectangle(353 * i + 9, 3, 55, 55);
-            var p = matcher.Match(strip, area, out var debug);
-            if (p != null) found.Add((i, p, debug));
+            var p = matcher.Match(strip, Avatar(layout, i, shift), out var debug, out _, layout == NecLayout.Teams);
+            if (p == null) continue;
+            found.Add((i, p, Spots(layout, i, shift, p), debug));
         }
         return found;
     }
 
-    /// <summary>Плашка: правый край и верх, в пикселях экрана.</summary>
-    public static (int Right, int Top) Badge(int index, bool setup) =>
-        setup ? (1548, 312 + 60 * index + 13) : (63 + 353 * index + 345, 256);
+    /// <summary>Для --badge-test: лучший и второй счёт по каждой строке (и подобранный сдвиг панели команд).</summary>
+    public static IEnumerable<string> Debug(Bitmap strip, NecLayout layout, AvatarMatcher matcher)
+    {
+        int shift = layout == NecLayout.Teams ? TeamsShift(strip, matcher) : 0;
+        if (layout == NecLayout.Teams) yield return $"сдвиг панели команд: {shift}";
+        for (int i = 0; i < (layout == NecLayout.Cards ? 5 : 10); i++)
+        {
+            matcher.Match(strip, Avatar(layout, i, shift), out var debug, out _, layout == NecLayout.Teams);
+            yield return $"  строка {i + 1}: {debug}";
+        }
+    }
+
+    // Аватарка внутри снимка: в строке рамка 1 px, у карточки — подсветка своего игрока до 3 px.
+    static Rectangle Avatar(NecLayout layout, int i, int shift) => layout switch
+    {
+        NecLayout.Connect => new Rectangle(3, 3 + 60 * i, 42, 42),
+        NecLayout.Teams => new Rectangle(2, TeamsShiftUp + shift + RowTop(i) - TeamsTop + 2, 28, 28),
+        _ => new Rectangle(353 * i + 9, 3, 55, 55),
+    };
+
+    static int RowTop(int i) => i < 5 ? TeamsTop + TeamsRow * i : DireTop + TeamsRow * (i - 5);
+
+    // Сдвиг панели команд (px, минус — выше): тот, при котором уверенно узнано больше всего строк (и вы в том числе).
+    static int TeamsShift(Bitmap strip, AvatarMatcher matcher)
+    {
+        int best = 0, bestCount = -1;
+        for (int shift = -TeamsShiftUp; shift <= TeamsShiftDown; shift += 2)
+        {
+            int count = 0;
+            for (int i = 0; i < 10; i++)
+            {
+                matcher.Match(strip, Avatar(NecLayout.Teams, i, shift), out _, out bool sure, small: true);
+                if (sure) count++;
+            }
+            if (count > bestCount || (count == bestCount && Math.Abs(shift) < Math.Abs(best))) (best, bestCount) = (shift, count);
+        }
+        return best;
+    }
+
+    // Иконка ранга — перед аватаркой; у карточки союзника слева соседняя карточка — на левом нижнем углу аватарки,
+    // а звание текстом — в шапке справа под ником.
+    static BadgeSpot[] Spots(NecLayout layout, int i, int shift, NecPlayer p)
+    {
+        if (p.RankTier / 10 is < 1 or > 8) return Array.Empty<BadgeSpot>(); // без медали — у ника ничего, только шум
+        var (text, color) = NecLobby.Badge(p);
+        return layout switch
+        {
+            NecLayout.Connect => new[] { new BadgeSpot(1556 - 4 - 48, 312 + 60 * i, false, p.RankTier, null, color, 48) },
+            NecLayout.Teams => new[] { new BadgeSpot(1146 - 2 - 34, RowTop(i) + shift - 1, false, p.RankTier, null, color, 34) },
+            _ => new[]
+            {
+                new BadgeSpot(63 + 353 * i - 6, 214 + 61 - 40 + 4, false, p.RankTier, null, color, 40),
+                new BadgeSpot(63 + 353 * i + 345, 254, true, p.RankTier, text, color, 0),
+            },
+        };
+    }
 }
 
-/// <summary>Плашки со званием под никами — прозрачное окно на весь экран, клики проходят насквозь, фокус не забирает.</summary>
+/// <summary>
+/// Иконка ранга: значок медали Dota, как в клиенте (<see cref="RankArt"/>, без звёзд). Значок ещё не скачан —
+/// кружок цвета медали (Рекрут — бронза … Легенда — золото, Божество — лёд, Титан — красный) с числом звёзд.
+/// </summary>
+static class RankIcon
+{
+    static readonly Color[] Medal =
+    {
+        Color.FromRgb(0x6B, 0x62, 0x58), // нет
+        Color.FromRgb(0xA5, 0x7A, 0x4F), // Рекрут
+        Color.FromRgb(0x7F, 0xA0, 0x7A), // Страж
+        Color.FromRgb(0x4F, 0xA6, 0xA0), // Рыцарь
+        Color.FromRgb(0x5F, 0x94, 0xD6), // Герой
+        Color.FromRgb(0xD9, 0xA4, 0x41), // Легенда
+        Color.FromRgb(0x9C, 0x7B, 0xD4), // Властелин
+        Color.FromRgb(0xA8, 0xDC, 0xEC), // Божество
+        Color.FromRgb(0xD9, 0x53, 0x3F), // Титан
+    };
+
+    public static FrameworkElement Build(int rankTier, double size)
+    {
+        int medal = rankTier / 10 is var m and >= 1 and <= 8 ? m : 0, stars = rankTier % 10;
+        if (medal > 0 && RankArt.Medal(medal) is { } art)
+            return new System.Windows.Controls.Image { Source = art, Width = size, Height = size, Stretch = System.Windows.Media.Stretch.Uniform };
+        var c = Medal[medal];
+        Color Shade(double k) => Color.FromRgb((byte)(c.R * k), (byte)(c.G * k), (byte)(c.B * k));
+        var light = Color.FromRgb((byte)Math.Min(255, c.R + 60), (byte)Math.Min(255, c.G + 60), (byte)Math.Min(255, c.B + 60));
+        string mark = medal == 0 ? "?" : medal == 8 ? "★" : stars is >= 1 and <= 5 ? stars.ToString() : "";
+        // светлые медали — тёмная цифра, тёмные — светлая
+        bool bright = 0.299 * c.R + 0.587 * c.G + 0.114 * c.B > 150;
+        var grid = new Grid { Width = size, Height = size };
+        grid.Children.Add(new System.Windows.Shapes.Ellipse
+        {
+            Fill = new System.Windows.Media.RadialGradientBrush(light, Shade(0.75)) { GradientOrigin = new Point(0.35, 0.3) },
+            Stroke = Glass.B(Glass.Dark), StrokeThickness = Math.Max(1.5, size / 14),
+        });
+        grid.Children.Add(new System.Windows.Shapes.Ellipse
+        {
+            Margin = new Thickness(size * 0.12), Stroke = Glass.B(0x66, 0xFF, 0xF0, 0xDC), StrokeThickness = 1,
+        });
+        grid.Children.Add(new TextBlock
+        {
+            Text = mark, FontFamily = Glass.Serif, FontWeight = FontWeights.Bold, FontSize = size * 0.56,
+            Foreground = Glass.B(bright ? Glass.Dark : Glass.Ink),
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, size * 0.04),
+        });
+        return grid;
+    }
+}
+
+/// <summary>Значки ранга у игроков на экране кастомки — прозрачное окно на весь экран, клики проходят насквозь, фокус не забирает.</summary>
 sealed class RankBadges : Window
 {
     readonly Canvas _canvas = new();
@@ -164,10 +299,10 @@ sealed class RankBadges : Window
         };
     }
 
-    /// <summary>Показать плашки (правый край и верх — в пикселях экрана); пусто — спрятать.</summary>
-    public void ShowBadges(IReadOnlyCollection<(int Right, int Top, string Text, Color Color)> badges)
+    /// <summary>Показать значки (координаты — в пикселях экрана); пусто — спрятать.</summary>
+    public void ShowBadges(IReadOnlyCollection<BadgeSpot> spots)
     {
-        if (badges.Count == 0)
+        if (spots.Count == 0)
         {
             Hide();
             return;
@@ -176,31 +311,55 @@ sealed class RankBadges : Window
         // при масштабе Windows не 100% окна WPF меряются не в пикселях
         var toDip = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice ?? System.Windows.Media.Matrix.Identity;
         (Left, Top, Width, Height) = (0, 0, SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
-        _canvas.Children.Clear();
-        foreach (var (right, top, text, color) in badges)
-        {
-            var pt = toDip.Transform(new Point(right, top));
-            // «таблетка» в стиле окон: тёмное стекло, золотистая рамка
-            var badge = new Border
-            {
-                Background = Glass.B(0xEB, 0x1A, 0x14, 0x0E),
-                BorderBrush = Glass.B(0x4D, 0xE8, 0xC8, 0x96),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(999),
-                Padding = new Thickness(9, 1, 9, 2),
-                Child = new TextBlock
-                {
-                    Text = text,
-                    FontFamily = Glass.Sans,
-                    FontSize = 13,
-                    FontWeight = FontWeights.SemiBold,
-                    Foreground = Glass.B(color),
-                },
-            };
-            Canvas.SetRight(badge, Width - pt.X);
-            Canvas.SetTop(badge, pt.Y);
-            _canvas.Children.Add(badge);
-        }
+        Fill(_canvas, spots, Width, toDip);
         if (!IsVisible) Show();
+    }
+
+    /// <summary>Разложить значки по холсту шириной width (DIP); toDip — из пикселей экрана. Нужен и для --badge-test.</summary>
+    public static void Fill(Canvas canvas, IEnumerable<BadgeSpot> spots, double width, System.Windows.Media.Matrix toDip)
+    {
+        canvas.Children.Clear();
+        foreach (var s in spots)
+        {
+            var pt = toDip.Transform(new Point(s.X, s.Y));
+            double icon = toDip.Transform(new System.Windows.Vector(s.Icon, 0)).X;
+            FrameworkElement el;
+            if (s.Text == null)
+                el = RankIcon.Build(s.RankTier, icon);
+            else
+            {
+                // плашка: звание (и иконка, если задана), тёмное стекло с золотистой рамкой
+                var row = new StackPanel { Orientation = Orientation.Horizontal };
+                if (s.Icon > 0)
+                {
+                    var i = RankIcon.Build(s.RankTier, icon);
+                    i.Margin = new Thickness(0, 0, 6, 0);
+                    row.Children.Add(i);
+                }
+                row.Children.Add(new TextBlock
+                {
+                    Text = s.Text, FontFamily = Glass.Sans, FontSize = s.FontSize, FontWeight = FontWeights.SemiBold,
+                    Foreground = Glass.B(s.Color), VerticalAlignment = VerticalAlignment.Center,
+                });
+                el = new Border
+                {
+                    Background = Glass.B(0xF2, 0x1A, 0x14, 0x0E),
+                    BorderBrush = Glass.B(0x80, 0xD2, 0xA1, 0x5A),
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(999),
+                    Padding = s.Icon > 0 ? new Thickness(3, 2, 10, 3) : new Thickness(s.FontSize < 13 ? 7 : 10, 1, s.FontSize < 13 ? 7 : 10, 2),
+                    Child = row,
+                };
+            }
+            if (s.Right) Canvas.SetRight(el, width - pt.X);
+            else if (s.Center)
+            {
+                el.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+                Canvas.SetLeft(el, pt.X - el.DesiredSize.Width / 2);
+            }
+            else Canvas.SetLeft(el, pt.X);
+            Canvas.SetTop(el, pt.Y);
+            canvas.Children.Add(el);
+        }
     }
 }

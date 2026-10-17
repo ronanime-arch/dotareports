@@ -87,6 +87,15 @@ sealed class AppController
     DateTime _badgeStamp;
     bool _badgeBusy;
     readonly Dictionary<string, NecPlayer> _onScreen = new();   // кто из комнаты NEC узнан на экране этой кастомки
+    // На пике в матче Valve (LiveMatch): медаль перед ником каждого игрока и «за · против» под ником — состав по
+    // Steam ID сервера из console.log и Steam GetRealtimeStats; ники на экране смотрим раз в 2 с
+    RankBadges _pickRanks = null!;
+    readonly DispatcherTimer _liveTimer = new() { Interval = TimeSpan.FromSeconds(2) };
+    ulong? _liveServer;
+    List<LivePlayer>? _livePlayers;
+    DateTime _liveAsked;
+    bool _liveBusy;
+    string? _liveNote;   // что последним записано в журнал — пишем только перемены
     readonly ProfileData _profile = new();
     readonly DispatcherTimer _profileTimer = new() { Interval = TimeSpan.FromSeconds(60) };
     // «Уверенность в ранге» видна только на экране профиля Dota — смотрим туда раз в 3 с, пока вы в меню
@@ -134,6 +143,7 @@ sealed class AppController
     {
         Directory.CreateDirectory(Paths.Root);
         ReminderSound.Use(_reminders.Sounds); // звуки напоминаний — из настроек (микшер)
+        _ = RankArt.EnsureAsync(); // значки медалей Dota для лобби NEC — один раз в папку данных
         // Приёмник GSI — первым делом: окно токена и вход в Steam могут ждать сколько угодно, а Dota уже шлёт данные.
         string? gsiError = null;
         try
@@ -174,6 +184,8 @@ sealed class AppController
         _necPoll.Tick += (_, _) => CheckNecRoom();
         _badges = new RankBadges();
         _badgeTimer.Tick += async (_, _) => await CheckBadgesAsync();
+        _pickRanks = new RankBadges();
+        _liveTimer.Tick += async (_, _) => await CheckLiveRanksAsync();
         _necPoll.Start();
         // после матча история в GCPD обновляется не сразу — читаем профиль через минуту после выхода в меню
         _profileTimer.Tick += async (_, _) =>
@@ -277,6 +289,7 @@ sealed class AppController
             _lastSnap = new PickSnapshot(new HashSet<int>(), new List<int>(), new List<int>(), new List<int>(), 0, 0, null, 0);
             _turboCard.ResetDismissed(); // новый пик — карточка снова видна, даже если в прошлом её закрыли ✕
             _turboCard.Refresh = RenderCard;
+            if (s.OwnGame) StartLiveRanks();
             if (_draftData.TurboReady)
             {
                 _turboCard.Render(_draftData, _lastSnap, _watcher.Status, _ownHero);
@@ -290,6 +303,7 @@ sealed class AppController
             _watcher.End();
             _turboCard.Hide();
             _pickFrame.ShowAround(null);
+            StopLiveRanks();
             if (s.GameState.Length > 0 && s.OwnGame) ShowPrediction(s); // матч пошёл дальше (не выход в меню из пика)
             _ownHero = 0;
             _lastSnap = null;
@@ -302,6 +316,96 @@ sealed class AppController
         _turboCard.Render(_draftData, _lastSnap, $"с экрана: банов {_lastSnap.Bans}, занято {_lastSnap.Taken}", _ownHero);
         _turboCard.ShowCard(); // данные могли догрузиться уже посреди пика — тогда карточки ещё не было
         UpdatePickFrame();
+    }
+
+    void StartLiveRanks()
+    {
+        (_liveServer, _livePlayers, _liveAsked, _liveNote) = (null, null, DateTime.MinValue, null);
+        if (!Setup.ScreenSupported) return;
+        if (!LiveMatch.HasKey)
+        {
+            LiveNote("нет ключа Steam API (apikey.txt в папке данных) — звания на пике не показываем");
+            return;
+        }
+        _liveTimer.Start();
+    }
+
+    void StopLiveRanks()
+    {
+        _liveTimer.Stop();
+        _pickRanks.ShowBadges(Array.Empty<BadgeSpot>());
+    }
+
+    void LiveNote(string note)
+    {
+        if (note == _liveNote) return;
+        _liveNote = note;
+        Log.Write("Звания на пике: " + note);
+    }
+
+    // Пик в матче Valve: состав — раз (Steam отдаёт его не сразу — спрашиваем раз в 6 с), ники на экране — каждые 2 с.
+    // В All Pick звания Dota показывает сама — там только «за · против».
+    async Task CheckLiveRanksAsync()
+    {
+        if (_liveBusy) return;
+        _liveBusy = true;
+        try
+        {
+            if (_livePlayers == null)
+            {
+                if (DateTime.Now - _liveAsked < TimeSpan.FromSeconds(6)) return;
+                _liveAsked = DateTime.Now;
+                if (_liveServer == null)
+                {
+                    // подключение к серверу — до пика; давнее — это прошлый матч (или кастомка по IP)
+                    var last = await Task.Run(LiveMatch.LastServer);
+                    if (last is not { } srv || DateTime.Now - srv.At > TimeSpan.FromMinutes(15))
+                    {
+                        LiveNote("в console.log нет свежего подключения к серверу Valve");
+                        _liveTimer.Stop();
+                        return;
+                    }
+                    _liveServer = srv.Server;
+                }
+                var list = await LiveMatch.PlayersAsync(_liveServer.Value);
+                if (list == null)
+                {
+                    LiveNote($"Steam пока не отдаёт состав сервера {_liveServer} (ответ — realtime_stats.json)");
+                    return;
+                }
+                var peersTask = LiveMatch.PeersAsync();
+                var ranks = await Task.WhenAll(list.Select(p => LiveMatch.RankAsync(p.Account)));
+                var peers = await peersTask;
+                _livePlayers = list.Select((p, i) =>
+                {
+                    var (with, against) = peers.GetValueOrDefault(p.Account);
+                    return new LivePlayer(p.Slot, p.Account, p.Name, ranks[i], with, against);
+                }).ToList();
+                LiveNote($"игроков {_livePlayers.Count}, с медалью {_livePlayers.Count(p => p.RankTier > 0)}, " +
+                         $"знакомых {_livePlayers.Count(p => p.With + p.Against > 0)}: " +
+                         string.Join(", ", _livePlayers.Select(p => $"{p.Slot}:{p.Name}={p.RankTier}")));
+            }
+            var players = _livePlayers;
+            var left = await Task.Run(() =>
+            {
+                var band = TopBarNames.Band;
+                using var bmp = new System.Drawing.Bitmap(band.Width, band.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                using (var g = System.Drawing.Graphics.FromImage(bmp))
+                    g.CopyFromScreen(band.Location, System.Drawing.Point.Empty, band.Size);
+                return TopBarNames.TextLeft(bmp);
+            });
+            if (!_liveTimer.IsEnabled) return; // пик уже кончился
+            _pickRanks.ShowBadges(TopBarNames.Spots(players, left, medals: _mode.Mode != "ALL_PICK"));
+        }
+        catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or TaskCanceledException or IOException or System.Text.Json.JsonException
+                                       or System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception)
+        {
+            LiveNote("ошибка: " + ex.Message);
+        }
+        finally
+        {
+            _liveBusy = false;
+        }
     }
 
     // «Бери» — ещё и рамкой вокруг клетки героя в сетке, пока вы сами не выбрали (и карточку не закрыли ✕)
@@ -928,18 +1032,18 @@ sealed class AppController
     {
         bool screen = custom && state is "DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP" or "DOTA_GAMERULES_STATE_HERO_SELECTION"
             or "DOTA_GAMERULES_STATE_STRATEGY_TIME";
-        if (screen && !_badgeTimer.IsEnabled && Setup.ScreenSupported && NecLobby.Installed)
-            _badgeTimer.Start();
-        // выбор героя: карточка лобби слева закрыла бы карточку первого союзника — звания уже на плашках
+        // выбор героя: карточка лобби слева закрыла бы карточку первого союзника — звания уже у аватарок
         if (custom && state == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _necHide.IsEnabled)
         {
             _necHide.Stop();
             if (_necLobby.IsVisible) _necLobby.Toggle();
         }
+        if (screen && !_badgeTimer.IsEnabled && Setup.ScreenSupported && NecLobby.Installed)
+            _badgeTimer.Start();
         else if (!screen && _badgeTimer.IsEnabled)
         {
             _badgeTimer.Stop();
-            _badges.ShowBadges(Array.Empty<(int, int, string, Color)>());
+            _badges.ShowBadges(Array.Empty<BadgeSpot>());
             if (_onScreen.Count >= NecRoomMin)
             {
                 (_necSnapshot, _necSnapshotAt) = (_onScreen.Values.ToList(), DateTime.Now);
@@ -964,20 +1068,24 @@ sealed class AppController
                     _badgeStamp = stamp;
                     _avatars.SetCandidates(NecLobby.Load(DateTime.Now, TimeSpan.FromMinutes(20)), NecLobby.OwnAvatars());
                 }
-                var area = setup ? NecScreen.SetupStrip : NecScreen.CardStrip;
-                using var strip = new System.Drawing.Bitmap(area.Width, area.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
-                using (var g = System.Drawing.Graphics.FromImage(strip))
-                    g.CopyFromScreen(area.Location, System.Drawing.Point.Empty, area.Size);
-                return NecScreen.Read(strip, setup, _avatars);
+                // до выбора героя экран бывает двух видов: список подключения из 10 и выбор команды по колонкам —
+                // берём тот, где узнано больше игроков
+                var layouts = setup ? new[] { NecLayout.Teams, NecLayout.Connect } : new[] { NecLayout.Cards };
+                List<(int Index, NecPlayer Player, BadgeSpot[] Spots, string Debug)> best = new();
+                foreach (var layout in layouts)
+                {
+                    var area = NecScreen.Strip(layout);
+                    using var strip = new System.Drawing.Bitmap(area.Width, area.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                    using (var g = System.Drawing.Graphics.FromImage(strip))
+                        g.CopyFromScreen(area.Location, System.Drawing.Point.Empty, area.Size);
+                    var read = NecScreen.Read(strip, layout, _avatars);
+                    if (read.Count > best.Count) best = read;
+                }
+                return best;
             });
             if (!_badgeTimer.IsEnabled) return; // экран уже сменился
-            foreach (var (_, p, _) in found) _onScreen[p.SteamId] = p;
-            _badges.ShowBadges(found.Select(f =>
-            {
-                var (right, top) = NecScreen.Badge(f.Index, setup);
-                var (text, color) = NecLobby.Badge(f.Player);
-                return (right, top, text, color);
-            }).ToList());
+            foreach (var f in found) _onScreen[f.Player.SteamId] = f.Player;
+            _badges.ShowBadges(found.SelectMany(f => f.Spots).ToList());
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or ArgumentException)
         {
@@ -1269,6 +1377,7 @@ sealed class AppController
         _necHide.Stop();
         _necPoll.Stop();
         _badgeTimer.Stop();
+        _liveTimer.Stop();
         if (_tray != null)
         {
             _tray.Visible = false;
@@ -1285,6 +1394,7 @@ sealed class AppController
         _rating?.Close();
         _necLobby?.Close();
         _badges?.Close();
+        _pickRanks?.Close();
         _browser?.Close();
         _app.Shutdown();
     }

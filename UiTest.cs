@@ -20,6 +20,7 @@ static class UiTest
         Directory.CreateDirectory(dir);
         BitmapSource? shot = backdrop != null && File.Exists(backdrop) ? new BitmapImage(new Uri(Path.GetFullPath(backdrop))) : null;
         var heroes = LoadHeroes();
+        RankArt.EnsureAsync().GetAwaiter().GetResult();
         string H(int id) => heroes.GetValueOrDefault(id, $"#{id}");
 
         var rating = new RatingWindow();
@@ -73,6 +74,22 @@ static class UiTest
             ? new[] { new List<string> { "Enfeeble: эффект удвоен" }, new List<string> { "Brain Sap: выпускает 3 раза подряд" }, new List<string>() }
             : null);
         Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices"));
+
+        // иконки ранга: все медали со звёздами, Титан и «нет медали» — в размерах экрана подключения и выбора команды
+        var sheet = new System.Windows.Controls.StackPanel();
+        foreach (var size in new[] { 34.0, 28.0 })
+        {
+            var row = new System.Windows.Controls.WrapPanel { Margin = new Thickness(6) };
+            foreach (var tier in new[] { 0, 11, 25, 33, 44, 52, 65, 71, 80 })
+            {
+                var icon = RankIcon.Build(tier, size);
+                icon.Margin = new Thickness(4);
+                icon.ToolTip = Ranks.Name(tier);
+                row.Children.Add(icon);
+            }
+            sheet.Children.Add(row);
+        }
+        Save(sheet, 9 * 42 + 12, null, new Point(0, 0), Path.Combine(dir, "rank_icons"));
         Console.WriteLine($"ui_test: {string.Join(", ", new[] { H(1), H(129) })} — готово");
     }
 
@@ -109,6 +126,107 @@ static class UiTest
             using var fs = File.Create(file + (scale == 1.0 ? "" : "_125") + ".png");
             png.Save(fs);
         }
+    }
+
+    /// <summary>--badge-test: кто узнан на снимке экрана кастомки (в .txt) и снимок со значками ранга (в .png) — тем же кодом, что в игре.</summary>
+    public static void Badges(string shotFile, NecLayout layout, DateTime at, string file)
+    {
+        RankArt.EnsureAsync().GetAwaiter().GetResult(); // значки медалей — как в игре
+        var matcher = new AvatarMatcher();
+        matcher.SetCandidates(NecLobby.Load(at, TimeSpan.FromMinutes(20)), NecLobby.OwnAvatars());
+        List<(int Index, NecPlayer Player, BadgeSpot[] Spots, string Debug)> found;
+        List<string> debug;
+        using (var shot = new System.Drawing.Bitmap(shotFile))
+        {
+            var area = NecScreen.Strip(layout);
+            area.Intersect(new System.Drawing.Rectangle(0, 0, shot.Width, shot.Height));
+            using var strip = new System.Drawing.Bitmap(NecScreen.Strip(layout).Width, NecScreen.Strip(layout).Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            using (var g = System.Drawing.Graphics.FromImage(strip))
+                g.DrawImage(shot, new System.Drawing.Rectangle(area.X - NecScreen.Strip(layout).X, area.Y - NecScreen.Strip(layout).Y, area.Width, area.Height), area, System.Drawing.GraphicsUnit.Pixel);
+            found = NecScreen.Read(strip, layout, matcher);
+            debug = NecScreen.Debug(strip, layout, matcher).ToList();
+        }
+        var lines = new List<string> { $"кандидатов с аватаркой: {matcher.Count}; узнано: {found.Count}" };
+        lines.AddRange(debug);
+        lines.AddRange(found.Select(f => $"{f.Index + 1}: {f.Player.Name} — {NecLobby.Badge(f.Player).Text} ({f.Debug})"));
+        File.WriteAllLines(file + ".txt", lines);
+        RenderSpots(shotFile, found.SelectMany(f => f.Spots), file + ".png");
+    }
+
+    /// <summary>
+    /// --names-test: ники в полосе под портретами на кадре пика (frames\…_top.png или скриншот) и медали перед ними —
+    /// на условных званиях (все медали по слотам, у двоих — «за · против»); левые края ников — в .txt.
+    /// </summary>
+    public static void Names(string shotFile, string file)
+    {
+        RankArt.EnsureAsync().GetAwaiter().GetResult();
+        int[] left;
+        using (var shot = new System.Drawing.Bitmap(shotFile))
+        using (var band = new System.Drawing.Bitmap(TopBarNames.Band.Width, TopBarNames.Band.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb))
+        {
+            using (var g = System.Drawing.Graphics.FromImage(band))
+                g.DrawImage(shot, new System.Drawing.Rectangle(0, 0, band.Width, band.Height), TopBarNames.Band, System.Drawing.GraphicsUnit.Pixel);
+            left = TopBarNames.TextLeft(band);
+        }
+        int[] tiers = { 11, 25, 33, 44, 52, 65, 71, 80, 0, 54 };
+        var players = Enumerable.Range(0, 10).Select(s => new LivePlayer(s, 0, $"слот {s}", tiers[s], s == 1 ? 3 : 0, s == 6 ? 2 : 0)).ToList();
+        File.WriteAllLines(file + ".txt", left.Select((x, s) => $"слот {s}: ник с x = {x}"));
+        RenderSpots(shotFile, TopBarNames.Spots(players, left), file + ".png");
+    }
+
+    // Значки и плашки тем же кодом, что в игре (RankBadges.Fill), поверх картинки — в png.
+    static void RenderSpots(string shotFile, IEnumerable<BadgeSpot> spots, string pngFile)
+    {
+        var image = new BitmapImage(new Uri(Path.GetFullPath(shotFile)));
+        var canvas = new System.Windows.Controls.Canvas { Width = image.PixelWidth, Height = image.PixelHeight };
+        RankBadges.Fill(canvas, spots, image.PixelWidth, Matrix.Identity);
+        canvas.Measure(new Size(image.PixelWidth, image.PixelHeight));
+        canvas.Arrange(new Rect(0, 0, image.PixelWidth, image.PixelHeight));
+        canvas.UpdateLayout();
+        var overlay = new RenderTargetBitmap(image.PixelWidth, image.PixelHeight, 96, 96, PixelFormats.Pbgra32);
+        overlay.Render(canvas);
+        var visual = new DrawingVisual();
+        using (var dc = visual.RenderOpen())
+        {
+            dc.DrawImage(image, new Rect(0, 0, image.PixelWidth, image.PixelHeight));
+            dc.DrawImage(overlay, new Rect(0, 0, image.PixelWidth, image.PixelHeight));
+        }
+        var result = new RenderTargetBitmap(image.PixelWidth, image.PixelHeight, 96, 96, PixelFormats.Pbgra32);
+        result.Render(visual);
+        var png = new PngBitmapEncoder();
+        png.Frames.Add(BitmapFrame.Create(result));
+        using var fs = File.Create(pngFile);
+        png.Save(fs);
+    }
+
+    /// <summary>--live-test: во время матча — сервер из console.log, состав от Steam, медали и знакомые с OpenDota (в .txt).</summary>
+    public static void Live(string file)
+    {
+        var lines = new List<string>();
+        var last = LiveMatch.LastServer();
+        lines.Add(last is { } s ? $"сервер {s.Server}, подключение {s.At:dd.MM HH:mm:ss}" : "в console.log нет подключения к серверу Valve");
+        if (last is { } srv)
+        {
+            try
+            {
+                var list = LiveMatch.PlayersAsync(srv.Server).GetAwaiter().GetResult();
+                if (list == null) lines.Add("Steam не отдал состав (ответ — realtime_stats.json)");
+                else
+                {
+                    var peers = LiveMatch.PeersAsync().GetAwaiter().GetResult();
+                    foreach (var p in list)
+                    {
+                        var (with, against) = peers.GetValueOrDefault(p.Account);
+                        lines.Add($"слот {p.Slot}: {p.Name} ({p.Account}) — {Ranks.Name(LiveMatch.RankAsync(p.Account).GetAwaiter().GetResult()) ?? "без медали"}, за {with} · против {against}");
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or System.Threading.Tasks.TaskCanceledException or System.Text.Json.JsonException)
+            {
+                lines.Add("ошибка: " + ex.Message);
+            }
+        }
+        File.WriteAllLines(file, lines);
     }
 
     static Dictionary<int, string> LoadHeroes()

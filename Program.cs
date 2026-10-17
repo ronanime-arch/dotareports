@@ -24,6 +24,18 @@ static class Program
             GridTest(args[1], args[2], Path.Combine(Paths.Root, "grid_test.txt"));
             return;
         }
+        if (args.Length >= 2 && args[0] == "--names-test")
+        {
+            // ники под портретами на кадре пика и медали перед ними (условные звания) — names_test.txt / .png
+            UiTest.Names(args[1], Path.Combine(Paths.Root, "names_test"));
+            return;
+        }
+        if (args.Length >= 1 && args[0] == "--live-test")
+        {
+            // во время матча: сервер из console.log, состав от Steam, медали и знакомые с OpenDota — в live_test.txt
+            UiTest.Live(Path.Combine(Paths.Root, "live_test.txt"));
+            return;
+        }
         if (args.Length >= 1 && args[0] == "--click-test")
         {
             // ✕ и ↻ на окнах поверх игры нажимаются, а мимо них клики проходят в игру — в click_test.txt (курсор занят ~3 с)
@@ -242,37 +254,11 @@ static class Program
         }
         if (args.Length >= 4 && args[0] == "--badge-test")
         {
-            // звания под никами на снимке экрана кастомки: --badge-test <png> setup|cards 2026-10-17T13:08 — кандидаты из кэша NEC
-            // за 20 минут до этого момента; узнанные — в badge_test.txt, снимок с плашками — в badge_test.png
-            bool setup = args[2] == "setup";
-            var at = DateTime.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture);
-            var matcher = new AvatarMatcher();
-            matcher.SetCandidates(NecLobby.Load(at, TimeSpan.FromMinutes(20)), NecLobby.OwnAvatars());
-            using var shot = new System.Drawing.Bitmap(args[1]);
-            var area = setup ? NecScreen.SetupStrip : NecScreen.CardStrip;
-            using var strip = shot.Clone(area, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
-            var found = NecScreen.Read(strip, setup, matcher);
-            var lines = new List<string> { $"кандидатов с аватаркой: {matcher.Count}" };
-            using (var g = System.Drawing.Graphics.FromImage(shot))
-            using (var font = new System.Drawing.Font("Segoe UI", 10, System.Drawing.FontStyle.Bold))
-            using (var back = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(0xE6, 0x14, 0x18, 0x21)))
-            {
-                for (int i = 0; i < (setup ? 10 : 5); i++)
-                {
-                    var r = setup ? new System.Drawing.Rectangle(3, 3 + 60 * i, 42, 42) : new System.Drawing.Rectangle(353 * i + 9, 3, 55, 55);
-                    matcher.Match(strip, r, out var debug);
-                    var hit = found.FirstOrDefault(f => f.Index == i);
-                    lines.Add($"{(setup ? "строка" : "карточка")} {i + 1}: {(hit.Player != null ? hit.Player.Name + " — " + NecLobby.Badge(hit.Player).Text : "—")} ({debug})");
-                    if (hit.Player == null) continue;
-                    var (right, top) = NecScreen.Badge(i, setup);
-                    var text = NecLobby.Badge(hit.Player).Text;
-                    var size = g.MeasureString(text, font);
-                    g.FillRectangle(back, right - size.Width - 12, top, size.Width + 12, size.Height + 3);
-                    g.DrawString(text, font, System.Drawing.Brushes.White, right - size.Width - 6, top + 1);
-                }
-            }
-            File.WriteAllLines(Path.Combine(Paths.Root, "badge_test.txt"), lines);
-            shot.Save(Path.Combine(Paths.Root, "badge_test.png"));
+            // значки ранга на снимке экрана кастомки: --badge-test <png> setup|teams|cards 2026-10-17T13:08 — кандидаты из кэша NEC
+            // за 20 минут до этого момента; узнанные — в badge_test.txt, снимок со значками — в badge_test.png
+            var layout = args[2] switch { "setup" => NecLayout.Connect, "teams" => NecLayout.Teams, _ => NecLayout.Cards };
+            UiTest.Badges(args[1], layout, DateTime.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture),
+                Path.Combine(Paths.Root, "badge_test"));
             return;
         }
         if (args.Length >= 1 && args[0] == "--nec-test")
