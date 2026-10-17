@@ -9,9 +9,9 @@ using System.Windows.Media;
 
 namespace DotaReports;
 
-/// <summary>Игрок из комнаты NEC и то, что NEC сам подгрузил о нём с OpenDota.</summary>
+/// <summary>Игрок из комнаты NEC и то, что NEC сам подгрузил о нём с OpenDota; Avatar — его аватарка Steam из кэша NEC (файл).</summary>
 sealed record NecPlayer(string SteamId, string Name, DateTime SeenAt, bool HasProfile, int RankTier, bool HistoryClosed,
-    int? Wins, int? Losses, string? Country, NecMatch? LastMatch);
+    int? Wins, int? Losses, string? Country, NecMatch? LastMatch, string? Avatar = null);
 
 sealed record NecMatch(DateTime Start, int HeroId, int Kills, int Deaths, int Assists, int GameMode);
 
@@ -26,6 +26,7 @@ static class NecLobby
     public static readonly TimeSpan Window = TimeSpan.FromMinutes(10);
     const ulong SteamBase = 76561197960265728;
     const string OpenDota = "https://api.opendota.com/api/players/";
+    const string DefaultAvatar = "fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb"; // стандартная аватарка Steam «?»
     // NEC перечисляет поля через project= (remote-platform, matchFields): для ключа кэша адрес нужен буква в букву
     static readonly string LastMatchQuery = "/matches?significant=0&limit=1&offset=0&" + string.Join("&", new[]
     {
@@ -45,11 +46,12 @@ static class NecLobby
         return a > b ? a : b;
     }
 
-    /// <summary>Игроки, которых NEC показывал за <see cref="Window"/> до <paramref name="until"/>, по порядку появления; свои аккаунты не входят.</summary>
-    public static List<NecPlayer> Load(DateTime until)
+    /// <summary>Игроки, которых NEC показывал за <paramref name="window"/> (по умолчанию <see cref="Window"/>) до <paramref name="until"/>,
+    /// по порядку появления; свои аккаунты не входят.</summary>
+    public static List<NecPlayer> Load(DateTime until, TimeSpan? window = null)
     {
         var cache = Path.Combine(Root, "Cache");
-        long to = new DateTimeOffset(until).ToUnixTimeMilliseconds(), from = to - (long)Window.TotalMilliseconds;
+        long to = new DateTimeOffset(until).ToUnixTimeMilliseconds(), from = to - (long)(window ?? Window).TotalMilliseconds;
         var own = OwnSteamIds();
         var seen = new Dictionary<string, (long At, string Name)>();
         void Add(string? sid, long at, string? name)
@@ -65,12 +67,20 @@ static class NecLobby
         foreach (var (_, at, data) in Entries(Path.Combine(cache, "steam-nicknames.json")))
             if (at >= from && at <= to && Str(data, "source") == "platform") Add(Str(data, "steamId"), at, Str(data, "persona"));
         var records = new Dictionary<string, JsonElement>();
+        var avatarUrls = new Dictionary<string, string>();
         foreach (var (key, at, data) in Entries(Path.Combine(cache, "dota-records.json")))
         {
             records[key] = data;
-            if (at >= from && at <= to && data.ValueKind == JsonValueKind.Object && data.TryGetProperty("profile", out var p) && p.ValueKind == JsonValueKind.Object)
-                Add(Str(p, "steamid"), at, Str(p, "personaname"));
+            if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("profile", out var p) || p.ValueKind != JsonValueKind.Object) continue;
+            if (Str(p, "steamid") is { } psid && Str(p, "avatarfull") is { } purl) avatarUrls[psid] = purl;
+            if (at >= from && at <= to) Add(Str(p, "steamid"), at, Str(p, "personaname"));
         }
+        // аватарка из профилей Steam, которые NEC подгружал для карточек, свежее, чем из OpenDota
+        foreach (var (_, _, data) in Entries(Path.Combine(cache, "steam-profiles.json")))
+            if (Str(data, "steamId") is { } psid && Str(data, "avatar") is { Length: > 0 } purl) avatarUrls[psid] = purl;
+        // стандартная «?» Steam — у тысяч игроков, на экране никого не выдаёт (одинаковые у кандидатов отсеивает AvatarMatcher)
+        var files = AvatarFiles();
+        string? Avatar(string sid) => avatarUrls.TryGetValue(sid, out var u) && !u.Contains(DefaultAvatar) ? files(u) : null;
 
         var players = new List<NecPlayer>();
         foreach (var (sid, (at, nick)) in seen.OrderBy(kv => kv.Value.At))
@@ -101,9 +111,38 @@ static class NecLobby
                     Int(m, "kills") ?? 0, Int(m, "deaths") ?? 0, Int(m, "assists") ?? 0, Int(m, "game_mode") ?? 0);
             }
             players.Add(new NecPlayer(sid, name.Length > 0 ? name : acc, DateTimeOffset.FromUnixTimeMilliseconds(at).LocalDateTime,
-                hasProfile, rank, closed, wins, losses, country, last));
+                hasProfile, rank, closed, wins, losses, country, last, Avatar(sid)));
         }
         return players;
+    }
+
+    /// <summary>Аватарки своих аккаунтов (из data\platform.json NEC): на экране матча их надо узнавать, чтобы не приписать чужому.</summary>
+    public static List<string> OwnAvatars()
+    {
+        var files = AvatarFiles();
+        var result = new List<string>();
+        if (Read(Path.Combine(Root, "data", "platform.json")) is { } json && json.TryGetProperty("users", out var users) && users.ValueKind == JsonValueKind.Array)
+            foreach (var u in users.EnumerateArray())
+                if (Str(u, "avatar") is { } url && files(url) is { } file) result.Add(file);
+        return result;
+    }
+
+    // Аватарки NEC: Cache\avatar-index.json — ключ sha256 полного адреса (…_full.jpg), в записи — имя файла в Cache\avatars.
+    static Func<string, string?> AvatarFiles()
+    {
+        var dir = Path.Combine(Root, "Cache", "avatars");
+        var index = new Dictionary<string, string>();
+        foreach (var (key, _, data) in Entries(Path.Combine(Root, "Cache", "avatar-index.json")))
+            if (Str(data, "file") is { } file) index[key] = file;
+        return url => index.TryGetValue(Sha(url), out var f) && File.Exists(Path.Combine(dir, f)) ? Path.Combine(dir, f) : null;
+    }
+
+    /// <summary>Коротко для плашки под ником: медаль и процент побед или «история закрыта».</summary>
+    public static (string Text, Color Color) Badge(NecPlayer p)
+    {
+        string rank = Ranks.Name(p.RankTier) ?? "без медали";
+        if (p.Wins is int w && p.Losses is int l && w + l > 0) return ($"{rank} · {100.0 * w / (w + l):0}%", OverlayWindow.White);
+        return (p.HistoryClosed ? rank + " · история закрыта" : rank, p.HistoryClosed ? OverlayWindow.Red : OverlayWindow.White);
     }
 
     /// <summary>По две строки на игрока: ник и медаль, затем победы/поражения и последний матч (или «история закрыта»).</summary>
