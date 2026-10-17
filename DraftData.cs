@@ -128,10 +128,8 @@ sealed class DraftData
                 await File.WriteAllTextAsync(Paths.ModeStats, all.ToJsonString());
                 await File.WriteAllTextAsync(Paths.TurboBrackets, string.Join("–", medals));
             });
-            // отдельным шагом: не отдаст Stratz матчапы по режиму — остаются матчапы по всем режимам, остальное не страдает
-            await Step("матчапы Турбо", errors, async () =>
-                await File.WriteAllBytesAsync(Paths.MatchupsTurbo, await StratzAsync(
-                    $"{{ heroStats {{ matchUp(bracketBasicIds: [{string.Join(", ", PairBrackets(medal))}], gameModeIds: [TURBO], take: 200) {{ heroId vs {{ heroId2 synergy matchCount }} with {{ heroId2 synergy matchCount }} }} }} }}")));
+            // Матчапов по одному Турбо у Stratz нет: matchUp не принимает gameModeIds (400 «Unknown argument»,
+            // запрос не прошёл ни разу) — в Турбо матчапы по всем режимам. Файл matchups_turbo.json, если появится, читается.
         }
 
         LoadFromCache();
@@ -516,15 +514,19 @@ sealed class DraftData
     public static async Task<int[]?> MatchHeroesAsync(long matchId)
     {
         var players = new List<(bool Radiant, int Slot, int Hero)>();
+        string? stratzError = null; // в журнал — только если и OpenDota не отдаст (свежих матчей у Stratz часто ещё нет)
         try
         {
             using var doc = JsonDocument.Parse(await StratzAsync($"{{ match(id: {matchId}) {{ players {{ heroId isRadiant playerSlot }} }} }}"));
-            foreach (var p in doc.RootElement.GetProperty("data").GetProperty("match").GetProperty("players").EnumerateArray())
-                players.Add((p.GetProperty("isRadiant").GetBoolean(), p.GetProperty("playerSlot").GetInt32(), p.GetProperty("heroId").GetInt32()));
+            if (doc.RootElement.GetProperty("data").GetProperty("match") is { ValueKind: JsonValueKind.Object } match)
+                foreach (var p in match.GetProperty("players").EnumerateArray())
+                    players.Add((p.GetProperty("isRadiant").GetBoolean(), p.GetProperty("playerSlot").GetInt32(), p.GetProperty("heroId").GetInt32()));
+            else
+                stratzError = "матча у Stratz нет";
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or InvalidOperationException or KeyNotFoundException)
         {
-            Log.Write($"Матч {matchId}: Stratz не отдал героев: {ex.Message}");
+            stratzError = ex.Message;
         }
         if (!Complete(players))
         {
@@ -544,7 +546,7 @@ sealed class DraftData
             }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or InvalidOperationException or KeyNotFoundException)
             {
-                Log.Write($"Матч {matchId}: OpenDota не отдал героев: {ex.Message}");
+                Log.Write($"Матч {matchId}: героев не отдали ни Stratz ({stratzError}), ни OpenDota ({ex.Message})");
             }
         }
         return Complete(players) ? players.OrderBy(p => !p.Radiant).ThenBy(p => p.Slot).Select(p => p.Hero).ToArray() : null;
