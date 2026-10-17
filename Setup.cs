@@ -105,7 +105,7 @@ static class Setup
     }
 
     // Steam: путь из реестра, библиотеки из steamapps\libraryfolders.vdf, Dota 2 — приложение 570.
-    static string? FindDota()
+    public static string? FindDota()
     {
         var steam = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", null) as string;
         if (string.IsNullOrEmpty(steam)) return null;

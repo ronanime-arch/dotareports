@@ -120,8 +120,12 @@ sealed class AvatarMatcher
 /// <summary>Какой экран кастомки: подключение (список из 10), выбор команды (две колонки по 5), выбор героя (карточки).</summary>
 enum NecLayout { Connect, Teams, Cards }
 
-/// <summary>Что и где нарисовать: иконка ранга (и текст — в плашке), X/Y — левый (или правый, Right) край и верх, px экрана.</summary>
-sealed record BadgeSpot(int X, int Y, bool Right, int RankTier, string? Text, Color Color, double Icon);
+/// <summary>
+/// Что и где нарисовать: иконка ранга (и текст — в плашке), X/Y — левый край (Right — правый, Center — середина) и верх,
+/// px экрана; Icon 0 — плашка без иконки.
+/// </summary>
+sealed record BadgeSpot(int X, int Y, bool Right, int RankTier, string? Text, Color Color, double Icon,
+    bool Center = false, double FontSize = 14);
 
 /// <summary>
 /// Где на экране кастомки (1920×1080, по снимкам IM Пробуждение 17.10) аватарки игроков и куда ставить значок ранга.
@@ -334,7 +338,7 @@ sealed class RankBadges : Window
                 }
                 row.Children.Add(new TextBlock
                 {
-                    Text = s.Text, FontFamily = Glass.Sans, FontSize = 14, FontWeight = FontWeights.SemiBold,
+                    Text = s.Text, FontFamily = Glass.Sans, FontSize = s.FontSize, FontWeight = FontWeights.SemiBold,
                     Foreground = Glass.B(s.Color), VerticalAlignment = VerticalAlignment.Center,
                 });
                 el = new Border
@@ -343,11 +347,16 @@ sealed class RankBadges : Window
                     BorderBrush = Glass.B(0x80, 0xD2, 0xA1, 0x5A),
                     BorderThickness = new Thickness(1),
                     CornerRadius = new CornerRadius(999),
-                    Padding = new Thickness(s.Icon > 0 ? 3 : 10, 2, 10, 3),
+                    Padding = s.Icon > 0 ? new Thickness(3, 2, 10, 3) : new Thickness(s.FontSize < 13 ? 7 : 10, 1, s.FontSize < 13 ? 7 : 10, 2),
                     Child = row,
                 };
             }
             if (s.Right) Canvas.SetRight(el, width - pt.X);
+            else if (s.Center)
+            {
+                el.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+                Canvas.SetLeft(el, pt.X - el.DesiredSize.Width / 2);
+            }
             else Canvas.SetLeft(el, pt.X);
             Canvas.SetTop(el, pt.Y);
             canvas.Children.Add(el);

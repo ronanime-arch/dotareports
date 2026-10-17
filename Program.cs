@@ -24,6 +24,18 @@ static class Program
             GridTest(args[1], args[2], Path.Combine(Paths.Root, "grid_test.txt"));
             return;
         }
+        if (args.Length >= 2 && args[0] == "--names-test")
+        {
+            // ники под портретами на кадре пика и медали перед ними (условные звания) — names_test.txt / .png
+            UiTest.Names(args[1], Path.Combine(Paths.Root, "names_test"));
+            return;
+        }
+        if (args.Length >= 1 && args[0] == "--live-test")
+        {
+            // во время матча: сервер из console.log, состав от Steam, медали и знакомые с OpenDota — в live_test.txt
+            UiTest.Live(Path.Combine(Paths.Root, "live_test.txt"));
+            return;
+        }
         if (args.Length >= 1 && args[0] == "--click-test")
         {
             // ✕ и ↻ на окнах поверх игры нажимаются, а мимо них клики проходят в игру — в click_test.txt (курсор занят ~3 с)
