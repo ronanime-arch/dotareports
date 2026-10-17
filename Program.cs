@@ -228,6 +228,41 @@ static class Program
             DraftTest(args[1].Split(','), Path.Combine(Paths.Root, "draft_test.txt"));
             return;
         }
+        if (args.Length >= 4 && args[0] == "--badge-test")
+        {
+            // звания под никами на снимке экрана кастомки: --badge-test <png> setup|cards 2026-10-17T13:08 — кандидаты из кэша NEC
+            // за 20 минут до этого момента; узнанные — в badge_test.txt, снимок с плашками — в badge_test.png
+            bool setup = args[2] == "setup";
+            var at = DateTime.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture);
+            var matcher = new AvatarMatcher();
+            matcher.SetCandidates(NecLobby.Load(at, TimeSpan.FromMinutes(20)), NecLobby.OwnAvatars());
+            using var shot = new System.Drawing.Bitmap(args[1]);
+            var area = setup ? NecScreen.SetupStrip : NecScreen.CardStrip;
+            using var strip = shot.Clone(area, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            var found = NecScreen.Read(strip, setup, matcher);
+            var lines = new List<string> { $"кандидатов с аватаркой: {matcher.Count}" };
+            using (var g = System.Drawing.Graphics.FromImage(shot))
+            using (var font = new System.Drawing.Font("Segoe UI", 10, System.Drawing.FontStyle.Bold))
+            using (var back = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(0xE6, 0x14, 0x18, 0x21)))
+            {
+                for (int i = 0; i < (setup ? 10 : 5); i++)
+                {
+                    var r = setup ? new System.Drawing.Rectangle(3, 3 + 60 * i, 42, 42) : new System.Drawing.Rectangle(353 * i + 9, 3, 55, 55);
+                    matcher.Match(strip, r, out var debug);
+                    var hit = found.FirstOrDefault(f => f.Index == i);
+                    lines.Add($"{(setup ? "строка" : "карточка")} {i + 1}: {(hit.Player != null ? hit.Player.Name + " — " + NecLobby.Badge(hit.Player).Text : "—")} ({debug})");
+                    if (hit.Player == null) continue;
+                    var (right, top) = NecScreen.Badge(i, setup);
+                    var text = NecLobby.Badge(hit.Player).Text;
+                    var size = g.MeasureString(text, font);
+                    g.FillRectangle(back, right - size.Width - 12, top, size.Width + 12, size.Height + 3);
+                    g.DrawString(text, font, System.Drawing.Brushes.White, right - size.Width - 6, top + 1);
+                }
+            }
+            File.WriteAllLines(Path.Combine(Paths.Root, "badge_test.txt"), lines);
+            shot.Save(Path.Combine(Paths.Root, "badge_test.png"));
+            return;
+        }
         if (args.Length >= 1 && args[0] == "--nec-test")
         {
             // состав комнаты NEC из его кэша за 10 минут до момента (по умолчанию — сейчас), в nec_test.txt: --nec-test 2026-10-17T11:09
