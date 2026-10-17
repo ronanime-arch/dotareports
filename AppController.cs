@@ -162,10 +162,14 @@ sealed class AppController
         _mode.Update(s);
         if (s.GameState.Length == 0 && _gameState is "DOTA_GAMERULES_STATE_POST_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
             _profileTimer.Start();
+        // В кастомке (Аркада) свой экран выбора и свои герои — карточка советовала бы мимо (Spectre при выборе из трёх своих).
+        bool custom = !string.IsNullOrEmpty(s.CustomGame);
+        if (custom && s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != s.GameState)
+            Log.Write("Кастомная игра — карточки пика, напоминаний и прогноза нет: " + Path.GetFileNameWithoutExtension(s.CustomGame));
         _gameState = s.GameState;
         CheckReminders(s);
         // карточка — и в пике, и во время стратегии: тогда видны все герои, и прогноз по драфту полный
-        bool picking = s.GameState is "DOTA_GAMERULES_STATE_HERO_SELECTION" or "DOTA_GAMERULES_STATE_STRATEGY_TIME";
+        bool picking = !custom && (s.GameState is "DOTA_GAMERULES_STATE_HERO_SELECTION" or "DOTA_GAMERULES_STATE_STRATEGY_TIME");
         if (picking && s.HeroId != _ownHero)
         {
             _ownHero = s.HeroId;
