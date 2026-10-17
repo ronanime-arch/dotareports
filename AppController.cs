@@ -176,7 +176,8 @@ sealed class AppController
         // из трёх своих); там своя — кого из трёх брать по вашим играм (TrackCustom).
         bool custom = !string.IsNullOrEmpty(s.CustomGame);
         if (custom && s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != s.GameState)
-            Log.Write("Кастомная игра " + Path.GetFileNameWithoutExtension(s.CustomGame) + ": выбор из трёх — по вашим играм; напоминаний и прогноза нет");
+            Log.Write("Кастомная игра " + Path.GetFileNameWithoutExtension(s.CustomGame) + $" (карта {s.MapName}): выбор из трёх — по вашим играм; " +
+                      (s.MapName == "dota" ? "напоминания — общие тайминги" : "напоминаний нет — карта не обычная") + "; прогноза нет");
         TrackCustom(s, custom);
         _gameState = s.GameState;
         CheckReminders(s);
@@ -274,6 +275,7 @@ sealed class AppController
             _choiceCard = s.TeamSlot;
             _choicesShown = null;
             _choiceTimer.Start();
+            _roshan.Reset(); // номер матча в кастомке всегда 0 — по нему новую игру не отличить
         }
         else if (!choosing && _choiceTimer.IsEnabled)
         {
@@ -332,22 +334,25 @@ sealed class AppController
     void CheckReminders(GsiState s)
     {
         bool inGame = s.GameState is "DOTA_GAMERULES_STATE_PRE_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS";
-        // только своя игра: не просмотр чужой (DotaTV, повтор), не кастомка, герой выбран
-        if (!inGame || !s.OwnGame || s.ClockTime is not int clock || !_reminders.Enabled)
+        // только своя игра на обычной карте (и кастомка на карте dota): не просмотр чужой (DotaTV, повтор), герой выбран
+        if (!inGame || !s.OnDotaMap || s.ClockTime is not int clock || !_reminders.Enabled)
         {
             _reminderEngine.Reset();
             return;
         }
-        if (_roshan.Update(s, clock, _mode.Mode) is { } roshan && _reminders.Roshan)
+        // в кастомке режим не определяем (доход и экран там свои) — общие тайминги: руны, мудрость, Рошан как в обычной игре
+        bool custom = !string.IsNullOrEmpty(s.CustomGame);
+        string? mode = custom ? null : _mode.Mode;
+        if (_roshan.Update(s, clock, mode) is { } roshan && _reminders.Roshan)
         {
             Log.Write($"Рошан: показано «{roshan.Title}» на {ReminderTime.Format(clock)}");
             _reminderOverlay.ShowPopup(roshan.Title, OverlayWindow.White, new[] { (roshan.Detail, OverlayWindow.Gray) }, TimeSpan.FromSeconds(8));
             if (_reminders.Sound) ReminderSound.Play(_reminders.RoshanSound);
         }
         // режим не определён — только общие для всех профилей тайминги, а не первый профиль
-        var profile = _reminders.Pick(_mode.Mode);
+        var profile = _reminders.Pick(mode);
         // общие тайминги — только пока режим не ясен; ясен, но профиля под него нет — молчим
-        var rules = profile ?? (_mode.Mode == null ? _reminders.CommonRules() : null);
+        var rules = profile ?? (mode == null ? _reminders.CommonRules() : null);
         if (rules == null)
         {
             _reminderEngine.Reset();
@@ -360,7 +365,8 @@ sealed class AppController
         var lines = due.Count == 1
             ? new List<(string, Color)> { (When(due[0].At), OverlayWindow.White) }
             : due.Select(d => ($"{d.Rule.Text} — {When(d.At)}", d.Rule.DisplayColor())).ToList();
-        lines.Add((profile != null ? $"профиль «{profile.Name}»" : "режим ещё не определён — только общие тайминги", OverlayWindow.Gray));
+        lines.Add((profile != null ? $"профиль «{profile.Name}»" : custom ? "кастомка — общие тайминги" : "режим ещё не определён — только общие тайминги",
+            OverlayWindow.Gray));
         var color = due.Count == 1 ? due[0].Rule.DisplayColor() : OverlayWindow.White;
         _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", color, lines, TimeSpan.FromSeconds(8),
             due.Count == 1 ? color : due[0].Rule.DisplayColor());

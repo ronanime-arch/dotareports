@@ -838,6 +838,14 @@ sealed class RoshanTimer
     readonly HashSet<int> _seen = new();   // время игры уже учтённых убийств
     int? _may, _sure;                      // по часам матча
 
+    /// <summary>Новая игра, а номер матча тот же (в кастомке он всегда 0) — забыть прошлые убийства.</summary>
+    public void Reset()
+    {
+        _match = null;
+        _seen.Clear();
+        _may = _sure = null;
+    }
+
     public (string Title, string Detail)? Update(GsiState s, int clock, string? mode)
     {
         if (s.MatchId != _match)
