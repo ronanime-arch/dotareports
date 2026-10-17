@@ -180,18 +180,21 @@ sealed class RankBadges : Window
         foreach (var (right, top, text, color) in badges)
         {
             var pt = toDip.Transform(new Point(right, top));
+            // «таблетка» в стиле окон: тёмное стекло, золотистая рамка
             var badge = new Border
             {
-                Background = new System.Windows.Media.SolidColorBrush(Color.FromArgb(0xE6, 0x14, 0x18, 0x21)),
-                CornerRadius = new CornerRadius(4),
-                Padding = new Thickness(6, 1, 6, 2),
+                Background = Glass.B(0xEB, 0x1A, 0x14, 0x0E),
+                BorderBrush = Glass.B(0x4D, 0xE8, 0xC8, 0x96),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(999),
+                Padding = new Thickness(9, 1, 9, 2),
                 Child = new TextBlock
                 {
                     Text = text,
-                    FontFamily = new System.Windows.Media.FontFamily("Segoe UI"),
+                    FontFamily = Glass.Sans,
                     FontSize = 13,
                     FontWeight = FontWeights.SemiBold,
-                    Foreground = new System.Windows.Media.SolidColorBrush(color),
+                    Foreground = Glass.B(color),
                 },
             };
             Canvas.SetRight(badge, Width - pt.X);

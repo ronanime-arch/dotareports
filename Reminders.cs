@@ -112,6 +112,44 @@ static class ReminderTime
     public static string Format(int seconds) => $"{seconds / 60}:{seconds % 60:00}";
 }
 
+/// <summary>Сколько секунд держать окна поверх игры; 0 — пока не нажмут ✕ (рейтинг и лобби по хоткею — ещё и до хоткея).</summary>
+sealed class WindowDurations
+{
+    public const int Max = 3600;
+
+    public int Summary { get; set; } = 6;           // сводка жалоб, ваши отправленные жалобы, low priority
+    public int Prediction { get; set; } = 6;        // шанс победы в начале матча
+    public int Reminder { get; set; } = 8;          // напоминания по часам матча и Рошан
+    public int AwakeningSummary { get; set; } = 15; // Пробуждение: сводка героя в начале
+    public int AwakeningStage { get; set; } = 8;    // Пробуждение: усиления перед 10:00 и 15:00
+    public int NecRoom { get; set; } = 60;          // лобби NEC, пока набирается комната
+    public int NecGame { get; set; } = 30;          // лобби NEC при загрузке кастомки
+    public int Rating { get; set; }                 // рейтинг по Ctrl+Alt+S
+
+    /// <summary>Подписи для окна настроек — в порядке показа.</summary>
+    public static readonly (string Label, Func<WindowDurations, int> Get, Action<WindowDurations, int> Set)[] Items =
+    {
+        ("Сводка жалоб", d => d.Summary, (d, v) => d.Summary = v),
+        ("Шанс победы", d => d.Prediction, (d, v) => d.Prediction = v),
+        ("Напоминание", d => d.Reminder, (d, v) => d.Reminder = v),
+        ("Пробуждение: сводка", d => d.AwakeningSummary, (d, v) => d.AwakeningSummary = v),
+        ("Пробуждение: усиления", d => d.AwakeningStage, (d, v) => d.AwakeningStage = v),
+        ("Лобби NEC: комната", d => d.NecRoom, (d, v) => d.NecRoom = v),
+        ("Лобби NEC: загрузка", d => d.NecGame, (d, v) => d.NecGame = v),
+        ("Рейтинг", d => d.Rating, (d, v) => d.Rating = v),
+    };
+
+    public WindowDurations Copy() => (WindowDurations)MemberwiseClone();
+
+    /// <summary>Из файла могли прийти отрицательные или огромные числа — в 0…<see cref="Max"/>.</summary>
+    public void Clamp()
+    {
+        foreach (var (_, get, set) in Items) set(this, Math.Clamp(get(this), 0, Max));
+    }
+
+    public static TimeSpan Of(int seconds) => TimeSpan.FromSeconds(Math.Clamp(seconds, 0, Max));
+}
+
 /// <summary>Настройки напоминаний в reminders.json рядом с остальными данными программы.</summary>
 sealed class ReminderSettings
 {
@@ -133,6 +171,8 @@ sealed class ReminderSettings
     public string AwakeningSound { get; set; } = "power";
     /// <summary>Профиль «Кастомка» уже добавлен в файл — удалённый не возвращаем.</summary>
     public bool CustomAdded { get; set; }
+    /// <summary>Сколько секунд держать каждое окно поверх игры (0 — пока не нажмут ✕).</summary>
+    public WindowDurations Windows { get; set; } = new();
 
     /// <summary>
     /// Профиль для матча: выбранный вручную или по режиму. Режим не определён (или под него нет профиля) — null:
@@ -160,7 +200,7 @@ sealed class ReminderSettings
     {
         Enabled = Enabled, Sound = Sound, Active = Active, Profiles = Profiles.Select(p => p.Copy()).ToList(),
         Sounds = Sounds.Select(x => x.Copy()).ToList(), Roshan = Roshan, RoshanSound = RoshanSound,
-        Awakening = Awakening, AwakeningSound = AwakeningSound, CustomAdded = CustomAdded,
+        Awakening = Awakening, AwakeningSound = AwakeningSound, CustomAdded = CustomAdded, Windows = Windows.Copy(),
     };
 
     public static ReminderSettings Load()
@@ -177,6 +217,8 @@ sealed class ReminderSettings
                 }
                 // встроенные звуки, которых в файле ещё нет (файл старше микшера или звук добавлен в новой версии)
                 s.Sounds ??= new();
+                s.Windows ??= new(); // файл старше настройки длительностей
+                s.Windows.Clamp();
                 foreach (var d in ReminderSound.Defaults().Where(d => s.Sounds.All(x => x.Key != d.Key)))
                     s.Sounds.Add(d);
                 // файл старше профиля «Кастомка» — добавить его один раз
@@ -426,6 +468,7 @@ sealed class ReminderWindow : Window
         panel.Children.Add(Row(awakening, new TextBlock { Text = "звук:", Margin = new Thickness(0, 0, 6, 0) }, awakeningSound,
             Button("▶", () => PlaySound(_edit.AwakeningSound))));
         panel.Children.Add(Row(new TextBlock { Text = "В игре использовать:", Margin = new Thickness(0, 0, 8, 0) }, _activeBox));
+        panel.Children.Add(Durations());
         panel.Children.Add(new Separator { Margin = new Thickness(0, 10, 0, 10) });
         panel.Children.Add(Row(
             new TextBlock { Text = "Профиль:", Margin = new Thickness(0, 0, 8, 0) }, _profileBox,
@@ -511,6 +554,29 @@ sealed class ReminderWindow : Window
         var b = new Button { Content = text, Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(8, 0, 0, 0) };
         b.Click += (_, _) => onClick();
         return b;
+    }
+
+    // Сколько держать каждое окно поверх игры: поле на окно, 0 — пока не нажмут ✕. Не число или вне 0…3600 — прежнее значение.
+    UIElement Durations()
+    {
+        var box = new StackPanel { Margin = new Thickness(0, 6, 0, 0) };
+        box.Children.Add(new TextBlock { Text = "Сколько показывать окна, секунд (0 — пока не закроете ✕):", Margin = new Thickness(0, 0, 0, 4) });
+        var wrap = new WrapPanel();
+        foreach (var (label, get, set) in WindowDurations.Items)
+        {
+            var field = new TextBox { Text = get(_edit.Windows).ToString(), Width = 44, HorizontalContentAlignment = HorizontalAlignment.Right };
+            // по ходу ввода: «Сохранить» по Enter не снимает фокус с поля
+            field.TextChanged += (_, _) =>
+            {
+                if (int.TryParse(field.Text.Trim(), out var v) && v is >= 0 and <= WindowDurations.Max) set(_edit.Windows, v);
+            };
+            field.LostFocus += (_, _) => field.Text = get(_edit.Windows).ToString();
+            var item = Row(new TextBlock { Text = label + ":", Margin = new Thickness(0, 0, 6, 0) }, field);
+            item.Margin = new Thickness(0, 0, 18, 6);
+            wrap.Children.Add(item);
+        }
+        box.Children.Add(wrap);
+        return box;
     }
 
     void FillActive()

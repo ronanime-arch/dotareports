@@ -26,7 +26,7 @@ sealed class PickFrame : Window
         ResizeMode = ResizeMode.NoResize;
         Content = new System.Windows.Controls.Border
         {
-            BorderBrush = new SolidColorBrush(OverlayWindow.Green),
+            BorderBrush = new SolidColorBrush(Glass.Gold), // золото — как блок «Бери» в карточке
             BorderThickness = new Thickness(Gap),
             CornerRadius = new CornerRadius(2),
         };
