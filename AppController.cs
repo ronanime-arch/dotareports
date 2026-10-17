@@ -43,6 +43,7 @@ sealed class AppController
     bool _choiceBusy;
     int _choiceCard = -1;
     int[]? _choicesShown;
+    bool _choiceMade;   // в этой кастомке герой уже выбран (GSI) — рамку вокруг картинки не показываем
     string _customGame = "";
     GsiState? _customLast;   // последнее сообщение идущей кастомки, где есть ваш герой
     string? _customWinner;
@@ -54,6 +55,7 @@ sealed class AppController
     string? _customRemindersNote;                 // что последним записано в лог: будут ли напоминания в этой кастомке и почему
     readonly DispatcherTimer _frameTimer = new() { Interval = TimeSpan.FromSeconds(0.5) };
     TurboCard _turboCard = null!;
+    PickFrame _pickFrame = null!;   // рамка вокруг «Бери» на самом экране пика
     RatingWindow _rating = null!;
     // лобби NEC: при старте кастомки — снимок комнаты на весь матч (за 10 минут до старта), сам прячется через 30 с
     RatingWindow _necLobby = null!;
@@ -125,6 +127,7 @@ sealed class AppController
         _reminderOverlay = new OverlayWindow(top: 330, backgroundAlpha: 0x99); // полупрозрачное: игра под ним видна
         _draft = new DraftWindow(_draftData) { OpenUrl = url => OpenAnalytics(url) };
         _turboCard = new TurboCard();
+        _pickFrame = new PickFrame();
         _rating = new RatingWindow();
         _necLobby = new RatingWindow(width: 380);
         _necHide.Tick += (_, _) =>
@@ -230,6 +233,7 @@ sealed class AppController
             {
                 _turboCard.Render(_draftData, _lastSnap, _watcher.Status, _ownHero);
                 _turboCard.ShowCard();
+                UpdatePickFrame();
             }
         }
         else
@@ -237,6 +241,7 @@ sealed class AppController
             _frameTimer.Stop();
             _watcher.End();
             _turboCard.Hide();
+            _pickFrame.ShowAround(null);
             if (s.GameState.Length > 0 && s.OwnGame) ShowPrediction(s); // матч пошёл дальше (не выход в меню из пика)
             _ownHero = 0;
             _lastSnap = null;
@@ -248,7 +253,13 @@ sealed class AppController
         if (!_picking || _lastSnap == null || !_draftData.TurboReady) return;
         _turboCard.Render(_draftData, _lastSnap, $"с экрана: банов {_lastSnap.Bans}, занято {_lastSnap.Taken}", _ownHero);
         _turboCard.ShowCard(); // данные могли догрузиться уже посреди пика — тогда карточки ещё не было
+        UpdatePickFrame();
     }
+
+    // «Бери» — ещё и рамкой вокруг клетки героя в сетке, пока вы сами не выбрали
+    void UpdatePickFrame() =>
+        _pickFrame.ShowAround(_picking && _ownHero == 0 && _turboCard.Recommended > 0 && Setup.ScreenSupported
+            ? _watcher.CellOf(_turboCard.Recommended) : null);
 
     // Начало матча: прогноз по итоговому драфту — окно поверх игры и журнал (потом сверить с исходом),
     // разбор матча и Dotabuff вашего героя — в «Аналитике» (окно свёрнуто или уже открыто — игре не мешает).
@@ -304,6 +315,7 @@ sealed class AppController
             _customGame = Path.GetFileNameWithoutExtension(s.CustomGame) ?? "";
             _choiceCard = s.TeamSlot;
             _choicesShown = null;
+            _choiceMade = false;
             _choiceTimer.Start();
             _roshan.Reset(); // номер матча в кастомке всегда 0 — по нему новую игру не отличить
         }
@@ -313,6 +325,12 @@ sealed class AppController
             if (_choicesShown == null && _choiceReader is { LastScores.Length: > 0 } reader)
                 Log.Write("Кастомка: три героя на выбор не узнаны (" + reader.LastScores + ")");
             _turboCard.Hide();
+            _pickFrame.ShowAround(null);
+        }
+        if (choosing && s.HeroId > 0 && !_choiceMade)
+        {
+            _choiceMade = true; // герой выбран — рамка вокруг одной из трёх картинок уже не нужна
+            _pickFrame.ShowAround(null);
         }
 
         if (custom && (s.WinTeam is "radiant" or "dire")) _customWinner = s.WinTeam;
@@ -351,6 +369,9 @@ sealed class AppController
             if (!_choiceTimer.IsEnabled) return;
             _turboCard.RenderChoices(_draftData, heroes, _customGame, id => _heroNames.TryGetValue(id, out var n) ? awakening?.Of(n) : null);
             _turboCard.ShowChoices();
+            // рамка — вокруг той из трёх картинок, кого советует «Бери»
+            int k = Array.IndexOf(heroes, _turboCard.Recommended);
+            _pickFrame.ShowAround(k >= 0 && !_choiceMade ? ChoiceReader.ThumbArea(card, k) : null);
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or ArgumentException)
         {
@@ -1107,6 +1128,7 @@ sealed class AppController
             _tray.Dispose();
         }
         _overlay?.Close();
+        _pickFrame?.Close();
         _reminderOverlay?.Close();
         _reminderWindow?.Close();
         _historyWindow?.Close();

@@ -48,6 +48,7 @@ sealed class GridReader
     // Геометрия сетки: группы по атрибутам, шаг клеток 51×83, клетка 43×75; внутренняя область без рамки и полосы уровня.
     static readonly (int Attr, int X0, int Cols)[] Groups = { (0, 134, 6), (1, 455, 6), (2, 776, 6), (3, 1097, 4) };
     const int Y0 = 210, StepX = 51, StepY = 83, MaxRows = 6;
+    const int CellW = 43, CellH = 75;
     const int InX0 = 4, InY0 = 4, PW = 35, PH = 54;
     // Индикаторы голосового чата слева («ник ⊘ FISH», второй ник ниже) заходят на первые столбцы силы — эти пиксели не сравниваем.
     static readonly Rectangle VoiceArea = new(0, 388, 200, 72);
@@ -113,6 +114,10 @@ sealed class GridReader
 
     public string Status { get; private set; } = "";
     public bool Enabled => _cells.Count > 0;
+
+    /// <summary>Клетка героя в сетке пика на экране 1920×1080; null — героя в сетке нет (или сетка не загружена).</summary>
+    public Rectangle? CellOf(int hero) =>
+        _cells.FirstOrDefault(c => c.HeroId == hero) is { HeroId: > 0 } c ? new Rectangle(c.X, c.Y, CellW, CellH) : null;
     public HashSet<int> Banned { get; } = new();
     public HashSet<int> Taken { get; } = new();
     /// <summary>Герои союзников: стали недоступны одновременно со скачком слота вашей команды (без вас).</summary>

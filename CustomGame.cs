@@ -147,6 +147,9 @@ sealed class ChoiceReader
         }
     }
 
+    /// <summary>Где на экране k-я картинка (0–2) в карточке игрока card (0–4).</summary>
+    public static Rectangle ThumbArea(int card, int k) => new(CardX0 + CardStep * card + ThumbDx + ThumbStep * k, ThumbY, ThumbW, ThumbH);
+
     /// <summary>Три героя на выбор в карточке игрока card (0–4) прямо с экрана; null — хоть один не узнан уверенно.</summary>
     public int[]? ReadScreen(int card)
     {

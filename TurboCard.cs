@@ -27,6 +27,9 @@ sealed class TurboCard : Window
 
     readonly StackPanel _panel = new();
 
+    /// <summary>Кого советует «Бери» в последней отрисовке; 0 — никого (вы уже выбрали или советовать не из кого).</summary>
+    public int Recommended { get; private set; }
+
     public TurboCard()
     {
         WindowStyle = WindowStyle.None;
@@ -95,6 +98,7 @@ sealed class TurboCard : Window
         Width = 1165;
         _panel.Children.Clear();
         var (choices, byCustom) = CustomStats.Rank(data, game, heroes);
+        Recommended = choices[0].Hero;
         string Name(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
         var head = new StackPanel { Orientation = Orientation.Horizontal };
         head.Children.Add(Text($"Бери: {Name(choices[0].Hero)}", 15, Good, bold: true));
@@ -127,6 +131,7 @@ sealed class TurboCard : Window
     public void Render(DraftData data, PickSnapshot snap, string recognition, int ownHero = 0)
     {
         Width = 190; // после кастомки карточка была широкой полосой
+        Recommended = 0;
         bool allPick = snap.Mode == "ALL_PICK";
         string N(IEnumerable<int> ids) => string.Join(", ", ids.Select(id => data.Heroes.GetValueOrDefault(id, $"#{id}")));
         // Предвыбор союзников считаем их героями: учитываем сочетание и не предлагаем.
@@ -188,6 +193,7 @@ sealed class TurboCard : Window
         var bestAny = picks.FirstOrDefault(p => !p.Rare);
         if (best != null)
         {
+            Recommended = best.HeroId;
             _panel.Children.Add(Text("Бери: " + data.Heroes.GetValueOrDefault(best.HeroId, $"#{best.HeroId}"), 17, Good, bold: true, top: 6));
             string scope = snap.Position > 0 ? "на роли" : allPick ? "в All Pick" : "в Турбо";
             var why = new List<string> { $"{best.Winrate:0.0}% {scope}" };
