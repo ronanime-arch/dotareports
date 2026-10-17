@@ -41,7 +41,7 @@ static class ClickTest
             TimeSpan.Zero, refresh: () => popupRefreshed = true);
         rating.Toggle();
 
-        var steps = new Queue<Action>();
+        var steps = new Queue<Func<bool>>();
         (int X, int Y) Center(Window w, string glyph)
         {
             var b = Find(w, glyph) ?? throw new InvalidOperationException($"нет кнопки {glyph}");
@@ -58,24 +58,47 @@ static class ClickTest
         bool Ours(Window w, (int X, int Y) p) =>
             GetAncestor(WindowFromPoint(new Native.POINT { X = p.X, Y = p.Y }), GaRoot) == new WindowInteropHelper(w).Handle;
 
+        // Курсор там, куда поставили? Нет (двигали мышь) — поставить снова, шаг повторится на следующем такте.
+        bool At((int X, int Y) target)
+        {
+            Native.GetCursorPos(out var now);
+            if (now.X == target.X && now.Y == target.Y) return true;
+            SetCursorPos(target.X, target.Y);
+            return false;
+        }
+
+        // Шаг возвращает true, когда сделан; false — повторить на следующем такте (не больше четырёх раз).
         void Check(string name, Window w, string glyph, Func<bool> done)
         {
-            (int X, int Y) button = default;
-            steps.Enqueue(() => { button = Center(w, glyph); SetCursorPos(button.X, button.Y); });
-            steps.Enqueue(() => log.Add($"{name}: над {glyph} окно ловит клики — {(!Transparent(w) ? "да" : "НЕТ")}, под курсором оно — {(Ours(w, button) ? "да" : "НЕТ")}"));
-            steps.Enqueue(() => { var p = Body(w); SetCursorPos(p.X, p.Y); });
-            steps.Enqueue(() => log.Add($"{name}: над телом окна клики проходят в игру — {(Transparent(w) ? "да" : "НЕТ")}"));
-            steps.Enqueue(() => SetCursorPos(button.X, button.Y));
+            (int X, int Y) button = default, body = default;
+            steps.Enqueue(() => { button = Center(w, glyph); body = Body(w); SetCursorPos(button.X, button.Y); return true; });
             steps.Enqueue(() =>
             {
-                if (!Transparent(w) && Ours(w, button))
-                {
-                    mouse_event(LeftDown, 0, 0, 0, UIntPtr.Zero);
-                    mouse_event(LeftUp, 0, 0, 0, UIntPtr.Zero);
-                }
-                else log.Add($"{name}: нажатие {glyph} пропущено — под курсором не наше окно");
+                if (!At(button)) return false;
+                log.Add($"{name}: над {glyph} окно ловит клики — {(!Transparent(w) ? "да" : "НЕТ")}, под курсором оно — {(Ours(w, button) ? "да" : "НЕТ")}");
+                if (Transparent(w) && w is GlassWindow g) log.Add($"    {g.Diagnose()}; поставили курсор в {button.X},{button.Y}");
+                return true;
             });
-            steps.Enqueue(() => log.Add($"{name}: нажатие {glyph} сработало — {(done() ? "да" : "НЕТ")}"));
+            steps.Enqueue(() => { SetCursorPos(body.X, body.Y); return true; });
+            steps.Enqueue(() =>
+            {
+                if (!At(body)) return false;
+                log.Add($"{name}: над телом окна клики проходят в игру — {(Transparent(w) ? "да" : "НЕТ")}");
+                return true;
+            });
+            steps.Enqueue(() => { SetCursorPos(button.X, button.Y); return true; });
+            steps.Enqueue(() =>
+            {
+                if (!At(button) || Transparent(w) || !Ours(w, button)) return false; // нажимаем только в своё окно
+                mouse_event(LeftDown, 0, 0, 0, UIntPtr.Zero);
+                mouse_event(LeftUp, 0, 0, 0, UIntPtr.Zero);
+                return true;
+            });
+            steps.Enqueue(() =>
+            {
+                log.Add($"{name}: нажатие {glyph} сработало — {(done() ? "да" : "НЕТ")}");
+                return true;
+            });
         }
 
         Check("всплывашка", popup, "↻", () => popupRefreshed);
@@ -83,13 +106,19 @@ static class ClickTest
         Check("рейтинг", rating, "✕", () => ratingClosed && !rating.IsVisible);
 
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        int tries = 0;
         timer.Tick += (_, _) =>
         {
             try
             {
                 if (steps.Count > 0)
                 {
-                    steps.Dequeue()();
+                    if (steps.Peek()() || ++tries > 4)
+                    {
+                        if (tries > 4) log.Add("шаг не удался за 5 попыток (курсор сдвигали или окно не ловит клик)");
+                        steps.Dequeue();
+                        tries = 0;
+                    }
                     return;
                 }
             }

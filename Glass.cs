@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -148,12 +149,15 @@ static class Glass
         return grid;
     }
 
+    /// <summary>Фон кнопки без наведения: глазу не виден, но не нулевой — иначе по «пустым» пикселям кнопки клик ушёл бы в игру.</summary>
+    public static readonly SolidColorBrush IdleButton = B(0x02, 0x1A, 0x14, 0x0E);
+
     /// <summary>Кнопка в шапке: ↻ — обновить, ✕ — закрыть. Подсветку при наведении включает <see cref="GlassWindow"/>.</summary>
     public static Border IconButton(string glyph) => new()
     {
         Width = 24, Height = 24,
         CornerRadius = new CornerRadius(7),
-        Background = Brushes.Transparent,
+        Background = IdleButton, // не совсем прозрачный: слоистое окно ловит клик только по непрозрачным пикселям
         Margin = new Thickness(2, 0, 0, 0),
         VerticalAlignment = VerticalAlignment.Center,
         Child = new TextBlock
@@ -292,6 +296,25 @@ abstract class GlassWindow : Window
         CloseButtonPressed?.Invoke();
     }
 
+    /// <summary>Для --click-test: таймер, курсор и где кнопки на экране.</summary>
+    public string Diagnose()
+    {
+        Native.GetCursorPos(out var p);
+        var parts = _buttons.Select(b =>
+        {
+            bool src = PresentationSource.FromVisual(b.Button) != null;
+            string rect = "";
+            if (src)
+            {
+                var a = b.Button.PointToScreen(new Point(0, 0));
+                var c = b.Button.PointToScreen(new Point(b.Button.ActualWidth, b.Button.ActualHeight));
+                rect = $" {a.X:0},{a.Y:0}–{c.X:0},{c.Y:0}";
+            }
+            return $"[{(b.Button.Child as TextBlock)?.Text} видна={b.Button.IsVisible} источник={src} w={b.Button.ActualWidth:0}{rect}]";
+        });
+        return $"hwnd={_hwnd != IntPtr.Zero} опрос={_poll.IsEnabled} кликабельно={_clickable} курсор={p.X},{p.Y} кнопок={_buttons.Count} " + string.Join(" ", parts);
+    }
+
     void Poll()
     {
         if (_hwnd == IntPtr.Zero || !Native.GetCursorPos(out var p)) return;
@@ -325,7 +348,7 @@ abstract class GlassWindow : Window
         if (button == _hover) return;
         if (_hover != null)
         {
-            _hover.Background = Brushes.Transparent;
+            _hover.Background = Glass.IdleButton;
             if (_hover.Child is TextBlock t) t.Foreground = Glass.B(Glass.Muted);
         }
         _hover = button;
