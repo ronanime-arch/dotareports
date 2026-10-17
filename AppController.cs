@@ -18,6 +18,8 @@ sealed class AppController
     const int HotkeyId = 0xD07A;
     const int DraftHotkeyId = 0xD07B;
     const int RatingHotkeyId = 0xD07C;
+    const int NecHotkeyId = 0xD07D;
+    const uint VK_N = 0x4E;
     const uint VK_S = 0x53;
     const uint VK_R = 0x52;
     const uint VK_D = 0x44;
@@ -53,6 +55,12 @@ sealed class AppController
     readonly DispatcherTimer _frameTimer = new() { Interval = TimeSpan.FromSeconds(0.5) };
     TurboCard _turboCard = null!;
     RatingWindow _rating = null!;
+    // лобби NEC: при старте кастомки — снимок комнаты на весь матч (за 10 минут до старта), сам прячется через 30 с
+    RatingWindow _necLobby = null!;
+    readonly DispatcherTimer _necHide = new() { Interval = TimeSpan.FromSeconds(30) };
+    List<NecPlayer>? _necSnapshot;
+    DateTime _necSnapshotAt;
+    bool _inCustom;
     readonly ProfileData _profile = new();
     readonly DispatcherTimer _profileTimer = new() { Interval = TimeSpan.FromSeconds(60) };
     // «Уверенность в ранге» видна только на экране профиля Dota — смотрим туда раз в 3 с, пока вы в меню
@@ -118,6 +126,12 @@ sealed class AppController
         _draft = new DraftWindow(_draftData) { OpenUrl = url => OpenAnalytics(url) };
         _turboCard = new TurboCard();
         _rating = new RatingWindow();
+        _necLobby = new RatingWindow(width: 380);
+        _necHide.Tick += (_, _) =>
+        {
+            _necHide.Stop();
+            if (_necLobby.IsVisible) _necLobby.Toggle();
+        };
         // после матча история в GCPD обновляется не сразу — читаем профиль через минуту после выхода в меню
         _profileTimer.Tick += async (_, _) =>
         {
@@ -181,6 +195,8 @@ sealed class AppController
         // В кастомке (Аркада) свой экран выбора и свои герои — обычная карточка советовала бы мимо (Spectre при выборе
         // из трёх своих); там своя — кого из трёх брать по вашим играм (TrackCustom).
         bool custom = !string.IsNullOrEmpty(s.CustomGame);
+        if (custom && !_inCustom) ShowNecLobby(auto: true); // кастомка загрузилась — кто был в комнате NEC перед ней
+        _inCustom = custom;
         if (custom && s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != s.GameState)
         {
             Log.Write("Кастомная игра " + Path.GetFileNameWithoutExtension(s.CustomGame) + $" (карта {s.MapName}): выбор из трёх — по вашим играм; " +
@@ -826,12 +842,66 @@ sealed class AppController
         }
     }
 
+    // Кастомка началась (auto) — кого NEC показывал в комнате за 10 минут до неё. Ctrl+Alt+N в кастомке — тот же снимок
+    // (NEC и посреди матча подгружает посторонних), вне её — свежее за 10 минут, а если пусто — снимок прошлого матча.
+    void ShowNecLobby(bool auto)
+    {
+        if (!NecLobby.Installed)
+        {
+            if (!auto) _overlay.ShowPopup("Лобби NEC", OverlayWindow.White, new[] { ("NEC не установлен — нет папки %APPDATA%\\nec-platform.", OverlayWindow.Gray) }, PopupTime);
+            return;
+        }
+        var at = DateTime.Now;
+        List<NecPlayer> players;
+        if (auto)
+        {
+            players = NecLobby.Load(at);
+            (_necSnapshot, _necSnapshotAt) = (players, at);
+            Log.Write($"NEC: кастомка началась, в кэше NEC за 10 мин {players.Count} игроков");
+            if (players.Count == 0) return;
+        }
+        else if (_inCustom && _necSnapshot != null)
+            (players, at) = (_necSnapshot, _necSnapshotAt);
+        else
+        {
+            players = NecLobby.Load(at);
+            if (players.Count == 0 && _necSnapshot is { Count: > 0 })
+                (players, at) = (_necSnapshot, _necSnapshotAt);
+        }
+
+        var lines = players.Count > 0
+            ? NecLobby.Lines(players, _draftData.Heroes)
+            : new List<(string, Color)> { ("За 10 минут NEC никого не показывал — откройте комнату или подбор в NEC.", OverlayWindow.Gray) };
+        _necLobby.Render($"Лобби NEC · {players.Count} {Plural(players.Count, "игрок", "игрока", "игроков")}", lines,
+            $"кэш NEC за 10 мин до {at:HH:mm} · без деления на команды, могут быть ушедшие · Ctrl+Alt+N — скрыть");
+        if (_rating.IsVisible) _rating.Toggle(); // оба окна в одном углу
+        if (!_necLobby.IsVisible) _necLobby.Toggle();
+        _necHide.Stop();
+        if (auto) _necHide.Start();
+    }
+
+    void ToggleNecLobby()
+    {
+        if (!_necLobby.IsVisible)
+        {
+            ShowNecLobby(auto: false);
+            return;
+        }
+        _necHide.Stop();
+        _necLobby.Toggle();
+    }
+
     async Task ToggleRatingAsync()
     {
         if (_rating.IsVisible)
         {
             _rating.Toggle();
             return;
+        }
+        if (_necLobby.IsVisible)
+        {
+            _necHide.Stop();
+            _necLobby.Toggle();
         }
         RenderRating();
         _rating.Toggle();
@@ -880,6 +950,8 @@ sealed class AppController
         }
         if (!Native.RegisterHotKey(_browser.Handle, RatingHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_S))
             Log.Write("Ctrl+Alt+S занята другой программой");
+        if (!Native.RegisterHotKey(_browser.Handle, NecHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_N))
+            Log.Write("Ctrl+Alt+N занята другой программой");
         if (!Native.RegisterHotKey(_browser.Handle, DraftHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_D))
         {
             Log.Write("Ctrl+Alt+D занята другой программой");
@@ -905,6 +977,11 @@ sealed class AppController
             _draft.Toggle();
             handled = true;
         }
+        else if (msg == Native.WM_HOTKEY && wParam.ToInt32() == NecHotkeyId)
+        {
+            ToggleNecLobby();
+            handled = true;
+        }
         return IntPtr.Zero;
     }
 
@@ -923,6 +1000,7 @@ sealed class AppController
         menu.Items.Add("Помощник в пике (Ctrl+Alt+D)", null, (_, _) => _draft.Toggle());
         menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
+        menu.Items.Add("Лобби NEC (Ctrl+Alt+N)", null, (_, _) => ToggleNecLobby());
         menu.Items.Add("Напоминания…", null, (_, _) => OpenReminders());
         menu.Items.Add("История поведения…", null, (_, _) => OpenHistory());
         menu.Items.Add("Аналитика и Dotabuff…", null, (_, _) => OpenAnalytics());
@@ -1020,7 +1098,9 @@ sealed class AppController
             Native.UnregisterHotKey(_browser.Handle, HotkeyId);
             Native.UnregisterHotKey(_browser.Handle, DraftHotkeyId);
             Native.UnregisterHotKey(_browser.Handle, RatingHotkeyId);
+            Native.UnregisterHotKey(_browser.Handle, NecHotkeyId);
         }
+        _necHide.Stop();
         if (_tray != null)
         {
             _tray.Visible = false;
@@ -1034,6 +1114,7 @@ sealed class AppController
         _draft?.Close();
         _turboCard?.Close();
         _rating?.Close();
+        _necLobby?.Close();
         _browser?.Close();
         _app.Shutdown();
     }

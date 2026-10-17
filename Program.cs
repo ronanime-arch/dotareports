@@ -206,6 +206,21 @@ static class Program
             DraftTest(args[1].Split(','), Path.Combine(Paths.Root, "draft_test.txt"));
             return;
         }
+        if (args.Length >= 1 && args[0] == "--nec-test")
+        {
+            // состав комнаты NEC из его кэша за 10 минут до момента (по умолчанию — сейчас), в nec_test.txt: --nec-test 2026-10-17T11:09
+            var at = args.Length >= 2 ? DateTime.Parse(args[1], System.Globalization.CultureInfo.InvariantCulture) : DateTime.Now;
+            var heroes = new Dictionary<int, string>();
+            if (File.Exists(Paths.Heroes))
+                foreach (var h in System.Text.Json.JsonDocument.Parse(File.ReadAllText(Paths.Heroes)).RootElement.EnumerateArray())
+                    heroes[h.GetProperty("id").GetInt32()] = h.GetProperty("localized_name").GetString() ?? "";
+            var players = NecLobby.Load(at);
+            var lines = new List<string> { $"до {at:dd.MM HH:mm}: {players.Count}" };
+            foreach (var p in players)
+                lines.AddRange(NecLobby.Lines(new[] { p }, heroes).Select((l, i) => (i == 0 ? $"{p.SeenAt:HH:mm:ss} {p.SteamId}  " : "    ") + l.Text));
+            File.WriteAllLines(Path.Combine(Paths.Root, "nec_test.txt"), lines);
+            return;
+        }
 
 
         if (args.Length >= 1 && args[0] == "--exit")
