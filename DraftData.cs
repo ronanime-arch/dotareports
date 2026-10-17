@@ -56,6 +56,24 @@ sealed class DraftData
     Dictionary<int, HashSet<string>> _roles = new();
 
     public IReadOnlyDictionary<int, string> Heroes => _heroes;
+
+    /// <summary>Внутренние имена героев (npc_dota_hero_…) по номеру — из списка Valve.</summary>
+    public Dictionary<int, string> HeroInternalNames()
+    {
+        var result = new Dictionary<int, string>();
+        try
+        {
+            if (!File.Exists(Paths.HeroList)) return result;
+            using var doc = JsonDocument.Parse(File.ReadAllText(Paths.HeroList));
+            foreach (var h in doc.RootElement.GetProperty("result").GetProperty("data").GetProperty("heroes").EnumerateArray())
+                if (h.GetProperty("name").GetString() is { Length: > 0 } name) result[h.GetProperty("id").GetInt32()] = name;
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            Log.Write("Список героев Valve не прочитан: " + ex.Message);
+        }
+        return result;
+    }
     public IReadOnlyDictionary<int, (int Games, int Wins)> Pool => _pool;
     public string Status { get; private set; } = "данные загружаются…";
     public bool Ready => _heroes.Count > 0 && _vs.Count > 0;
@@ -84,6 +102,10 @@ sealed class DraftData
         // список Valve с атрибутами — по нему строится раскладка сетки пика
         await Step("список героев Valve", errors, async () =>
             await File.WriteAllTextAsync(Paths.HeroList, await Http.GetStringAsync("https://www.dota2.com/datafeed/herolist?language=russian")));
+        // названия способностей — для описаний Пробуждения в кастомке; меняются редко, раз в неделю
+        if (!File.Exists(Paths.AbilityList) || DateTime.Now - File.GetLastWriteTime(Paths.AbilityList) > TimeSpan.FromDays(7))
+            await Step("список способностей Valve", errors, async () =>
+                await File.WriteAllTextAsync(Paths.AbilityList, await Http.GetStringAsync("https://www.dota2.com/datafeed/abilitylist?language=russian")));
         // портреты Valve — по ним узнаются герои в слотах верхней полосы (качаем только недостающие)
         await Step("портреты героев", errors, () => DownloadHeroImagesAsync(Paths.Portraits, ""));
         await Step("иконки героев", errors, () => DownloadHeroImagesAsync(Paths.Icons, "icons/"));

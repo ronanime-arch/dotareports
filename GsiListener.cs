@@ -19,7 +19,8 @@ namespace DotaReports;
 /// </summary>
 sealed record GsiState(string GameState, string? Team, int HeroId, string? MatchId, int TeamSlot, int? ClockTime = null,
     bool Spectating = false, string? CustomGame = null, int? GoldFromIncome = null, int? GameTime = null, IReadOnlyList<int>? RoshanKills = null,
-    string? WinTeam = null, int Kills = 0, int Deaths = 0, int Assists = 0, int Gpm = 0, int Xpm = 0, string? MapName = null)
+    string? WinTeam = null, int Kills = 0, int Deaths = 0, int Assists = 0, int Gpm = 0, int Xpm = 0, string? MapName = null,
+    string? HeroName = null)
 {
     /// <summary>Вы играете сами: есть герой и сторона, не смотрите чужую игру и не в кастомке.</summary>
     public bool OwnGame => Playing && string.IsNullOrEmpty(CustomGame);
@@ -169,8 +170,9 @@ sealed class GsiListener
             int Stat(string key) => hasPlayer && pl.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
             string? winTeam = hasMap && map.TryGetProperty("win_team", out var wt) && wt.ValueKind == JsonValueKind.String ? wt.GetString() : null;
             string? mapName = hasMap && map.TryGetProperty("name", out var mn) && mn.ValueKind == JsonValueKind.String ? mn.GetString() : null;
+            string? heroName = root.TryGetProperty("hero", out var hn) && hn.TryGetProperty("name", out var hnn) && hnn.ValueKind == JsonValueKind.String ? hnn.GetString() : null;
             parsed = new GsiState(state, team, hero, matchId, teamSlot, clock, spectating, custom, income, gameTime, roshanKills,
-                winTeam, Stat("kills"), Stat("deaths"), Stat("assists"), Stat("gpm"), Stat("xpm"), mapName);
+                winTeam, Stat("kills"), Stat("deaths"), Stat("assists"), Stat("gpm"), Stat("xpm"), mapName, heroName);
         }
         catch (JsonException)
         {

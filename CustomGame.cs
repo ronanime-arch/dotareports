@@ -12,8 +12,19 @@ namespace DotaReports;
 /// <summary>Ваша игра в кастомке: герой, исход (null — не узнали: вышли раньше конца), K/D/A, золото и опыт в минуту, минуты.</summary>
 sealed record CustomGameRecord(string Game, DateTime At, int Hero, bool? Win, int Kills, int Deaths, int Assists, int Gpm, int Xpm, int Minutes);
 
-/// <summary>Кого из трёх брать: оценка (выше — лучше) и строки для карточки.</summary>
-sealed record CustomChoice(int Hero, double Score, string Here, string Usual);
+/// <summary>Кого из трёх брать: оценка (выше — лучше), ваши игры на герое здесь и в обычной Доте, его винрейт в Турбо.</summary>
+sealed record CustomChoice(int Hero, double Score, int HereGames, double HereGpm, int HereWins, int HereKnown, double HereKda,
+    int UsualGames, int UsualWins, double Turbo)
+{
+    public string Here => HereGames == 0 ? "здесь ещё не играли"
+        : $"здесь {HereGames} {Words.Plural(HereGames, "игра", "игры", "игр")}" + (HereKnown > 0 ? $", побед {HereWins} из {HereKnown}" : "")
+          + $" · {HereGpm:0} зол/мин · KDA {HereKda:0.0}";
+
+    public string Usual => (UsualGames > 0 ? $"в Доте {UsualGames} {Words.Plural(UsualGames, "игра", "игры", "игр")}, {UsualRate:0}% побед" : "в Доте не играли")
+        + $" · Турбо {Turbo * 100:0.0}%";
+
+    public double UsualRate => UsualGames > 0 ? 100.0 * UsualWins / UsualGames : 0;
+}
 
 /// <summary>
 /// Статистика ваших игр в кастомках (custom_stats.json, последние 500): Stratz и OpenDota кастомки не собирают,
@@ -68,25 +79,33 @@ static class CustomStats
         foreach (var hero in heroes)
         {
             var games = here.Where(r => r.Hero == hero).ToList();
-            string hereText;
-            if (games.Count == 0) hereText = "здесь ещё не играли";
-            else
-            {
-                var known = games.Where(r => r.Win != null).ToList();
-                double kda = games.Average(r => (r.Kills + r.Assists) / (double)Math.Max(1, r.Deaths));
-                hereText = $"здесь {games.Count} {Words.Plural(games.Count, "игра", "игры", "игр")}"
-                           + (known.Count > 0 ? $", побед {known.Count(r => r.Win == true)} из {known.Count}" : "")
-                           + $" · {games.Average(r => r.Gpm):0} зол/мин · KDA {kda:0.0}";
-            }
+            var known = games.Where(r => r.Win != null).ToList();
+            double gpm = games.Count > 0 ? games.Average(r => r.Gpm) : 0;
+            double kda = games.Count > 0 ? games.Average(r => (r.Kills + r.Assists) / (double)Math.Max(1, r.Deaths)) : 0;
             double turbo = data.ModeWinrate(hero, "TURBO") is { } wr ? wr.Winrate / 100 : 0.5;
             var usual = data.Pool.TryGetValue(hero, out var pool) && pool.Games > 0 ? pool : (Games: 0, Wins: 0);
             double usualRate = (usual.Wins + OwnPrior * turbo) / (usual.Games + OwnPrior);
-            string usualText = (usual.Games > 0 ? $"в Доте {usual.Games} {Words.Plural(usual.Games, "игра", "игры", "игр")}, {100.0 * usual.Wins / usual.Games:0}%" : "в Доте не играли")
-                               + $" · Турбо {turbo * 100:0.0}%";
             double score = byCustom ? (games.Sum(r => r.Gpm) + GpmPrior * avgGpm) / (games.Count + GpmPrior) + usualRate : usualRate;
-            result.Add(new CustomChoice(hero, score, hereText, usualText));
+            result.Add(new CustomChoice(hero, score, games.Count, gpm, known.Count(r => r.Win == true), known.Count, kda,
+                usual.Games, usual.Wins, turbo));
         }
         return (result.OrderByDescending(c => c.Score).ToList(), byCustom);
+    }
+
+    /// <summary>Почему первый из трёх: на чём основана оценка и как с этим у двух других.</summary>
+    public static string Why(IReadOnlyList<CustomChoice> choices, bool byCustom, Func<int, string> name)
+    {
+        var best = choices[0];
+        var rest = choices.Skip(1).ToList();
+        string Games(int n) => $"{n} {Words.Plural(n, "игру", "игры", "игр")}";
+        if (byCustom && best.HereGames > 0)
+            return $"здесь у вас на нём {best.HereGpm:0} золота в минуту за {Games(best.HereGames)}; "
+                   + string.Join(", ", rest.Select(o => o.HereGames > 0 ? $"{name(o.Hero)} — {o.HereGpm:0}" : $"на {name(o.Hero)} здесь не играли"));
+        if (best.UsualGames > 0)
+            return $"в Доте у вас на нём {best.UsualRate:0}% побед за {Games(best.UsualGames)}; "
+                   + string.Join(", ", rest.Select(o => o.UsualGames > 0 ? $"{name(o.Hero)} — {o.UsualRate:0}% за {Games(o.UsualGames)}" : $"на {name(o.Hero)} не играли"));
+        return $"ни на ком из трёх вы не играли — у него выше винрейт в Турбо: {best.Turbo * 100:0.0}% ("
+               + string.Join(", ", rest.Select(o => $"{name(o.Hero)} {o.Turbo * 100:0.0}%")) + ")";
     }
 }
 
