@@ -14,6 +14,9 @@ sealed class PickFrame : Window
 {
     const int Gap = 3;   // от края клетки до рамки и толщина рамки, px экрана
 
+    /// <summary>Цвет рамки — его же рисует --frame-test.</summary>
+    public static readonly Color FrameColor = Glass.GoldLight; // светлое золото — в тон «Бери», но ярче меток уровня Dota
+
     public PickFrame()
     {
         WindowStyle = WindowStyle.None;
@@ -26,7 +29,7 @@ sealed class PickFrame : Window
         ResizeMode = ResizeMode.NoResize;
         Content = new System.Windows.Controls.Border
         {
-            BorderBrush = new SolidColorBrush(OverlayWindow.Green),
+            BorderBrush = new SolidColorBrush(FrameColor),
             BorderThickness = new Thickness(Gap),
             CornerRadius = new CornerRadius(2),
         };

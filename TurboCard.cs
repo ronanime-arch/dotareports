@@ -3,71 +3,60 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Shapes;
 
 namespace DotaReports;
 
 /// <summary>
 /// Карточка пика у правого края экрана (x ≥ 1720 — правее сетки и слотов верхней полосы,
-/// чтобы не попадать в снимки экрана). Клики проходят насквозь, фокус не забирает.
+/// чтобы не попадать в снимки экрана). Клики проходят насквозь (кроме ↻ и ✕), фокус не забирает.
+/// Закрыли ✕ — до следующего пика не появляется. Вид — «стекло» из макета; значки S/A/B/C — тир по винрейту.
 /// </summary>
-sealed class TurboCard : Window
+sealed class TurboCard : GlassWindow
 {
     const int PoolRows = 5;
     const int MetaRows = 5;
     const int MinPoolGames = 2;
     const double DraftFitGap = 1.0; // «Под этот драфт» — если поправки за драфт лучше, чем у «Бери», хотя бы на 1 п.п.
 
-    static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xF2, 0xF2, 0xF2));
-    static readonly Brush Dim = new SolidColorBrush(Color.FromRgb(0x9A, 0xA4, 0xB0));
-    static readonly Brush Good = new SolidColorBrush(Color.FromRgb(0x7C, 0xD9, 0x92));
-    static readonly Brush Bad = new SolidColorBrush(Color.FromRgb(0xFF, 0x6B, 0x57));
-    static readonly Brush Accent = new SolidColorBrush(Color.FromRgb(0xFF, 0xB3, 0x47));
-
-    readonly StackPanel _panel = new();
+    StackPanel _panel = new();
 
     /// <summary>Кого советует «Бери» в последней отрисовке; 0 — никого (вы уже выбрали или советовать не из кого).</summary>
     public int Recommended { get; private set; }
 
+    /// <summary>Закрыта ✕ в этом пике — не показывать, пока не начнётся следующий (<see cref="ResetDismissed"/>).</summary>
+    public bool Dismissed { get; private set; }
+
+    /// <summary>Что делает ↻: перерисовать карточку пика или перечитать три героя на выбор.</summary>
+    public Action? Refresh { get; set; }
+
     public TurboCard()
     {
-        WindowStyle = WindowStyle.None;
-        AllowsTransparency = true;
-        Background = Brushes.Transparent;
-        Topmost = true;
-        ShowInTaskbar = false;
-        ShowActivated = false;
-        Focusable = false;
-        ResizeMode = ResizeMode.NoResize;
         SizeToContent = SizeToContent.Height;
         Width = 190;
-        Content = new Border
-        {
-            Background = new SolidColorBrush(Color.FromArgb(0xF0, 0x14, 0x18, 0x21)),
-            CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(10, 8, 10, 8),
-            Child = _panel,
-        };
-        SourceInitialized += (_, _) =>
-        {
-            var hwnd = new WindowInteropHelper(this).Handle;
-            int ex = Native.GetWindowLong(hwnd, Native.GWL_EXSTYLE);
-            Native.SetWindowLong(hwnd, Native.GWL_EXSTYLE,
-                ex | Native.WS_EX_TRANSPARENT | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE | Native.WS_EX_LAYERED);
-        };
+        CloseButtonPressed = () => Dismissed = true;
     }
 
+    public void ResetDismissed() => Dismissed = false;
+
     /// <summary>Для --card-test: весь текст карточки построчно.</summary>
-    public string DumpText() => string.Join(Environment.NewLine, _panel.Children.OfType<UIElement>().Select(e => e switch
+    public string DumpText()
     {
-        TextBlock t => new System.Windows.Documents.TextRange(t.ContentStart, t.ContentEnd).Text,
-        StackPanel sp => string.Join("  ", sp.Children.OfType<TextBlock>().Select(t => new System.Windows.Documents.TextRange(t.ContentStart, t.ContentEnd).Text)),
-        _ => e.ToString() ?? "",
-    }));
+        var lines = new List<string>();
+        void Walk(object node)
+        {
+            if (node is TextBlock t) lines.Add(t.Text);
+            else if (node is DependencyObject d)
+                foreach (var child in LogicalTreeHelper.GetChildren(d)) Walk(child);
+        }
+        Walk(Content);
+        return string.Join(Environment.NewLine, lines.Where(l => l.Length > 0));
+    }
 
     public void ShowCard()
     {
+        if (Dismissed) return;
         var wa = SystemParameters.WorkArea;
         Left = wa.Right - Width - 6;
         Top = wa.Top + 120;
@@ -80,6 +69,7 @@ sealed class TurboCard : Window
     /// </summary>
     public void ShowChoices()
     {
+        if (Dismissed) return;
         var wa = SystemParameters.WorkArea;
         Left = wa.Left + 63;
         Top = wa.Top + 856;
@@ -89,38 +79,46 @@ sealed class TurboCard : Window
         Top = Math.Max(wa.Top + 400, Math.Min(Top, wa.Bottom - ActualHeight - 4));
     }
 
+    void Begin(double width, double radius, Thickness padding)
+    {
+        Width = width;
+        ClearButtons();
+        _panel = new StackPanel();
+        Content = Glass.Panel(_panel, radius, padding);
+    }
+
     /// <summary>
     /// Кастомка с выбором из трёх: кого брать и почему — по вашим играм здесь, а пока их мало — в обычной Доте;
     /// по колонке на героя: ваши игры и что даёт Пробуждение (кастомка IM) на 0, 10 и 15 минуте.
     /// </summary>
     public void RenderChoices(DraftData data, IReadOnlyList<int> heroes, string game, Func<int, List<string>[]?> awakening)
     {
-        Width = 1165;
-        _panel.Children.Clear();
+        Begin(1165, 16, new Thickness(14, 10, 12, 12));
         var (choices, byCustom) = CustomStats.Rank(data, game, heroes);
         Recommended = choices[0].Hero;
         string Name(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
-        var head = new StackPanel { Orientation = Orientation.Horizontal };
-        head.Children.Add(Text($"Бери: {Name(choices[0].Hero)}", 15, Good, bold: true));
-        head.Children.Add(Text(byCustom ? "   по вашим играм здесь" : "   по вашим играм в обычной Доте (здесь их пока меньше трёх)", 10, Dim, top: 4));
-        _panel.Children.Add(head);
-        _panel.Children.Add(Text("Почему: " + CustomStats.Why(choices, byCustom, Name), 11, Fg, top: 2));
+        _panel.Children.Add(Glass.Header(this, Name(choices[0].Hero), 24, Glass.Ink, null, Refresh,
+            subtitle: "БЕРИ · " + (byCustom ? "по вашим играм здесь" : "по вашим играм в обычной Доте (здесь их пока меньше трёх)")));
+        _panel.Children.Add(Glass.Text("Почему: " + CustomStats.Why(choices, byCustom, Name), 13, Glass.Ink, top: 4));
 
-        var columns = new Grid { Margin = new Thickness(0, 6, 0, 0) };
+        var columns = new Grid { Margin = new Thickness(-3, 6, -3, 0) };
         for (int i = 0; i < choices.Count; i++)
         {
             var c = choices[i];
             columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            var col = new StackPanel { Margin = new Thickness(0, 0, 12, 0) };
-            col.Children.Add(Text(Name(c.Hero), 12, i == 0 ? Good : Fg, bold: true));
-            col.Children.Add(Text(c.Here, 10, Dim));
-            col.Children.Add(Text(c.Usual, 10, Dim));
+            var col = new StackPanel();
+            col.Children.Add(Glass.Text(Name(c.Hero), 18, i == 0 ? Glass.Good : Glass.Ink, serif: true, bold: true));
+            col.Children.Add(Glass.Text(c.Here, 11.5, Glass.Muted));
+            col.Children.Add(Glass.Text(c.Usual, 11.5, Glass.Muted));
             if (awakening(c.Hero) is { } stages)
                 for (int k = 0; k < stages.Length; k++)
                     if (stages[k].Count > 0)
-                        col.Children.Add(Text($"{(k == 0 ? "сразу" : AwakeningInfo.StageMinutes[k] + " мин")}: {string.Join("; ", stages[k])}", 10, Accent, top: 2));
-            Grid.SetColumn(col, i);
-            columns.Children.Add(col);
+                        col.Children.Add(Glass.Text($"{(k == 0 ? "сразу" : AwakeningInfo.StageMinutes[k] + " мин")}: {string.Join("; ", stages[k])}", 11.5, Glass.GoldLight, top: 3));
+            var tile = Glass.Tile(col);
+            tile.Margin = new Thickness(3, 0, 3, 0);
+            if (i == 0) Gilded(tile);
+            Grid.SetColumn(tile, i);
+            columns.Children.Add(tile);
         }
         _panel.Children.Add(columns);
     }
@@ -130,55 +128,78 @@ sealed class TurboCard : Window
     /// <param name="ownHero">Ваш герой из GSI (0 — ещё не выбран): после пика карточка показывает прогноз и состав, а не что брать.</param>
     public void Render(DraftData data, PickSnapshot snap, string recognition, int ownHero = 0)
     {
-        Width = 190; // после кастомки карточка была широкой полосой
+        Begin(190, 14, new Thickness(10, 8, 8, 10)); // после кастомки карточка была широкой полосой
         Recommended = 0;
         bool allPick = snap.Mode == "ALL_PICK";
-        string N(IEnumerable<int> ids) => string.Join(", ", ids.Select(id => data.Heroes.GetValueOrDefault(id, $"#{id}")));
+        string H(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
         // Предвыбор союзников считаем их героями: учитываем сочетание и не предлагаем.
         var team = snap.Allies.Concat(snap.Planned).Where(h => h != ownHero).ToList();
 
-        _panel.Children.Clear();
-        _panel.Children.Add(Text(snap.Mode switch { "ALL_PICK" => "Пик · All Pick", "TURBO" => "Пик · Турбо", _ => "Пик · режим не распознан" }, 15, Fg, bold: true));
-        _panel.Children.Add(Text("роль: " + RoleNames[Math.Clamp(snap.Position, 0, 5)], 11, Dim));
+        _panel.Children.Add(Glass.Header(this, "Пик", 22, Glass.Ink,
+            snap.Mode switch { "ALL_PICK" => "All Pick", "TURBO" => "Турбо", _ => "режим ?" }, Refresh));
+        _panel.Children.Add(Glass.Chips(new[] { Glass.Chip("роль: " + RoleNames[Math.Clamp(snap.Position, 0, 5)], Glass.GoldLight, 11) }, top: 4));
 
         // шанс победы по драфту — как только известно хотя бы двое героев и ясен режим (винрейты Турбо и обычной игры разные)
         if (snap.Mode != null && data.WinProbability(snap.Mode, team, snap.Enemies, ownHero) is { } chance && chance.KnownAllies + chance.KnownEnemies >= 2)
         {
-            var color = chance.P >= 0.52 ? Good : chance.P <= 0.48 ? Bad : Fg;
-            _panel.Children.Add(Text($"Шанс победы ≈ {chance.P:0%}", 15, color, bold: true, top: 6));
-            _panel.Children.Add(Text($"по драфту: ваших {chance.KnownAllies}, их {chance.KnownEnemies}" +
-                (chance.Parts.Count > 0 ? " · " + string.Join(" · ", chance.Parts) : ""), 10, Dim));
+            var color = chance.P >= 0.52 ? Glass.Good : chance.P <= 0.48 ? Glass.Bad : Glass.Ink;
+            _panel.Children.Add(Glass.Text("Шанс победы по драфту", 11, Glass.Muted, top: 2));
+            var line = new DockPanel();
+            var big = Glass.Text($"{chance.P:0%}", 30, color, serif: true, bold: true, wrap: false);
+            big.Margin = new Thickness(0, -4, 8, 0);
+            DockPanel.SetDock(big, Dock.Left);
+            line.Children.Add(big);
+            line.Children.Add(Bar(chance.P));
+            _panel.Children.Add(line);
+            _panel.Children.Add(Glass.Text($"известно: ваших {chance.KnownAllies}, их {chance.KnownEnemies}" +
+                (chance.Parts.Count > 0 ? " · " + string.Join(" · ", chance.Parts) : ""), 10, Glass.Muted));
         }
 
-        // в All Pick вражеские пики видны всем, в Турбо — только засвеченные при конфликте выбора
+        // в All Pick вражеские пики видны всем, в Турбо — только засвеченные при конфликте выбора; при них — ваш счёт против них
         if (snap.Enemies.Count > 0)
         {
-            _panel.Children.Add(Text((allPick ? "Враги: " : "Засвечены у врага: ") + N(snap.Enemies), 12, Accent, top: 4));
-            // ваш счёт против этих героев за всё время (Dota Plus, GCPD)
-            if (data.Profile is { Loaded: true } prof)
+            _panel.Children.Add(Glass.Text(allPick ? "Враги · ваши победы против них" : "Засвечены у врага", 11, Glass.Muted, top: 6));
+            var prof = data.Profile is { Loaded: true } p ? p : null;
+            _panel.Children.Add(Glass.Chips(snap.Enemies.Select(e =>
             {
-                var vs = snap.Enemies.Where(e => prof.AgainstHero.TryGetValue(e, out var r) && r.Wins + r.Losses >= 5)
-                    .Select(e => { var r = prof.AgainstHero[e]; return $"{data.Heroes.GetValueOrDefault(e)} {100.0 * r.Wins / (r.Wins + r.Losses):0}%"; });
-                var line = string.Join(", ", vs);
-                if (line.Length > 0) _panel.Children.Add(Text("ваши победы против них: " + line, 10, Dim));
-            }
+                if (prof != null && prof.AgainstHero.TryGetValue(e, out var r) && r.Wins + r.Losses >= 5)
+                {
+                    double pct = 100.0 * r.Wins / (r.Wins + r.Losses);
+                    return (UIElement)Glass.Chip($"{H(e)} {pct:0}%", pct >= 50 ? Glass.Good : Glass.Bad, 11);
+                }
+                return Glass.Chip(H(e), Glass.Ink, 11);
+            }), top: 3));
         }
         if (snap.Allies.Count > 0)
-            _panel.Children.Add(Text("Союзники: " + N(snap.Allies), 12, Good, top: 4));
+        {
+            _panel.Children.Add(Glass.Text("Союзники", 11, Glass.Muted, top: 4));
+            _panel.Children.Add(Glass.Chips(snap.Allies.Select(a => (UIElement)Glass.Chip(H(a), Glass.Ink, 11)), top: 3));
+        }
         if (snap.Planned.Count > 0)
-            _panel.Children.Add(Text("Собираются взять: " + N(snap.Planned), 12, Good, top: 2));
+        {
+            _panel.Children.Add(Glass.Text("Собираются взять", 11, Glass.Muted, top: 4));
+            _panel.Children.Add(Glass.Chips(snap.Planned.Select(a => (UIElement)Glass.Chip(H(a), Glass.Good, 11)), top: 3));
+        }
         var lacking = data.Lacking(ownHero > 0 ? team.Append(ownHero).ToList() : team);
         if (lacking.Count > 0)
-            _panel.Children.Add(Text("В команде: " + string.Join(", ", lacking), 11, Accent, top: 2));
+        {
+            var note = Glass.Tile(Glass.Text("В команде: " + string.Join(", ", lacking), 13, Glass.GoldLight, serif: true, italic: true),
+                top: 2, padding: new Thickness(8, 3, 8, 4));
+            note.Background = Glass.B(0x29, 0xD2, 0xA1, 0x5A);
+            _panel.Children.Add(note);
+        }
 
         if (ownHero > 0)
         {
             // вы уже выбрали — подсказывать, кого брать, поздно
-            _panel.Children.Add(Text("Ваш герой: " + data.Heroes.GetValueOrDefault(ownHero, $"#{ownHero}"), 15, Good, bold: true, top: 6));
+            var mineBox = new StackPanel();
+            mineBox.Children.Add(Caps("Ваш герой"));
+            mineBox.Children.Add(Glass.Text(H(ownHero), 20, Glass.Ink, serif: true, bold: true));
             double own = data.PersonalBonus(ownHero, snap.Mode);
             if (data.Pool.TryGetValue(ownHero, out var pg) && pg.Games > 0)
-                _panel.Children.Add(Text($"у вас {pg.Games} {Words.Plural(pg.Games, "игра", "игры", "игр")}, {100.0 * pg.Wins / pg.Games:0}% · ваша игра {own:+0.0;-0.0}", 11, Dim));
-            _panel.Children.Add(Text(recognition, 10, Dim, top: 6));
+                mineBox.Children.Add(Glass.Text($"у вас {pg.Games} {Words.Plural(pg.Games, "игра", "игры", "игр")}, {100.0 * pg.Wins / pg.Games:0}% · ваша игра {own:+0.0;-0.0}", 11, Glass.Muted));
+            _panel.Children.Add(Gilded(Glass.Tile(mineBox, top: 8)));
+            _panel.Children.Add(Glass.Text(recognition, 9.5, Glass.Muted, top: 8));
             return;
         }
 
@@ -191,18 +212,28 @@ sealed class TurboCard : Window
         var best = picks.Where(p => !p.Rare && Playable(p)).OrderByDescending(Score).FirstOrDefault()
                    ?? picks.FirstOrDefault(p => !p.Rare);
         var bestAny = picks.FirstOrDefault(p => !p.Rare);
+        string scope = snap.Position > 0 ? "на роли" : allPick ? "в All Pick" : "в Турбо";
         if (best != null)
         {
             Recommended = best.HeroId;
-            _panel.Children.Add(Text("Бери: " + data.Heroes.GetValueOrDefault(best.HeroId, $"#{best.HeroId}"), 17, Good, bold: true, top: 6));
-            string scope = snap.Position > 0 ? "на роли" : allPick ? "в All Pick" : "в Турбо";
-            var why = new List<string> { $"{best.Winrate:0.0}% {scope}" };
-            why.AddRange(Corrections(best));
+            var take = new StackPanel();
+            var head = new DockPanel();
+            var tier = Glass.TierBadge(best.Winrate, 34);
+            DockPanel.SetDock(tier, Dock.Left);
+            head.Children.Add(tier);
+            var name = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            name.Children.Add(Caps("Бери"));
+            name.Children.Add(Glass.Text(H(best.HeroId), 20, Glass.Ink, serif: true, bold: true));
+            head.Children.Add(name);
+            take.Children.Add(head);
+            var why = new List<UIElement> { Glass.Chip($"{best.Winrate:0.0}% {scope}", Glass.Ink, 10.5) };
+            why.AddRange(Corrections(best).Select(c => (UIElement)Glass.Chip(c.Text, c.Value >= 0 ? Glass.Good : Glass.Bad, 10.5)));
             double personal = data.PersonalBonus(best.HeroId, snap.Mode);
-            if (Math.Abs(personal) >= 0.05) why.Add($"ваша игра {personal:+0.0;-0.0}");
-            _panel.Children.Add(Text(string.Join(" · ", why), 11, Dim));
+            if (Math.Abs(personal) >= 0.05) why.Add(Glass.Chip($"ваша игра {personal:+0.0;-0.0}", personal > 0 ? Glass.Good : Glass.Bad, 10.5));
+            take.Children.Add(Glass.Chips(why, top: 6));
             if (bestAny != null && bestAny.HeroId != best.HeroId && bestAny.Total - best.Total >= 1.5)
-                _panel.Children.Add(Text($"по статистике сильнее {data.Heroes.GetValueOrDefault(bestAny.HeroId)} ({bestAny.Winrate:0.0}% {bestAny.Bonus:+0.0;-0.0}), но вы на нём почти не играете", 11, Dim, top: 2));
+                take.Children.Add(Glass.Text($"по статистике сильнее {H(bestAny.HeroId)} ({bestAny.Winrate:0.0}% {bestAny.Bonus:+0.0;-0.0}), но вы на нём почти не играете", 10, Glass.Muted));
+            _panel.Children.Add(Gilded(Glass.Tile(take, top: 8)));
 
             // Под этот драфт: из ваших героев — лучший только по поправкам за врагов, союзников, состав и риск контрпика,
             // без общего винрейта героя и вашей игры на нём. Когда это не «Бери» и под драфт он заметно лучше.
@@ -210,64 +241,132 @@ sealed class TurboCard : Window
                 : picks.Where(p => !p.Rare && Playable(p)).OrderByDescending(p => p.Bonus).ThenByDescending(Score).FirstOrDefault();
             if (fit != null && fit.HeroId != best.HeroId && fit.Bonus > 0 && fit.Bonus - best.Bonus >= DraftFitGap)
             {
-                _panel.Children.Add(Text($"Под этот драфт: {data.Heroes.GetValueOrDefault(fit.HeroId, $"#{fit.HeroId}")} {fit.Bonus:+0.0;-0.0}", 13, Accent, bold: true, top: 4));
-                _panel.Children.Add(Text(string.Join(" · ", Corrections(fit).Append($"{fit.Winrate:0.0}% {scope}")), 11, Dim));
+                var row = new DockPanel { Margin = new Thickness(2, 6, 0, 0) };
+                var t = Glass.TierBadge(fit.Winrate, 26);
+                DockPanel.SetDock(t, Dock.Left);
+                row.Children.Add(t);
+                var text = new TextBlock { FontFamily = Glass.Sans, FontSize = 11, Foreground = Glass.B(Glass.Muted), TextWrapping = TextWrapping.Wrap };
+                text.Inlines.Add("Под этот драфт: ");
+                text.Inlines.Add(new System.Windows.Documents.Run(H(fit.HeroId)) { FontFamily = Glass.Serif, FontSize = 15, FontWeight = FontWeights.Bold, Foreground = Glass.B(Glass.Ink) });
+                text.Inlines.Add(new System.Windows.Documents.Run($" {fit.Bonus:+0.0;-0.0}") { FontWeight = FontWeights.Bold, Foreground = Glass.B(Glass.Good) });
+                row.Children.Add(text);
+                _panel.Children.Add(row);
+                _panel.Children.Add(Glass.Text(string.Join(" · ", Corrections(fit).Select(c => c.Text).Append($"{fit.Winrate:0.0}% {scope}")), 10, Glass.Muted));
             }
         }
 
+        _panel.Children.Add(Glass.Divider(8, 4));
         var mine = picks.Where(Playable).OrderBy(p => p.Rare).ThenByDescending(Score).Take(PoolRows).ToList();
-        _panel.Children.Add(Text("Ваши герои", 12, Dim, top: 6));
-        if (mine.Count == 0) _panel.Children.Add(Text("нет доступных", 12, Dim));
+        var pool = new StackPanel();
+        pool.Children.Add(Glass.Text("Ваши герои", 11, Glass.Muted));
+        if (mine.Count == 0) pool.Children.Add(Glass.Text("нет доступных", 12, Glass.Muted));
         foreach (var p in mine)
         {
             var g = data.Pool[p.HeroId];
-            _panel.Children.Add(Row(data, p, $"у вас {g.Games} {Words.Plural(g.Games, "игра", "игры", "игр")}, {100.0 * g.Wins / g.Games:0}%" + (p.Rare ? " · редко на этой роли" : "")));
+            pool.Children.Add(Row(H(p.HeroId), p, $"у вас {g.Games} {Words.Plural(g.Games, "игра", "игры", "игр")}, {100.0 * g.Wins / g.Games:0}%" + (p.Rare ? " · редко на этой роли" : "")));
         }
+        _panel.Children.Add(Glass.Tile(pool, padding: new Thickness(8, 6, 6, 6)));
 
-        _panel.Children.Add(Text(snap.Position > 0 ? $"Сильные на роли «{RoleNames[snap.Position]}»" : (allPick ? "Сильные в All Pick" : "Сильные в Турбо"), 12, Dim, top: 6));
-        foreach (var p in picks.Where(p => !p.Rare && !mine.Contains(p)).Take(MetaRows))
-            _panel.Children.Add(Row(data, p, null));
+        _panel.Children.Add(Glass.Text(snap.Position > 0 ? $"Сильные на роли «{RoleNames[snap.Position]}»" : (allPick ? "Сильные в All Pick" : "Сильные в Турбо"), 11, Glass.Muted, top: 6));
+        _panel.Children.Add(Glass.Chips(picks.Where(p => !p.Rare && !mine.Contains(p)).Take(MetaRows).Select(p => (UIElement)Meta(H(p.HeroId), p)), top: 3));
 
-        _panel.Children.Add(Text(recognition, 10, Dim, top: 6));
+        _panel.Children.Add(Glass.Text("S от 53% · A 51–53 · B 49–51 · C ниже 49", 9.5, Glass.Muted, top: 4));
+        _panel.Children.Add(Glass.Text(recognition, 9.5, Glass.Muted, top: 4));
         bool allModes = snap.Enemies.Count + snap.Allies.Count > 0 && (allPick || !data.TurboMatchups);
         var notes = data.TurboLabel + (allModes ? "; поправка за союзников и врагов — по всем режимам" : "");
-        _panel.Children.Add(Text(notes, 10, Dim, top: 2));
+        _panel.Children.Add(Glass.Text(notes, 9.5, Glass.Muted, top: 2));
     }
 
     // Поправки к винрейту героя за драфт, п.п.: что заметно — подписью.
-    static List<string> Corrections(TurboPick p)
+    static List<(string Text, double Value)> Corrections(TurboPick p)
     {
-        var parts = new List<string>();
-        if (Math.Abs(p.VsRevealed) >= 0.05) parts.Add($"против врагов {p.VsRevealed:+0.0;-0.0}");
-        if (Math.Abs(p.WithAllies) >= 0.05) parts.Add($"с союзниками {p.WithAllies:+0.0;-0.0}");
-        if (Math.Abs(p.Composition) >= 0.05) parts.Add($"состав {p.Composition:+0.0;-0.0}");
-        if (Math.Abs(p.CounterRisk) >= 0.05) parts.Add($"риск контрпика {p.CounterRisk:+0.0;-0.0}");
+        var parts = new List<(string, double)>();
+        if (Math.Abs(p.VsRevealed) >= 0.05) parts.Add(($"против врагов {p.VsRevealed:+0.0;-0.0}", p.VsRevealed));
+        if (Math.Abs(p.WithAllies) >= 0.05) parts.Add(($"с союзниками {p.WithAllies:+0.0;-0.0}", p.WithAllies));
+        if (Math.Abs(p.Composition) >= 0.05) parts.Add(($"состав {p.Composition:+0.0;-0.0}", p.Composition));
+        if (Math.Abs(p.CounterRisk) >= 0.05) parts.Add(($"риск контрпика {p.CounterRisk:+0.0;-0.0}", p.CounterRisk));
         return parts;
     }
 
-    UIElement Row(DraftData data, TurboPick p, string? note)
+    // Строка «ваши герои»: тир, имя антиквой и подпись, справа винрейт и поправка за драфт.
+    static UIElement Row(string name, TurboPick p, string note)
     {
-        var sp = new StackPanel { Margin = new Thickness(0, 2, 0, 0) };
-        var line = new TextBlock { FontSize = 13, Foreground = Fg, TextTrimming = TextTrimming.CharacterEllipsis };
-        line.Inlines.Add(data.Heroes.GetValueOrDefault(p.HeroId, $"#{p.HeroId}") + "  ");
-        line.Inlines.Add(new System.Windows.Documents.Run($"{p.Winrate:0.0}%") { Foreground = p.Winrate >= 50 ? Good : Bad, FontWeight = FontWeights.SemiBold });
+        var row = new DockPanel { Margin = new Thickness(0, 4, 0, 0) };
+        var tier = Glass.TierBadge(p.Winrate, 22);
+        DockPanel.SetDock(tier, Dock.Left);
+        row.Children.Add(tier);
+        var right = new StackPanel { HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 0, 0) };
+        var wr = Glass.Text($"{p.Winrate:0.0}%", 11.5, p.Winrate >= 50 ? Glass.Ink : Glass.Bad, wrap: false);
+        wr.FontWeight = FontWeights.SemiBold;
+        wr.HorizontalAlignment = HorizontalAlignment.Right;
+        right.Children.Add(wr);
         // поправка за союзников, засвеченных врагов, состав и риск контрпика — в процентных пунктах
-        double bonus = p.Bonus;
-        if (Math.Abs(bonus) >= 0.05)
-            line.Inlines.Add(new System.Windows.Documents.Run($" {bonus:+0.0;-0.0}") { Foreground = bonus > 0 ? Good : Bad });
-        sp.Children.Add(line);
-        if (note != null) sp.Children.Add(Text(note, 10, Dim));
-        return sp;
+        if (Math.Abs(p.Bonus) >= 0.05)
+        {
+            var b = Glass.Text($"{p.Bonus:+0.0;-0.0}", 10.5, p.Bonus > 0 ? Glass.Good : Glass.Bad, wrap: false);
+            b.HorizontalAlignment = HorizontalAlignment.Right;
+            right.Children.Add(b);
+        }
+        DockPanel.SetDock(right, Dock.Right);
+        row.Children.Add(right);
+        var text = new StackPanel();
+        text.Children.Add(Glass.Text(name, 14.5, Glass.Ink, serif: true, bold: true, wrap: false));
+        text.Children.Add(Glass.Text(note, 9.5, Glass.Muted));
+        row.Children.Add(text);
+        return row;
     }
 
-    static TextBlock Text(string text, double size, Brush color, bool bold = false, double top = 0) => new()
+    // Чип сильного героя: кружок тира, имя, винрейт и поправка.
+    static Border Meta(string name, TurboPick p)
     {
-        Text = text,
-        FontFamily = new FontFamily("Segoe UI"),
-        FontSize = size,
-        Foreground = color,
-        FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal,
-        TextWrapping = TextWrapping.Wrap,
-        Margin = new Thickness(0, top, 0, 0),
-    };
+        var sp = new DockPanel(); // не StackPanel: в нём текст не знает ширины и многоточие не ставится
+        var tier = Glass.TierBadge(p.Winrate, 16, round: true);
+        tier.Margin = new Thickness(0, 0, 4, 0);
+        DockPanel.SetDock(tier, Dock.Left);
+        sp.Children.Add(tier);
+        var text = new TextBlock
+        {
+            FontFamily = Glass.Sans, FontSize = 10.5, Foreground = Glass.B(Glass.Ink),
+            TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center,
+        };
+        text.Inlines.Add($"{name} {p.Winrate:0.0}%");
+        if (Math.Abs(p.Bonus) >= 0.05)
+            text.Inlines.Add(new System.Windows.Documents.Run($" {p.Bonus:+0.0;-0.0}") { Foreground = Glass.B(p.Bonus > 0 ? Glass.Good : Glass.Bad) });
+        sp.Children.Add(text);
+        return new Border
+        {
+            Background = Glass.B(0x12, 0xFF, 0xF0, 0xDC), CornerRadius = new CornerRadius(999),
+            Padding = new Thickness(2, 2, 8, 2), Margin = new Thickness(0, 0, 4, 4), Child = sp,
+            MaxWidth = 170, // уже карточки — длинное имя («Legion Commander») не вылезает за край
+        };
+    }
+
+    // Полоса шанса: золото — ваши, терракота — их.
+    static UIElement Bar(double p)
+    {
+        var grid = new Grid { Height = 8, VerticalAlignment = VerticalAlignment.Center };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(p, 0.01), GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(1 - p, 0.01), GridUnitType.Star) });
+        var mine = new Rectangle { Fill = Glass.B(Glass.Gold), RadiusX = 4, RadiusY = 4, Margin = new Thickness(0, 0, 1.5, 0) };
+        var theirs = new Rectangle { Fill = Glass.B(0x8C, 0xE9, 0x8A, 0x5F), RadiusX = 4, RadiusY = 4, Margin = new Thickness(1.5, 0, 0, 0) };
+        Grid.SetColumn(theirs, 1);
+        grid.Children.Add(mine);
+        grid.Children.Add(theirs);
+        return grid;
+    }
+
+    // Подпись капителью: «БЕРИ», «ВАШ ГЕРОЙ».
+    static TextBlock Caps(string text)
+    {
+        var t = Glass.Text(text.ToUpperInvariant(), 10, Glass.GoldLight, bold: true, wrap: false);
+        return t;
+    }
+
+    // Главная плитка — с золотой рамкой, как «Бери» в макете.
+    static Border Gilded(Border tile)
+    {
+        tile.BorderBrush = Glass.B(0x73, 0xD2, 0xA1, 0x5A);
+        tile.BorderThickness = new Thickness(1);
+        return tile;
+    }
 }

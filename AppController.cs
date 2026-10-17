@@ -23,7 +23,8 @@ sealed class AppController
     const uint VK_S = 0x53;
     const uint VK_R = 0x52;
     const uint VK_D = 0x44;
-    static readonly TimeSpan PopupTime = TimeSpan.FromSeconds(6);
+    // сколько держать окна — из настроек напоминаний (0 — пока не нажмут ✕), читаем в момент показа
+    TimeSpan PopupTime => WindowDurations.Of(_reminders.Windows.Summary);
     static readonly TimeSpan GsiSilentMax = TimeSpan.FromMinutes(10);
 
     readonly System.Windows.Application _app;
@@ -67,9 +68,11 @@ sealed class AppController
     List<NecPlayer>? _necSnapshot;
     DateTime _necSnapshotAt;
     bool _inCustom;
-    enum NecShow { Hotkey, Room, GameStart }
+    enum NecShow { Hotkey, Fresh, Room, GameStart }
+    DateTime _necDismissedAt;
     const int NecRoomMin = 3;   // меньше — не комната: поиск игрока, друзья, окно итогов матча
-    static readonly TimeSpan NecRoomHide = TimeSpan.FromSeconds(60), NecGameHide = TimeSpan.FromSeconds(30);
+    bool _necDismissed;          // лобби закрыли ✕ — само не показываем до следующей кастомки
+    readonly DispatcherTimer _ratingHide = new();
     // Состав кастомки NEC иногда приходит уже после её загрузки (17.10: вторая пачка ников — на экране подключения),
     // поэтому до начала самой игры кэш NEC смотрим и в кастомке. Посреди игры NEC подгружает посторонних — тогда нет.
     static readonly HashSet<string> CustomBeforeGame = new()
@@ -145,12 +148,24 @@ sealed class AppController
         Setup.EnsureSeed();
         if (!File.Exists(Paths.StratzToken)) Setup.AskStratzToken();
         _overlay = new OverlayWindow();
-        _reminderOverlay = new OverlayWindow(top: 330, backgroundAlpha: 0x99); // полупрозрачное: игра под ним видна
+        _reminderOverlay = new OverlayWindow(top: 330, backgroundAlpha: 0xCC, pill: true); // полупрозрачная «таблетка»: игра под ней видна
         _draft = new DraftWindow(_draftData) { OpenUrl = url => OpenAnalytics(url) };
         _turboCard = new TurboCard();
         _pickFrame = new PickFrame();
+        _turboCard.CloseButtonPressed += () => _pickFrame.ShowAround(null); // закрыли карточку — и рамку «Бери» тоже
         _rating = new RatingWindow();
         _necLobby = new RatingWindow(width: 380);
+        _necLobby.CloseButtonPressed = () =>
+        {
+            _necHide.Stop();
+            (_necDismissed, _necDismissedAt) = (true, DateTime.Now);
+        };
+        _rating.CloseButtonPressed = () => _ratingHide.Stop();
+        _ratingHide.Tick += (_, _) =>
+        {
+            _ratingHide.Stop();
+            if (_rating.IsVisible) _rating.Toggle();
+        };
         _necHide.Tick += (_, _) =>
         {
             _necHide.Stop();
@@ -228,6 +243,7 @@ sealed class AppController
             _onScreen.Clear();
             ShowNecLobby(NecShow.GameStart); // кастомка загрузилась — кто был в комнате NEC перед ней
         }
+        if (!custom && _inCustom) _necDismissed = false; // кастомка кончилась — следующую комнату снова показываем
         TrackBadges(custom, s.GameState);
         _inCustom = custom;
         if (custom && s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != s.GameState)
@@ -259,6 +275,8 @@ sealed class AppController
             _watcher.Begin(s.MatchId is { Length: > 0 } m && m != "0" ? m : DateTime.Now.ToString("yyyyMMdd_HHmmss"));
             _frameTimer.Start();
             _lastSnap = new PickSnapshot(new HashSet<int>(), new List<int>(), new List<int>(), new List<int>(), 0, 0, null, 0);
+            _turboCard.ResetDismissed(); // новый пик — карточка снова видна, даже если в прошлом её закрыли ✕
+            _turboCard.Refresh = RenderCard;
             if (_draftData.TurboReady)
             {
                 _turboCard.Render(_draftData, _lastSnap, _watcher.Status, _ownHero);
@@ -286,9 +304,9 @@ sealed class AppController
         UpdatePickFrame();
     }
 
-    // «Бери» — ещё и рамкой вокруг клетки героя в сетке, пока вы сами не выбрали
+    // «Бери» — ещё и рамкой вокруг клетки героя в сетке, пока вы сами не выбрали (и карточку не закрыли ✕)
     void UpdatePickFrame() =>
-        _pickFrame.ShowAround(_picking && _ownHero == 0 && _turboCard.Recommended > 0 && Setup.ScreenSupported
+        _pickFrame.ShowAround(_picking && _ownHero == 0 && _turboCard.Recommended > 0 && !_turboCard.Dismissed && Setup.ScreenSupported
             ? _watcher.CellOf(_turboCard.Recommended) : null);
 
     // Начало матча: прогноз по итоговому драфту — окно поверх игры и журнал (потом сверить с исходом),
@@ -317,7 +335,8 @@ sealed class AppController
         if (matchups.Count > 0)
             lines.Add(($"{_draftData.Heroes.GetValueOrDefault(s.HeroId, "ваш герой")} против: {string.Join(", ", matchups)}", OverlayWindow.Gray));
         lines.Add(("разбор и Dotabuff героя — «Аналитика» (трей)", OverlayWindow.Gray));
-        _overlay.ShowPopup((chance.KnownEnemies == 0 ? "Ваш драфт" : "Шанс победы") + $" ≈ {chance.P:0%}", color, lines, PopupTime, color);
+        _overlay.ShowPopup((chance.KnownEnemies == 0 ? "Ваш драфт" : "Шанс победы") + $" ≈ {chance.P:0%}", color, lines,
+            WindowDurations.Of(_reminders.Windows.Prediction), color);
         // в журнал — только когда враг известен: иначе это не прогноз матча
         if (chance.KnownEnemies >= 3 && s.MatchId is { Length: > 0 } id && id != "0")
             PredictionLog.Add(new Prediction(id, mode, chance.P, chance.KnownAllies, chance.KnownEnemies, DateTime.Now, chance.Logit));
@@ -346,6 +365,8 @@ sealed class AppController
             _choiceCard = s.TeamSlot;
             _choicesShown = null;
             _choiceMade = false;
+            _turboCard.ResetDismissed();
+            _turboCard.Refresh = () => _choicesShown = null; // ↻ — перечитать три героя с экрана на следующем такте
             _choiceTimer.Start();
             _roshan.Reset(); // номер матча в кастомке всегда 0 — по нему новую игру не отличить
         }
@@ -401,7 +422,7 @@ sealed class AppController
             _turboCard.ShowChoices();
             // рамка — вокруг той из трёх картинок, кого советует «Бери»
             int k = Array.IndexOf(heroes, _turboCard.Recommended);
-            _pickFrame.ShowAround(k >= 0 && !_choiceMade ? ChoiceReader.ThumbArea(card, k) : null);
+            _pickFrame.ShowAround(k >= 0 && !_choiceMade && !_turboCard.Dismissed ? ChoiceReader.ThumbArea(card, k) : null);
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or ArgumentException)
         {
@@ -440,7 +461,7 @@ sealed class AppController
         if (_roshan.Update(s, clock, mode) is { } roshan && _reminders.Roshan)
         {
             Log.Write($"Рошан: показано «{roshan.Title}» на {ReminderTime.Format(clock)}");
-            _reminderOverlay.ShowPopup(roshan.Title, OverlayWindow.White, new[] { (roshan.Detail, OverlayWindow.Gray) }, TimeSpan.FromSeconds(8));
+            _reminderOverlay.ShowPopup(roshan.Title, OverlayWindow.White, new[] { (roshan.Detail, OverlayWindow.Gray) }, WindowDurations.Of(_reminders.Windows.Reminder));
             if (_reminders.Sound) ReminderSound.Play(_reminders.RoshanSound);
         }
         if (custom) CheckAwakening(s, clock);
@@ -463,7 +484,7 @@ sealed class AppController
         lines.Add((profile != null ? $"профиль «{profile.Name}»" : custom ? "кастомка — общие тайминги (профиля «Кастомка» нет)" : "режим ещё не определён — только общие тайминги",
             OverlayWindow.Gray));
         var color = due.Count == 1 ? due[0].Rule.DisplayColor() : OverlayWindow.White;
-        _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", color, lines, TimeSpan.FromSeconds(8),
+        _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", color, lines, WindowDurations.Of(_reminders.Windows.Reminder),
             due.Count == 1 ? color : due[0].Rule.DisplayColor());
         if (_reminders.Sound) ReminderSound.Play(due[0].Rule.SoundKey()); // несколько сразу — звук первого
     }
@@ -495,7 +516,7 @@ sealed class AppController
                 .Select(k => ($"{Label(k)}: {string.Join("; ", stages[k])}", OverlayWindow.White)).ToList();
             if (lines.Count == 0) return;
             lines.Add(("кастомка IM — перед 10:00 и 15:00 напомню", OverlayWindow.Gray));
-            _reminderOverlay.ShowPopup($"Пробуждение: {hero}", color, lines, TimeSpan.FromSeconds(15), color);
+            _reminderOverlay.ShowPopup($"Пробуждение: {hero}", color, lines, WindowDurations.Of(_reminders.Windows.AwakeningSummary), color);
             return;
         }
         for (int k = 1; k < stages.Length; k++)
@@ -507,7 +528,7 @@ sealed class AppController
             var lines = stages[k].Select(e => (e, OverlayWindow.White)).ToList();
             lines.Add(($"{hero} · через {ReminderTime.Format(at - clock)} · {Label(k)}", OverlayWindow.Gray));
             Log.Write($"Пробуждение: показана ступень {k} на {ReminderTime.Format(clock)}");
-            _reminderOverlay.ShowPopup("Пробуждение — новые усиления", color, lines, TimeSpan.FromSeconds(8), color);
+            _reminderOverlay.ShowPopup("Пробуждение — новые усиления", color, lines, WindowDurations.Of(_reminders.Windows.AwakeningStage), color);
             if (_reminders.Sound) ReminderSound.Play(_reminders.AwakeningSound);
             return;
         }
@@ -813,52 +834,43 @@ sealed class AppController
 
     void RenderRating()
     {
-        var lines = new List<(string, Color)>();
-        int lp = _profile.LowPriorityGames;
-        if (lp > 0) lines.Add(($"Low priority: осталось {lp} {Plural(lp, "игра", "игры", "игр")}", OverlayWindow.Red));
         string medal = Ranks.Name(_draftData.RankTier) ?? "неизвестен";
-        if (_profile.Calibration() is { } cal)
-        {
-            lines.Add(($"На калибровке: {cal.Games}{(cal.AtLeast ? "+" : "")} {Plural(cal.Games, "игра", "игры", "игр")} · {cal.Wins}–{cal.Games - cal.Wins} ({100.0 * cal.Wins / cal.Games:0}%)", OverlayWindow.Green));
-            if (_confidence is { } conf)
-                lines.Add(($"Уверенность в ранге: {conf.Percent}% (профиль Dota, {conf.At:dd.MM HH:mm})", OverlayWindow.Green));
-            else
-                lines.Add(("Уверенность в ранге: откройте профиль в Dota — прочитаю", OverlayWindow.Gray));
-            lines.Add(($"ранг до калибровки: {medal}", OverlayWindow.Gray));
-        }
-        else
-            lines.Add(($"Ранг: {medal}", OverlayWindow.White));
-
+        var cal = _profile.Calibration();
+        (int, int, int, int)? today = null;
+        (int, bool)? streak = null;
+        (int, int)? total = null;
+        (int, int, bool)? remaining = null;
         if (_profile.Loaded)
         {
-            var today = _profile.Today();
-            lines.Add(($"Сегодня: {today.Games} {Plural(today.Games, "игра", "игры", "игр")} · {today.Wins}–{today.Games - today.Wins}" +
-                       (today.RankedGames > 0 ? $" · в рейтинге {today.RankedWins}–{today.RankedGames - today.RankedWins}" : ""), OverlayWindow.White));
-            if (_profile.Streak() is { } st)
-                lines.Add(($"Серия: {st.Count} {(st.Wins ? Plural(st.Count, "победа", "победы", "побед") : Plural(st.Count, "поражение", "поражения", "поражений"))} подряд",
-                    st.Wins ? OverlayWindow.Green : OverlayWindow.Red));
+            var t = _profile.Today();
+            today = (t.Games, t.Wins, t.RankedGames, t.RankedWins);
+            if (_profile.Streak() is { } st) streak = (st.Count, st.Wins);
+            total = (_profile.AccountInt("Wins"), _profile.AccountInt("Losses"));
+            int negative = _profile.AccountInt("NegativeReportsRemaining");
+            remaining = (negative, _profile.AccountInt("PositiveReportsRemaining"), negative == 0 && _profile.Account.ContainsKey("NegativeReportsRemaining"));
         }
-        if ((_latest ?? _history.Summaries.FirstOrDefault()) is { } latest)
-            lines.Add(($"Поведение: {latest.Score}" + (latest.ScoreDelta is int d ? $" ({d:+#;-#;0})" : "") +
-                       $" · похвал {latest.Commends} · жалоб {latest.Reports}", OverlayWindow.White));
+        var latest = _latest ?? _history.Summaries.FirstOrDefault();
         // тренд по накопленным сводкам: старые слева
         var trend = _history.Summaries.Where(s => s.Score != null).Take(20).Select(s => s.Score!.Value).Reverse().ToList();
-        if (trend.Count >= 2)
-            lines.Add(($"поведение за {trend.Count} {Plural(trend.Count, "сводку", "сводки", "сводок")}: {trend[0]} → {trend[^1]}", OverlayWindow.Gray));
-        if (_profile.Loaded)
-        {
-            int w = _profile.AccountInt("Wins"), l = _profile.AccountInt("Losses");
-            if (w + l > 0) lines.Add(($"Всего: {w}–{l} ({100.0 * w / (w + l):0.0}%)", OverlayWindow.Gray));
-            int negative = _profile.AccountInt("NegativeReportsRemaining");
-            bool noReports = negative == 0 && _profile.Account.ContainsKey("NegativeReportsRemaining");
-            lines.Add(($"Можно отправить: жалоб {negative} · похвал {_profile.AccountInt("PositiveReportsRemaining")}", noReports ? OverlayWindow.Red : OverlayWindow.Gray));
-        }
         // насколько прогноз по драфту совпадал с исходом — по матчам, исход которых уже есть в истории GCPD
         var (hits, predicted) = PredictionLog.Accuracy(_profile.Matches);
-        if (predicted >= 5)
-            lines.Add(($"Прогноз по драфту угадал {hits} из {predicted} ({100.0 * hits / predicted:0}%)", OverlayWindow.Gray));
-        var updated = _profile.UpdatedAt is { } u ? $"данные Valve от {u:dd.MM HH:mm}" : "данные Valve ещё не загружены";
-        _rating.Render("Рейтинг", lines, updated + " · Ctrl+Alt+S — скрыть", trend.Count >= 2 ? trend : null);
+        var view = new RatingView(
+            _profile.LowPriorityGames, medal,
+            cal is { } c ? (c.Games, c.Wins, c.AtLeast) : null,
+            cal != null ? _confidence : null,
+            today, streak,
+            latest != null ? (latest.Score, latest.ScoreDelta, latest.Commends, latest.Reports) : null,
+            trend, total, remaining, (hits, predicted),
+            _profile.UpdatedAt is { } u ? $"данные Valve от {u:dd.MM HH:mm}" : "данные Valve ещё не загружены");
+        _rating.RenderRating(view, () => _ = RefreshRatingAsync());
+    }
+
+    // ↻ в окне рейтинга: перечитать профиль Valve (и процент калибровки, если профиль Dota открыт).
+    async Task RefreshRatingAsync()
+    {
+        await CheckConfidenceAsync();
+        await RefreshProfileAsync();
+        if (_rating.IsVisible) RenderRating();
     }
 
     async Task CheckConfidenceAsync()
@@ -905,6 +917,8 @@ sealed class AppController
         var newest = players.Count > 0 ? players.Max(p => p.SeenAt) : DateTime.MinValue;
         if (newest <= _necNewest) return;
         _necNewest = newest;
+        // закрыли ✕ раньше, а теперь в комнате только пришедшие после — это уже другая комната
+        if (_necDismissed && players.Count > 0 && players.All(p => p.SeenAt > _necDismissedAt)) _necDismissed = false;
         if (players.Count >= NecRoomMin) ShowNecLobby(_inCustom ? NecShow.GameStart : NecShow.Room, players);
     }
 
@@ -985,6 +999,7 @@ sealed class AppController
             if (mode == NecShow.Hotkey) _overlay.ShowPopup("Лобби NEC", OverlayWindow.White, new[] { ("NEC не установлен — нет папки %APPDATA%\\nec-platform.", OverlayWindow.Gray) }, PopupTime);
             return;
         }
+        bool auto = mode is NecShow.Room or NecShow.GameStart;
         var at = DateTime.Now;
         List<NecPlayer> players;
         if (mode == NecShow.Hotkey && _inCustom && _necSnapshot != null)
@@ -1001,20 +1016,27 @@ sealed class AppController
             else if (mode == NecShow.Hotkey && players.Count == 0 && _necSnapshot is { Count: > 0 })
                 (players, at) = (_necSnapshot, _necSnapshotAt);
         }
+        if (auto && _necDismissed) return; // закрыли ✕ — сами не лезем (Ctrl+Alt+N и ↻ — пожалуйста)
 
-        var lines = players.Count > 0
-            ? NecLobby.Lines(players, _draftData.Heroes)
-            : new List<(string, Color)> { ("За 10 минут NEC никого не показывал — откройте комнату или подбор в NEC.", OverlayWindow.Gray) };
+        var body = players.Count > 0
+            ? NecLobby.Tiles(players, _draftData.Heroes).ToList()
+            : new List<System.Windows.UIElement> { Glass.Text("За 10 минут NEC никого не показывал — откройте комнату или подбор в NEC.", 13, Glass.Muted) };
         string source = mode == NecShow.Room ? $"комната NEC, {at:HH:mm} — обновится с новыми игроками" : $"кэш NEC за 10 мин до {at:HH:mm}";
-        _necLobby.Render($"Лобби NEC · {players.Count} {Plural(players.Count, "игрок", "игрока", "игроков")}", lines,
-            $"{source} · без деления на команды, могут быть ушедшие · Ctrl+Alt+N — скрыть");
+        _necLobby.Render($"Лобби NEC · {players.Count}", "Ctrl+Alt+N", body,
+            $"{source} · без деления на команды, могут быть ушедшие", RefreshNecLobby);
         if (_rating.IsVisible) _rating.Toggle(); // оба окна в одном углу
         if (!_necLobby.IsVisible) _necLobby.Toggle();
         _necHide.Stop();
-        if (mode == NecShow.Hotkey) return;
-        _necHide.Interval = mode == NecShow.Room ? NecRoomHide : NecGameHide;
+        if (!auto) return;
+        int seconds = mode == NecShow.Room ? _reminders.Windows.NecRoom : _reminders.Windows.NecGame;
+        if (seconds <= 0) return; // 0 — пока не закроют ✕
+        _necHide.Interval = WindowDurations.Of(seconds);
         _necHide.Start();
     }
+
+    // ↻ в лобби: перечитать кэш NEC; посреди идущей кастомки — снимок с её начала (NEC тогда подгружает посторонних).
+    void RefreshNecLobby() =>
+        ShowNecLobby(_inCustom && !CustomBeforeGame.Contains(_gameState) ? NecShow.Hotkey : NecShow.Fresh);
 
     void ToggleNecLobby()
     {
@@ -1031,6 +1053,7 @@ sealed class AppController
     {
         if (_rating.IsVisible)
         {
+            _ratingHide.Stop();
             _rating.Toggle();
             return;
         }
@@ -1041,6 +1064,12 @@ sealed class AppController
         }
         RenderRating();
         _rating.Toggle();
+        _ratingHide.Stop();
+        if (_reminders.Windows.Rating > 0)
+        {
+            _ratingHide.Interval = WindowDurations.Of(_reminders.Windows.Rating);
+            _ratingHide.Start();
+        }
         await CheckConfidenceAsync();   // если профиль Dota открыт прямо сейчас — сразу подхватим процент
         if (_profile.UpdatedAt is not { } u || DateTime.Now - u > TimeSpan.FromMinutes(15))
             await RefreshProfileAsync();
@@ -1062,7 +1091,8 @@ sealed class AppController
         _overlay.ShowPopup(
             s.Reports > 0 ? "На вас пожаловались" : "Жалоб на вас нет",
             s.Reports > 0 ? OverlayWindow.Red : OverlayWindow.Green,
-            lines, PopupTime);
+            lines, PopupTime, s.Reports > 0 ? OverlayWindow.Red : Glass.Gold,
+            refresh: () => _ = RefreshAsync(interactive: false, manual: true)); // ↻ — проверить GCPD сейчас
     }
 
     static string Plural(int n, string one, string few, string many) => Words.Plural(n, one, few, many);

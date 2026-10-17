@@ -24,6 +24,18 @@ static class Program
             GridTest(args[1], args[2], Path.Combine(Paths.Root, "grid_test.txt"));
             return;
         }
+        if (args.Length >= 1 && args[0] == "--click-test")
+        {
+            // ✕ и ↻ на окнах поверх игры нажимаются, а мимо них клики проходят в игру — в click_test.txt (курсор занят ~3 с)
+            ClickTest.Run(Path.Combine(Paths.Root, "click_test.txt"));
+            return;
+        }
+        if (args.Length >= 1 && args[0] == "--ui-test")
+        {
+            // окна «Древний + стекло» на примерных данных — в ui_test\*.png; второй аргумент — скриншот игры под окнами
+            UiTest.Run(Path.Combine(Paths.Root, "ui_test"), args.Length >= 2 ? args[1] : null);
+            return;
+        }
         if (args.Length >= 3 && args[0] == "--frame-test")
         {
             // рамка «Бери» на скриншоте 1920×1080, в frame_test.png: --frame-test <png> <герой> — клетка в сетке пика;
@@ -34,7 +46,7 @@ static class Program
             if (cell is not { } c) return;
             using var shot = new System.Drawing.Bitmap(args[1]);
             using (var g = System.Drawing.Graphics.FromImage(shot))
-            using (var brush = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(0x7C, 0xD9, 0x92)))
+            using (var brush = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(PickFrame.FrameColor.R, PickFrame.FrameColor.G, PickFrame.FrameColor.B)))
             {
                 var o = PickFrame.Outer(c);
                 int t = PickFrame.Thickness;

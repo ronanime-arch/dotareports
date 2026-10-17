@@ -5,6 +5,8 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 
 namespace DotaReports;
@@ -152,16 +154,41 @@ static class NecLobby
         foreach (var p in players)
         {
             lines.Add(($"{p.Name} — {Ranks.Name(p.RankTier) ?? "без медали"}" + (p.Country is { Length: > 0 } c ? $" · {c}" : ""), OverlayWindow.White));
-            var parts = new List<string>();
-            if (p.Wins is int w && p.Losses is int l && w + l > 0) parts.Add($"{w}–{l} ({100.0 * w / (w + l):0}%)");
-            if (p.LastMatch is { } m)
-                parts.Add($"последний: {(heroes.TryGetValue(m.HeroId, out var h) ? h : "герой " + m.HeroId)} {m.Kills}/{m.Deaths}/{m.Assists} " +
-                          $"{ModeName(m.GameMode)}, {m.Start:dd.MM.yy}");
-            if (p.HistoryClosed) parts.Add("история матчей закрыта");
-            if (!p.HasProfile) parts.Add("NEC не загружал профиль OpenDota");
-            lines.Add((parts.Count > 0 ? string.Join(" · ", parts) : "матчей нет", p.HistoryClosed ? OverlayWindow.Red : OverlayWindow.Gray));
+            lines.Add((Details(p, heroes), p.HistoryClosed ? OverlayWindow.Red : OverlayWindow.Gray));
         }
         return lines;
+    }
+
+    /// <summary>Плитка на игрока для окна лобби: ник антиквой и чип со званием, ниже — победы/поражения и последний матч.</summary>
+    public static IEnumerable<UIElement> Tiles(IEnumerable<NecPlayer> players, IReadOnlyDictionary<int, string> heroes)
+    {
+        foreach (var p in players)
+        {
+            var head = new DockPanel();
+            var (rank, rankColor) = (Ranks.Name(p.RankTier) ?? "без медали", p.RankTier > 0 ? Glass.GoldLight : Glass.Muted);
+            var chip = Glass.Chip(rank + (p.Country is { Length: > 0 } c ? $" · {c}" : ""), rankColor, 11.5);
+            chip.Margin = new Thickness(6, 2, 0, 0);
+            chip.VerticalAlignment = VerticalAlignment.Top;
+            DockPanel.SetDock(chip, Dock.Right);
+            head.Children.Add(chip);
+            head.Children.Add(Glass.Text(p.Name, 18, Glass.Ink, serif: true, bold: true, wrap: false));
+            var box = new StackPanel();
+            box.Children.Add(head);
+            box.Children.Add(Glass.Text(Details(p, heroes), 12, p.HistoryClosed ? Glass.Bad : Glass.Muted, top: 1));
+            yield return Glass.Tile(box, top: 5, padding: new Thickness(10, 6, 8, 7));
+        }
+    }
+
+    static string Details(NecPlayer p, IReadOnlyDictionary<int, string> heroes)
+    {
+        var parts = new List<string>();
+        if (p.Wins is int w && p.Losses is int l && w + l > 0) parts.Add($"{w}–{l} ({100.0 * w / (w + l):0}%)");
+        if (p.LastMatch is { } m)
+            parts.Add($"последний: {(heroes.TryGetValue(m.HeroId, out var h) ? h : "герой " + m.HeroId)} {m.Kills}/{m.Deaths}/{m.Assists} " +
+                      $"{ModeName(m.GameMode)}, {m.Start:dd.MM.yy}");
+        if (p.HistoryClosed) parts.Add("история матчей закрыта");
+        if (!p.HasProfile) parts.Add("NEC не загружал профиль OpenDota");
+        return parts.Count > 0 ? string.Join(" · ", parts) : "матчей нет";
     }
 
     static string ModeName(int mode) => mode switch

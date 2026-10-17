@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Threading;
@@ -10,81 +9,70 @@ using System.Windows.Threading;
 namespace DotaReports;
 
 /// <summary>
-/// Всплывающее окно поверх игры: клики проходят насквозь, фокус не забирает, само исчезает.
-/// Отдельное окно — в процесс Dota ничего не внедряется.
+/// Всплывающее окно поверх игры: клики проходят насквозь (кроме ↻ и ✕), фокус не забирает, само исчезает.
+/// Отдельное окно — в процесс Dota ничего не внедряется. Вид — «стекло» из макета: карточка с шапкой
+/// или «таблетка» для напоминаний.
 /// </summary>
-sealed class OverlayWindow : Window
+sealed class OverlayWindow : GlassWindow
 {
-    public static readonly Color White = Color.FromRgb(0xF2, 0xF2, 0xF2);
-    public static readonly Color Gray = Color.FromRgb(0x9A, 0xA4, 0xB0);
-    public static readonly Color Red = Color.FromRgb(0xFF, 0x6B, 0x57);
-    public static readonly Color Green = Color.FromRgb(0x7C, 0xD9, 0x92);
+    // цвета текста — палитра макета «Древний + стекло» (Glass); имена прежние, ими пользуются все окна
+    public static readonly Color White = Glass.Ink;
+    public static readonly Color Gray = Glass.Muted;
+    public static readonly Color Red = Glass.Bad;
+    public static readonly Color Green = Glass.Good;
 
-    static readonly Color DefaultAccent = Color.FromRgb(0xB0, 0x40, 0x30);
-
-    readonly StackPanel _panel = new();
-    readonly Border _border;
     readonly bool _shadow;
+    readonly bool _pill;
+    readonly byte _alpha;
     readonly DispatcherTimer _autoHide = new();
     readonly DispatcherTimer _keepOnTop = new() { Interval = TimeSpan.FromSeconds(1) };
     readonly double _top;
-    IntPtr _hwnd;
 
     /// <param name="top">Отступ от верха экрана — чтобы два таких окна не перекрывали друг друга.</param>
     /// <param name="backgroundAlpha">Непрозрачность фона: меньше 255 — игра просвечивает, текст тогда с тенью.</param>
-    public OverlayWindow(double top = 120, byte backgroundAlpha = 0xFF)
+    /// <param name="pill">«Таблетка» напоминания: кружок цвета напоминания, заголовок и строка под ним.</param>
+    public OverlayWindow(double top = 120, byte backgroundAlpha = 0xE6, bool pill = false)
     {
         _top = top;
-        _shadow = backgroundAlpha < 0xFF;
-        WindowStyle = WindowStyle.None;
-        AllowsTransparency = true;
-        Background = Brushes.Transparent;
-        Topmost = true;
-        ShowInTaskbar = false;
-        ShowActivated = false;
-        Focusable = false;
-        ResizeMode = ResizeMode.NoResize;
+        _alpha = backgroundAlpha;
+        _shadow = backgroundAlpha < 0xE0;
+        _pill = pill;
         SizeToContent = SizeToContent.Height;
         Width = 380;
-        _border = new Border
-        {
-            Background = new SolidColorBrush(Color.FromArgb(backgroundAlpha, 0x14, 0x18, 0x21)),
-            BorderBrush = new SolidColorBrush(DefaultAccent),
-            BorderThickness = new Thickness(0, 0, 0, 3),
-            CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(16, 12, 16, 12),
-            Child = _panel,
-        };
-        Content = _border;
-
-        SourceInitialized += (_, _) =>
-        {
-            _hwnd = new WindowInteropHelper(this).Handle;
-            int ex = Native.GetWindowLong(_hwnd, Native.GWL_EXSTYLE);
-            Native.SetWindowLong(_hwnd, Native.GWL_EXSTYLE,
-                ex | Native.WS_EX_TRANSPARENT | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE | Native.WS_EX_LAYERED);
-        };
         SizeChanged += (_, _) => PlaceTopRight();
         _autoHide.Tick += (_, _) => HidePopup();
         _keepOnTop.Tick += (_, _) => KeepOnTop();
+        CloseButtonPressed = () =>
+        {
+            _autoHide.Stop();
+            _keepOnTop.Stop();
+        };
     }
 
-    /// <summary>Первая строка — заголовок, остальные — текст. Окно само скроется через duration. accent — цвет полосы снизу.</summary>
-    public void ShowPopup(string title, Color titleColor, IEnumerable<(string Text, Color Color)> lines, TimeSpan duration, Color? accent = null)
+    /// <summary>
+    /// Первая строка — заголовок, остальные — текст. Окно само скроется через duration (ноль и меньше — пока не нажмут ✕).
+    /// accent — цвет значка (у напоминания — кружка); refresh — что делает ↻ (нет — кнопки нет).
+    /// </summary>
+    public void ShowPopup(string title, Color titleColor, IEnumerable<(string Text, Color Color)> lines, TimeSpan duration,
+        Color? accent = null, Action? refresh = null)
     {
-        _border.BorderBrush = new SolidColorBrush(accent ?? DefaultAccent);
-        _panel.Children.Clear();
-        _panel.Children.Add(Line(title, 17, titleColor, bold: true));
-        foreach (var (text, color) in lines)
-            _panel.Children.Add(Line(text, 14, color, top: 4));
-
+        Build(title, titleColor, lines, accent, refresh);
         if (!IsVisible) Show();
         PlaceTopRight();
         KeepOnTop();
         _keepOnTop.Start();
         _autoHide.Stop();
+        if (duration <= TimeSpan.Zero) return; // до ✕: таймер с нулём сработал бы сразу
         _autoHide.Interval = duration;
         _autoHide.Start();
+    }
+
+    /// <summary>Собрать содержимое, не показывая (ShowPopup и снимки --ui-test).</summary>
+    public void Build(string title, Color titleColor, IEnumerable<(string Text, Color Color)> lines, Color? accent = null, Action? refresh = null)
+    {
+        ClearButtons();
+        var color = accent ?? Glass.Gold;
+        Content = _pill ? Pill(title, titleColor, lines, color) : Card(title, titleColor, lines, color, refresh);
     }
 
     public void HidePopup()
@@ -92,6 +80,61 @@ sealed class OverlayWindow : Window
         _autoHide.Stop();
         _keepOnTop.Stop();
         Hide();
+    }
+
+    // Карточка: шапка «DotaReports · время» со значком цвета акцента, заголовок антиквой, строки.
+    UIElement Card(string title, Color titleColor, IEnumerable<(string Text, Color Color)> lines, Color accent, Action? refresh)
+    {
+        var body = new StackPanel();
+        body.Children.Add(Glass.Header(this, $"DotaReports · {DateTime.Now:HH:mm}", 13, Glass.Muted, null, refresh, accent, serif: false));
+        body.Children.Add(Shadowed(Glass.Text(title, 24, titleColor, serif: true, bold: true, top: 6)));
+        foreach (var (text, color) in lines)
+            body.Children.Add(Shadowed(Glass.Text(text, 14, color, top: 4)));
+        return Glass.Panel(body, 16, new Thickness(14, 10, 12, 14), _alpha);
+    }
+
+    // «Таблетка» напоминания: кружок цвета напоминания, заголовок антиквой, под ним строки мелко, справа ✕.
+    UIElement Pill(string title, Color titleColor, IEnumerable<(string Text, Color Color)> lines, Color accent)
+    {
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition());
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var dot = new Border
+        {
+            Width = 40, Height = 40, CornerRadius = new CornerRadius(20),
+            Background = Glass.B(Glass.A(0x2E, accent)), BorderBrush = Glass.B(Glass.A(0x8C, accent)), BorderThickness = new Thickness(1),
+            Margin = new Thickness(0, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center,
+            Child = new TextBlock
+            {
+                Text = "◆", FontSize = 15, Foreground = Glass.B(accent),
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+            },
+        };
+        grid.Children.Add(dot);
+        var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        text.Children.Add(Shadowed(Glass.Text(title, 21, titleColor, serif: true, bold: true)));
+        bool first = true;
+        foreach (var (line, color) in lines)
+        {
+            text.Children.Add(Shadowed(Glass.Text(line, first ? 13 : 11.5, first ? color : Glass.Muted, top: 1)));
+            first = false;
+        }
+        Grid.SetColumn(text, 1);
+        grid.Children.Add(text);
+        var close = Glass.IconButton("✕");
+        AddButton(close, CloseByButton);
+        close.VerticalAlignment = VerticalAlignment.Top;
+        Grid.SetColumn(close, 2);
+        grid.Children.Add(close);
+        return Glass.Panel(grid, 28, new Thickness(8, 8, 10, 8), _alpha);
+    }
+
+    // на полупрозрачном фоне светлая игра под текстом — тень держит его читаемым
+    TextBlock Shadowed(TextBlock t)
+    {
+        if (_shadow) t.Effect = new DropShadowEffect { Color = Colors.Black, ShadowDepth = 1, BlurRadius = 4, Opacity = 0.9 };
+        return t;
     }
 
     void PlaceTopRight()
@@ -104,21 +147,9 @@ sealed class OverlayWindow : Window
     // Игра в режиме «окно без рамки» может подняться выше — возвращаем окно наверх.
     void KeepOnTop()
     {
-        if (_hwnd != IntPtr.Zero)
-            Native.SetWindowPos(_hwnd, Native.HWND_TOPMOST, 0, 0, 0, 0,
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        if (hwnd != IntPtr.Zero)
+            Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, 0, 0, 0, 0,
                 Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
     }
-
-    TextBlock Line(string text, double size, Color color, bool bold = false, double top = 0) => new()
-    {
-        Text = text,
-        FontFamily = new FontFamily("Segoe UI"),
-        FontSize = size,
-        FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal,
-        Foreground = new SolidColorBrush(color),
-        TextWrapping = TextWrapping.Wrap,
-        Margin = new Thickness(0, top, 0, 0),
-        // на полупрозрачном фоне светлая игра под текстом — тень держит его читаемым
-        Effect = _shadow ? new DropShadowEffect { Color = Colors.Black, ShadowDepth = 1, BlurRadius = 4, Opacity = 0.9 } : null,
-    };
 }
