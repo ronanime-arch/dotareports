@@ -49,6 +49,7 @@ sealed class AppController
     string? _awakeningFrom;                       // .vpk, из которого читали
     Dictionary<int, string> _heroNames = new();   // номер героя → npc_dota_hero_…
     int _awakeningShown = -1;                     // показано в этой игре: -1 — ничего, 0 — сводка, 1 и 2 — ступени 10 и 15 мин
+    string? _customRemindersNote;                 // что последним записано в лог: будут ли напоминания в этой кастомке и почему
     readonly DispatcherTimer _frameTimer = new() { Interval = TimeSpan.FromSeconds(0.5) };
     TurboCard _turboCard = null!;
     RatingWindow _rating = null!;
@@ -183,8 +184,11 @@ sealed class AppController
         if (custom && s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != s.GameState)
         {
             Log.Write("Кастомная игра " + Path.GetFileNameWithoutExtension(s.CustomGame) + $" (карта {s.MapName}): выбор из трёх — по вашим играм; " +
-                      (s.MapName == "dota" ? "напоминания — общие тайминги" : "напоминаний нет — карта не обычная") + "; прогноза нет");
+                      (s.MapName != "dota" ? "напоминаний нет — карта не обычная"
+                          : _reminders.Pick(ReminderSettings.CustomMode) is { } chosen ? $"напоминания — профиль «{chosen.Name}»" : "напоминания — общие тайминги")
+                      + "; прогноза нет");
             _awakeningShown = -1;
+            _customRemindersNote = null;
             _awakeningFrom = null; // кастомку могли обновить — перечитать (неизменённый файл берётся из памяти)
             LoadAwakening(s.CustomGame);
         }
@@ -346,14 +350,25 @@ sealed class AppController
     void CheckReminders(GsiState s)
     {
         bool inGame = s.GameState is "DOTA_GAMERULES_STATE_PRE_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS";
+        bool custom = !string.IsNullOrEmpty(s.CustomGame);
+        // в кастомке — в лог, будут ли напоминания (и снова, только если это изменилось): если молчат, там видно почему
+        if (custom && inGame)
+        {
+            string note = !_reminders.Enabled ? "выключены в настройках"
+                : !s.OnDotaMap ? $"не показываются — карта {s.MapName}, герой {s.HeroId}, сторона {s.Team}{(s.Spectating ? ", просмотр" : "")}"
+                : s.ClockTime == null ? "не показываются — Dota не присылает часы матча"
+                : _reminders.Pick(ReminderSettings.CustomMode) is { } chosen ? $"по профилю «{chosen.Name}»" : "по общим таймингам";
+            if (note != _customRemindersNote) Log.Write("Кастомка: напоминания " + note);
+            _customRemindersNote = note;
+        }
         // только своя игра на обычной карте (и кастомка на карте dota): не просмотр чужой (DotaTV, повтор), герой выбран
         if (!inGame || !s.OnDotaMap || s.ClockTime is not int clock || !_reminders.Enabled)
         {
             _reminderEngine.Reset();
             return;
         }
-        // в кастомке режим не определяем (доход и экран там свои) — общие тайминги: руны, мудрость, Рошан как в обычной игре
-        bool custom = !string.IsNullOrEmpty(s.CustomGame);
+        // в кастомке режим не определяем (доход и экран там свои): профиль с режимом «Кастомка», нет его — общие тайминги;
+        // Рошан — как в обычной игре
         string? mode = custom ? null : _mode.Mode;
         if (_roshan.Update(s, clock, mode) is { } roshan && _reminders.Roshan)
         {
@@ -363,7 +378,7 @@ sealed class AppController
         }
         if (custom) CheckAwakening(s, clock);
         // режим не определён — только общие для всех профилей тайминги, а не первый профиль
-        var profile = _reminders.Pick(mode);
+        var profile = _reminders.Pick(custom ? ReminderSettings.CustomMode : mode);
         // общие тайминги — только пока режим не ясен; ясен, но профиля под него нет — молчим
         var rules = profile ?? (mode == null ? _reminders.CommonRules() : null);
         if (rules == null)
@@ -378,7 +393,7 @@ sealed class AppController
         var lines = due.Count == 1
             ? new List<(string, Color)> { (When(due[0].At), OverlayWindow.White) }
             : due.Select(d => ($"{d.Rule.Text} — {When(d.At)}", d.Rule.DisplayColor())).ToList();
-        lines.Add((profile != null ? $"профиль «{profile.Name}»" : custom ? "кастомка — общие тайминги" : "режим ещё не определён — только общие тайминги",
+        lines.Add((profile != null ? $"профиль «{profile.Name}»" : custom ? "кастомка — общие тайминги (профиля «Кастомка» нет)" : "режим ещё не определён — только общие тайминги",
             OverlayWindow.Gray));
         var color = due.Count == 1 ? due[0].Rule.DisplayColor() : OverlayWindow.White;
         _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", color, lines, TimeSpan.FromSeconds(8),
@@ -400,6 +415,7 @@ sealed class AppController
     void CheckAwakening(GsiState s, int clock)
     {
         const int Lead = 30;
+        if (!_reminders.Awakening) return;
         LoadAwakening(s.CustomGame);
         if (!_awakening.IsCompletedSuccessfully || _awakening.Result?.Of(s.HeroName) is not { } stages) return;
         string hero = _draftData.Heroes.GetValueOrDefault(s.HeroId, s.HeroName ?? "");
@@ -425,7 +441,7 @@ sealed class AppController
             lines.Add(($"{hero} · через {ReminderTime.Format(at - clock)} · {Label(k)}", OverlayWindow.Gray));
             Log.Write($"Пробуждение: показана ступень {k} на {ReminderTime.Format(clock)}");
             _reminderOverlay.ShowPopup("Пробуждение — новые усиления", color, lines, TimeSpan.FromSeconds(8), color);
-            if (_reminders.Sound) ReminderSound.Play("power");
+            if (_reminders.Sound) ReminderSound.Play(_reminders.AwakeningSound);
             return;
         }
     }

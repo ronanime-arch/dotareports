@@ -116,6 +116,7 @@ static class ReminderTime
 sealed class ReminderSettings
 {
     public const string Auto = "auto";
+    public const string CustomMode = "CUSTOM"; // режим профиля «Кастомка»: игры из Аркады на обычной карте
 
     public bool Enabled { get; set; } = true;
     public bool Sound { get; set; } = true;
@@ -127,6 +128,11 @@ sealed class ReminderSettings
     /// <summary>Рошан: «может возродиться» и «жив» после убийства (по событию GSI), своим звуком.</summary>
     public bool Roshan { get; set; } = true;
     public string RoshanSound { get; set; } = "roshan";
+    /// <summary>Пробуждение (кастомка IM): сводка в начале игры и усиления героя перед 10:00 и 15:00.</summary>
+    public bool Awakening { get; set; } = true;
+    public string AwakeningSound { get; set; } = "power";
+    /// <summary>Профиль «Кастомка» уже добавлен в файл — удалённый не возвращаем.</summary>
+    public bool CustomAdded { get; set; }
 
     /// <summary>
     /// Профиль для матча: выбранный вручную или по режиму. Режим не определён (или под него нет профиля) — null:
@@ -144,7 +150,7 @@ sealed class ReminderSettings
     /// </summary>
     public ReminderProfile CommonRules()
     {
-        var auto = Profiles.Where(p => !string.IsNullOrEmpty(p.Mode)).ToList();
+        var auto = Profiles.Where(p => !string.IsNullOrEmpty(p.Mode) && p.Mode != CustomMode).ToList();
         var rules = auto.Count == 0 ? new List<ReminderRule>()
             : auto[0].Rules.Where(r => r.Enabled && auto.All(p => p.Rules.Any(o => o.Enabled && o.Text == r.Text && o.At == r.At && o.Every == r.Every && o.Until == r.Until))).ToList();
         return new ReminderProfile { Name = "общие тайминги", Rules = new(rules) };
@@ -154,6 +160,7 @@ sealed class ReminderSettings
     {
         Enabled = Enabled, Sound = Sound, Active = Active, Profiles = Profiles.Select(p => p.Copy()).ToList(),
         Sounds = Sounds.Select(x => x.Copy()).ToList(), Roshan = Roshan, RoshanSound = RoshanSound,
+        Awakening = Awakening, AwakeningSound = AwakeningSound, CustomAdded = CustomAdded,
     };
 
     public static ReminderSettings Load()
@@ -172,6 +179,20 @@ sealed class ReminderSettings
                 s.Sounds ??= new();
                 foreach (var d in ReminderSound.Defaults().Where(d => s.Sounds.All(x => x.Key != d.Key)))
                     s.Sounds.Add(d);
+                // файл старше профиля «Кастомка» — добавить его один раз
+                if (!s.CustomAdded)
+                {
+                    if (s.Profiles.All(p => p.Mode != CustomMode)) s.Profiles.Add(CustomProfile());
+                    s.CustomAdded = true;
+                    try
+                    {
+                        s.Save();
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        Log.Write("reminders.json не сохранён: " + ex.Message);
+                    }
+                }
                 return s;
             }
         }
@@ -199,6 +220,7 @@ sealed class ReminderSettings
     public static ReminderSettings Defaults() => new()
     {
         Sounds = ReminderSound.Defaults(),
+        CustomAdded = true,
         Profiles = new()
         {
             new ReminderProfile
@@ -229,6 +251,24 @@ sealed class ReminderSettings
                     new() { Enabled = false, Text = "Лотосы в пруду", Color = "blue", Sound = "lotus", At = "1:30", Every = "1:30", Lead = 15 },
                 },
             },
+            CustomProfile(),
+        },
+    };
+
+    // Кастомка на обычной карте (IM Пробуждение и такие же): руны и мудрость там на своих местах, катапульты — как в Доте.
+    // Торментор и лотосы — выключены: в кастомке их может не быть или время другое.
+    static ReminderProfile CustomProfile() => new()
+    {
+        Name = "Кастомка", Mode = CustomMode,
+        Rules = new()
+        {
+            new() { Text = "Руна воды — река", Color = "green", Sound = "water", At = "2:00", Every = "2:00", Until = "4:00", Lead = 20 },
+            new() { Text = "Баунти-руны", Color = "yellow", Sound = "bounty", At = "4:00", Every = "4:00", Lead = 20 },
+            new() { Text = "Активная руна — река у мида", Color = "green", Sound = "power", At = "6:00", Every = "2:00", Lead = 20 },
+            new() { Text = "Святилище мудрости — драться за опыт", Color = "purple", Sound = "wisdom", At = "7:00", Every = "7:00", Lead = 30 },
+            new() { Text = "Катапульта выходит на линию", Color = "red", Sound = "siege", At = "5:00", Every = "5:00", Lead = 10 },
+            new() { Enabled = false, Text = "Торментор — собирайтесь", Color = "green", Sound = "tormentor", At = "15:00", Lead = 60 },
+            new() { Enabled = false, Text = "Лотосы в пруду", Color = "blue", Sound = "lotus", At = "3:00", Every = "3:00", Lead = 15 },
         },
     };
 }
@@ -262,7 +302,8 @@ sealed class ReminderEngine
 /// <summary>Окно настройки напоминаний: профили и таблица таймингов. Правится копия, в файл — по «Сохранить».</summary>
 sealed class ReminderWindow : Window
 {
-    static readonly (string Label, string Mode)[] Modes = { ("Турбо", "TURBO"), ("All Pick", "ALL_PICK"), ("только вручную", "") };
+    static readonly (string Label, string Mode)[] Modes =
+        { ("Турбо", "TURBO"), ("All Pick", "ALL_PICK"), ("Кастомка", ReminderSettings.CustomMode), ("только вручную", "") };
 
     readonly ReminderSettings _edit;
     readonly ObservableCollection<ReminderProfile> _profiles;
@@ -293,7 +334,7 @@ sealed class ReminderWindow : Window
         _profiles = new ObservableCollection<ReminderProfile>(_edit.Profiles);
         _sounds = new ObservableCollection<ReminderSoundDef>(_edit.Sounds);
         FillSoundChoices();
-        Title = "Dota Reports — напоминания";
+        Title = $"Dota Reports {Updater.Current} — напоминания";
         Width = 1000;
         SizeToContent = SizeToContent.Height;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -365,10 +406,25 @@ sealed class ReminderWindow : Window
             if (roshanSound.SelectedValue is string key) _edit.RoshanSound = key;
         };
 
+        // Пробуждение: что даёт герою кастомка IM на 0, 10 и 15 минуте — из её файла, без таблицы таймингов
+        var awakening = new CheckBox { Content = "Пробуждение (кастомка IM): сводка в начале и усиления героя перед 10:00 и 15:00", IsChecked = _edit.Awakening, Margin = new Thickness(0, 0, 12, 0) };
+        awakening.Click += (_, _) => _edit.Awakening = awakening.IsChecked == true;
+        var awakeningSound = new ComboBox
+        {
+            MinWidth = 120, ItemsSource = _soundChoices,
+            DisplayMemberPath = nameof(ReminderSoundDef.Label), SelectedValuePath = nameof(ReminderSoundDef.Key), SelectedValue = _edit.AwakeningSound,
+        };
+        awakeningSound.SelectionChanged += (_, _) =>
+        {
+            if (awakeningSound.SelectedValue is string key) _edit.AwakeningSound = key;
+        };
+
         var panel = new StackPanel();
         panel.Children.Add(Row(enabled, sound));
         panel.Children.Add(Row(roshan, new TextBlock { Text = "звук:", Margin = new Thickness(0, 0, 6, 0) }, roshanSound,
             Button("▶", () => PlaySound(_edit.RoshanSound))));
+        panel.Children.Add(Row(awakening, new TextBlock { Text = "звук:", Margin = new Thickness(0, 0, 6, 0) }, awakeningSound,
+            Button("▶", () => PlaySound(_edit.AwakeningSound))));
         panel.Children.Add(Row(new TextBlock { Text = "В игре использовать:", Margin = new Thickness(0, 0, 8, 0) }, _activeBox));
         panel.Children.Add(new Separator { Margin = new Thickness(0, 10, 0, 10) });
         panel.Children.Add(Row(
@@ -385,7 +441,8 @@ sealed class ReminderWindow : Window
             Text = "Время — по часам матча, «м:сс». «Повтор» пусто — один раз; «До» пусто — до конца игры. " +
                    "«За сколько» — во сколько секунд до события показать напоминание. «Звук» — свой у каждого, ▶ — послушать. " +
                    "«Авто» выбирает профиль по режиму: с экрана пика или по доходу в первую минуту (в Турбо он вдвое выше). " +
-                   "Пока режим не определён — только тайминги, одинаковые во всех профилях. Чужие игры, повторы и кастомки — без напоминаний. " +
+                   "Пока режим не определён — только тайминги, одинаковые во всех профилях. Кастомки на обычной карте — профиль " +
+                   "с режимом «Кастомка» (нет такого — те же общие тайминги); чужие игры и повторы — без напоминаний. " +
                    "Сами звуки — на вкладке «Звуки».",
         });
         panel.Children.Add(Row(Button("Добавить строку", AddRule), Button("Удалить строку", RemoveRule), Button("Вернуть стандартные", ResetDefaults)));
@@ -401,6 +458,7 @@ sealed class ReminderWindow : Window
         {
             _grid.Items.Refresh();
             roshanSound.Items.Refresh();
+            awakeningSound.Items.Refresh();
         };
         var tabs = new TabControl();
         tabs.Items.Add(new TabItem { Header = "Напоминания", Content = new Border { Padding = new Thickness(10), Child = panel } });
