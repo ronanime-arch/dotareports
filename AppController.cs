@@ -35,6 +35,15 @@ sealed class AppController
     readonly GsiListener _gsi = new();
     readonly PickWatcher _watcher = new();
     readonly SlotLearner _slotLearner;   // после матча — эталоны слотов, где союзники не узнались
+    // Кастомка: три героя на выбор — с экрана раз в секунду; ваша игра там — в custom_stats.json по GSI.
+    readonly DispatcherTimer _choiceTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    ChoiceReader? _choiceReader;
+    bool _choiceBusy;
+    int _choiceCard = -1;
+    int[]? _choicesShown;
+    string _customGame = "";
+    GsiState? _customLast;   // последнее сообщение идущей кастомки, где есть ваш герой
+    string? _customWinner;
     readonly DispatcherTimer _frameTimer = new() { Interval = TimeSpan.FromSeconds(0.5) };
     TurboCard _turboCard = null!;
     RatingWindow _rating = null!;
@@ -119,6 +128,7 @@ sealed class AppController
         _confTimer.Tick += async (_, _) => await CheckConfidenceAsync();
         _confTimer.Start();
         _frameTimer.Tick += (_, _) => _watcher.Tick();
+        _choiceTimer.Tick += async (_, _) => await CheckChoicesAsync();
         _watcher.Changed += snap => _app.Dispatcher.BeginInvoke(() =>
         {
             _mode.FromScreen(snap.Mode);
@@ -162,10 +172,12 @@ sealed class AppController
         _mode.Update(s);
         if (s.GameState.Length == 0 && _gameState is "DOTA_GAMERULES_STATE_POST_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
             _profileTimer.Start();
-        // В кастомке (Аркада) свой экран выбора и свои герои — карточка советовала бы мимо (Spectre при выборе из трёх своих).
+        // В кастомке (Аркада) свой экран выбора и свои герои — обычная карточка советовала бы мимо (Spectre при выборе
+        // из трёх своих); там своя — кого из трёх брать по вашим играм (TrackCustom).
         bool custom = !string.IsNullOrEmpty(s.CustomGame);
         if (custom && s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != s.GameState)
-            Log.Write("Кастомная игра — карточки пика, напоминаний и прогноза нет: " + Path.GetFileNameWithoutExtension(s.CustomGame));
+            Log.Write("Кастомная игра " + Path.GetFileNameWithoutExtension(s.CustomGame) + ": выбор из трёх — по вашим играм; напоминаний и прогноза нет");
+        TrackCustom(s, custom);
         _gameState = s.GameState;
         CheckReminders(s);
         // карточка — и в пике, и во время стратегии: тогда видны все герои, и прогноз по драфту полный
@@ -249,6 +261,71 @@ sealed class AppController
             _analytics.Show();
         }
         _analytics.ShowMatch(info);
+    }
+
+    // Кастомка: на экране выбора — карточка «кого из трёх брать»; конец игры (POST_GAME или сразу меню — тогда без
+    // map, уже не «кастомка») — запись в custom_stats.json: герой, исход, K/D/A, GPM, XPM, минуты.
+    void TrackCustom(GsiState s, bool custom)
+    {
+        bool choosing = custom && (s.GameState is "DOTA_GAMERULES_STATE_HERO_SELECTION" or "DOTA_GAMERULES_STATE_STRATEGY_TIME");
+        if (choosing && !_choiceTimer.IsEnabled && s.TeamSlot is >= 0 and < 5 && Setup.ScreenSupported)
+        {
+            _customGame = Path.GetFileNameWithoutExtension(s.CustomGame) ?? "";
+            _choiceCard = s.TeamSlot;
+            _choicesShown = null;
+            _choiceTimer.Start();
+        }
+        else if (!choosing && _choiceTimer.IsEnabled)
+        {
+            _choiceTimer.Stop();
+            if (_choicesShown == null && _choiceReader is { LastScores.Length: > 0 } reader)
+                Log.Write("Кастомка: три героя на выбор не узнаны (" + reader.LastScores + ")");
+            _turboCard.Hide();
+        }
+
+        if (custom && (s.WinTeam is "radiant" or "dire")) _customWinner = s.WinTeam;
+        if (custom && s.GameState == "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+        {
+            _customGame = Path.GetFileNameWithoutExtension(s.CustomGame) ?? "";
+            if (s.HeroId > 0) _customLast = s;
+            return;
+        }
+        if (_customLast is not { } last) return;
+        _customLast = null;
+        int minutes = (last.ClockTime ?? 0) / 60;
+        bool? win = _customWinner == null ? null : string.Equals(_customWinner, last.Team, StringComparison.OrdinalIgnoreCase);
+        _customWinner = null;
+        if (minutes < 5) return; // вышли в начале — не игра
+        CustomStats.Add(new CustomGameRecord(_customGame, DateTime.Now, last.HeroId, win, last.Kills, last.Deaths, last.Assists, last.Gpm, last.Xpm, minutes));
+        Log.Write($"Кастомка {_customGame}: герой {last.HeroId}, {(win == true ? "победа" : win == false ? "поражение" : "исход неизвестен")}, " +
+                  $"{last.Kills}/{last.Deaths}/{last.Assists}, {last.Gpm} зол/мин, {minutes} мин");
+    }
+
+    async Task CheckChoicesAsync()
+    {
+        if (_choiceBusy || _choiceCard < 0) return;
+        _choiceBusy = true;
+        try
+        {
+            _choiceReader ??= await Task.Run(() => new ChoiceReader()); // портреты читаются один раз, не в потоке окна
+            var reader = _choiceReader;
+            if (!reader.Enabled) return;
+            int card = _choiceCard;
+            var heroes = await Task.Run(() => reader.ReadScreen(card));
+            if (heroes == null || !_choiceTimer.IsEnabled || (_choicesShown != null && heroes.SequenceEqual(_choicesShown))) return;
+            _choicesShown = heroes;
+            Log.Write($"Кастомка: на выбор {string.Join(", ", heroes)} ({reader.LastScores})");
+            _turboCard.RenderChoices(_draftData, heroes, _customGame);
+            _turboCard.ShowChoices();
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or ArgumentException)
+        {
+            Log.Write("Выбор из трёх не прочитан: " + ex.Message);
+        }
+        finally
+        {
+            _choiceBusy = false;
+        }
     }
 
     // Часы матча идут в GSI (map.clock_time) — те же, что на экране: до горна меньше нуля, на паузе стоят.

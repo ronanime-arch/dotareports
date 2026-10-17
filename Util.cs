@@ -36,6 +36,7 @@ static class Paths
     public static string ConductHistory => Path.Combine(Root, "conduct_history.json");
     public static string MatchMode => Path.Combine(Root, "match_mode.json");
     public static string Predictions => Path.Combine(Root, "predictions.json");
+    public static string CustomStats => Path.Combine(Root, "custom_stats.json"); // ваши игры в кастомках
     public static string AutostartMark => Path.Combine(Root, "autostart.txt"); // автозагрузку уже прописывали
 }
 

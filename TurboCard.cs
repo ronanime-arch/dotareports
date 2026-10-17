@@ -71,6 +71,34 @@ sealed class TurboCard : Window
         if (!IsVisible) Show();
     }
 
+    /// <summary>В кастомке — под карточками игроков (они до y ≈ 820), у правого края.</summary>
+    public void ShowChoices()
+    {
+        var wa = SystemParameters.WorkArea;
+        Left = wa.Right - Width - 6;
+        Top = wa.Top + 830;
+        if (!IsVisible) Show();
+    }
+
+    /// <summary>Кастомка с выбором из трёх: кого из них брать — по вашим играм здесь, а пока их мало — в обычной Доте.</summary>
+    public void RenderChoices(DraftData data, IReadOnlyList<int> heroes, string game)
+    {
+        _panel.Children.Clear();
+        var (choices, byCustom) = CustomStats.Rank(data, game, heroes);
+        string Name(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
+        _panel.Children.Add(Text("Кастомка · выбор из трёх", 13, Fg, bold: true));
+        _panel.Children.Add(Text($"Бери: {Name(choices[0].Hero)}", 15, Good, bold: true, top: 4));
+        foreach (var c in choices)
+        {
+            _panel.Children.Add(Text(Name(c.Hero), 12, c == choices[0] ? Good : Fg, top: 6));
+            _panel.Children.Add(Text(c.Here, 10, Dim));
+            _panel.Children.Add(Text(c.Usual, 10, Dim));
+        }
+        _panel.Children.Add(Text(byCustom
+            ? "по золоту в минуту в ваших играх здесь (Stratz кастомки не собирает)"
+            : "по вашим играм в обычной Доте — здесь своих игр пока меньше трёх; программа их записывает", 9, Dim, top: 6));
+    }
+
     static readonly string[] RoleNames = { "любая", "лёгкая", "центр", "сложная", "поддержка", "полная поддержка" };
 
     /// <param name="ownHero">Ваш герой из GSI (0 — ещё не выбран): после пика карточка показывает прогноз и состав, а не что брать.</param>

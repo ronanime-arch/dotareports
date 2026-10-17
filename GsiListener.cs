@@ -14,10 +14,12 @@ namespace DotaReports;
 /// Что важно из сообщения GSI: фаза игры, ваша сторона, ваш герой (0 — ещё не выбран), матч, часы матча в секундах
 /// (до горна — меньше нуля); зритель (повтор, DotaTV — у player вместо полей игрока команды team2/team3),
 /// кастомная игра (map.customgamename), пассивный доход с начала матча (player.gold_from_income),
-/// время игры (map.game_time) и когда убивали Рошана (events: roshan_killed, по времени игры).
+/// время игры (map.game_time) и когда убивали Рошана (events: roshan_killed, по времени игры);
+/// для статистики кастомок — кто победил (map.win_team: radiant / dire / none) и ваши K/D/A, GPM, XPM.
 /// </summary>
 sealed record GsiState(string GameState, string? Team, int HeroId, string? MatchId, int TeamSlot, int? ClockTime = null,
-    bool Spectating = false, string? CustomGame = null, int? GoldFromIncome = null, int? GameTime = null, IReadOnlyList<int>? RoshanKills = null)
+    bool Spectating = false, string? CustomGame = null, int? GoldFromIncome = null, int? GameTime = null, IReadOnlyList<int>? RoshanKills = null,
+    string? WinTeam = null, int Kills = 0, int Deaths = 0, int Assists = 0, int Gpm = 0, int Xpm = 0)
 {
     /// <summary>Вы играете сами: есть герой и сторона, не смотрите чужую игру и не в кастомке.</summary>
     public bool OwnGame => HeroId > 0 && !Spectating && string.IsNullOrEmpty(CustomGame) &&
@@ -159,7 +161,10 @@ sealed class GsiListener
                     if (e.ValueKind == JsonValueKind.Object && e.TryGetProperty("event_type", out var et) && et.ValueKind == JsonValueKind.String && et.GetString() == "roshan_killed"
                         && e.TryGetProperty("game_time", out var egt) && egt.ValueKind == JsonValueKind.Number)
                         roshanKills.Add((int)egt.GetDouble());
-            parsed = new GsiState(state, team, hero, matchId, teamSlot, clock, spectating, custom, income, gameTime, roshanKills);
+            int Stat(string key) => hasPlayer && pl.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
+            string? winTeam = hasMap && map.TryGetProperty("win_team", out var wt) && wt.ValueKind == JsonValueKind.String ? wt.GetString() : null;
+            parsed = new GsiState(state, team, hero, matchId, teamSlot, clock, spectating, custom, income, gameTime, roshanKills,
+                winTeam, Stat("kills"), Stat("deaths"), Stat("assists"), Stat("gpm"), Stat("xpm"));
         }
         catch (JsonException)
         {
