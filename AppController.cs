@@ -44,6 +44,11 @@ sealed class AppController
     string _customGame = "";
     GsiState? _customLast;   // последнее сообщение идущей кастомки, где есть ваш герой
     string? _customWinner;
+    // Кастомка IM «Пробуждение»: что даёт герою на 0, 10 и 15 минуте — из её .vpk (Awakening.cs)
+    Task<AwakeningInfo?> _awakening = Task.FromResult<AwakeningInfo?>(null);
+    string? _awakeningFrom;                       // .vpk, из которого читали
+    Dictionary<int, string> _heroNames = new();   // номер героя → npc_dota_hero_…
+    int _awakeningShown = -1;                     // показано в этой игре: -1 — ничего, 0 — сводка, 1 и 2 — ступени 10 и 15 мин
     readonly DispatcherTimer _frameTimer = new() { Interval = TimeSpan.FromSeconds(0.5) };
     TurboCard _turboCard = null!;
     RatingWindow _rating = null!;
@@ -176,8 +181,13 @@ sealed class AppController
         // из трёх своих); там своя — кого из трёх брать по вашим играм (TrackCustom).
         bool custom = !string.IsNullOrEmpty(s.CustomGame);
         if (custom && s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != s.GameState)
+        {
             Log.Write("Кастомная игра " + Path.GetFileNameWithoutExtension(s.CustomGame) + $" (карта {s.MapName}): выбор из трёх — по вашим играм; " +
                       (s.MapName == "dota" ? "напоминания — общие тайминги" : "напоминаний нет — карта не обычная") + "; прогноза нет");
+            _awakeningShown = -1;
+            _awakeningFrom = null; // кастомку могли обновить — перечитать (неизменённый файл берётся из памяти)
+            LoadAwakening(s.CustomGame);
+        }
         TrackCustom(s, custom);
         _gameState = s.GameState;
         CheckReminders(s);
@@ -317,7 +327,9 @@ sealed class AppController
             if (heroes == null || !_choiceTimer.IsEnabled || (_choicesShown != null && heroes.SequenceEqual(_choicesShown))) return;
             _choicesShown = heroes;
             Log.Write($"Кастомка: на выбор {string.Join(", ", heroes)} ({reader.LastScores})");
-            _turboCard.RenderChoices(_draftData, heroes, _customGame);
+            var awakening = await _awakening;
+            if (!_choiceTimer.IsEnabled) return;
+            _turboCard.RenderChoices(_draftData, heroes, _customGame, id => _heroNames.TryGetValue(id, out var n) ? awakening?.Of(n) : null);
             _turboCard.ShowChoices();
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or ArgumentException)
@@ -349,6 +361,7 @@ sealed class AppController
             _reminderOverlay.ShowPopup(roshan.Title, OverlayWindow.White, new[] { (roshan.Detail, OverlayWindow.Gray) }, TimeSpan.FromSeconds(8));
             if (_reminders.Sound) ReminderSound.Play(_reminders.RoshanSound);
         }
+        if (custom) CheckAwakening(s, clock);
         // режим не определён — только общие для всех профилей тайминги, а не первый профиль
         var profile = _reminders.Pick(mode);
         // общие тайминги — только пока режим не ясен; ясен, но профиля под него нет — молчим
@@ -371,6 +384,50 @@ sealed class AppController
         _reminderOverlay.ShowPopup(due.Count == 1 ? due[0].Rule.Text : "Напоминания", color, lines, TimeSpan.FromSeconds(8),
             due.Count == 1 ? color : due[0].Rule.DisplayColor());
         if (_reminders.Sound) ReminderSound.Play(due[0].Rule.SoundKey()); // несколько сразу — звук первого
+    }
+
+    // Описания Пробуждения читаются в фоне: .vpk кастомки — сотни мегабайт, но нужен из него один файл
+    void LoadAwakening(string? vpk)
+    {
+        if (string.IsNullOrEmpty(vpk) || vpk == _awakeningFrom) return;
+        _awakeningFrom = vpk;
+        if (_heroNames.Count == 0) _heroNames = _draftData.HeroInternalNames();
+        _awakening = Task.Run(() => AwakeningInfo.Load(vpk, AwakeningInfo.AbilityNames()));
+    }
+
+    // Пробуждение (кастомка IM): в начале игры — сводка, что даст ваш герой на 0, 10 и 15 минуте; за 30 с до 10:00
+    // и 15:00 — что именно сейчас получите. Окно 8 с — до напоминаний в 9:40 и 14:50 оно уже скроется.
+    void CheckAwakening(GsiState s, int clock)
+    {
+        const int Lead = 30;
+        LoadAwakening(s.CustomGame);
+        if (!_awakening.IsCompletedSuccessfully || _awakening.Result?.Of(s.HeroName) is not { } stages) return;
+        string hero = _draftData.Heroes.GetValueOrDefault(s.HeroId, s.HeroName ?? "");
+        var color = ReminderColors.Of("blue");
+        string Label(int k) => k == 0 ? "сразу" : $"в {AwakeningInfo.StageMinutes[k]}:00";
+        if (_awakeningShown < 0 && clock < 60)
+        {
+            _awakeningShown = 0;
+            var lines = Enumerable.Range(0, stages.Length).Where(k => stages[k].Count > 0)
+                .Select(k => ($"{Label(k)}: {string.Join("; ", stages[k])}", OverlayWindow.White)).ToList();
+            if (lines.Count == 0) return;
+            lines.Add(("кастомка IM — перед 10:00 и 15:00 напомню", OverlayWindow.Gray));
+            _reminderOverlay.ShowPopup($"Пробуждение: {hero}", color, lines, TimeSpan.FromSeconds(15), color);
+            return;
+        }
+        for (int k = 1; k < stages.Length; k++)
+        {
+            int at = AwakeningInfo.StageMinutes[k] * 60;
+            if (_awakeningShown >= k || clock < at - Lead || clock >= at) continue;
+            _awakeningShown = k;
+            if (stages[k].Count == 0) return;
+            var lines = stages[k].Select(e => (e, OverlayWindow.White)).ToList();
+            lines.Add(($"{hero} · через {ReminderTime.Format(at - clock)} · {Label(k)}", OverlayWindow.Gray));
+            Log.Write($"Пробуждение: показана ступень {k} на {ReminderTime.Format(clock)}");
+            _reminderOverlay.ShowPopup("Пробуждение — новые усиления", color, lines, TimeSpan.FromSeconds(8), color);
+            if (_reminders.Sound) ReminderSound.Play("power");
+            return;
+        }
     }
 
     void OpenReminders()

@@ -71,32 +71,54 @@ sealed class TurboCard : Window
         if (!IsVisible) Show();
     }
 
-    /// <summary>В кастомке — под карточками игроков (они до y ≈ 820), у правого края.</summary>
+    /// <summary>
+    /// В кастомке — широкой полосой под карточками игроков: они до y ≈ 820, кнопка «Повторный выбор героя» до 850,
+    /// справа с x 1234 — чат. Ширина — до чата.
+    /// </summary>
     public void ShowChoices()
     {
         var wa = SystemParameters.WorkArea;
-        Left = wa.Right - Width - 6;
-        Top = wa.Top + 830;
+        Left = wa.Left + 63;
+        Top = wa.Top + 856;
         if (!IsVisible) Show();
+        // длинные описания Пробуждения — карточка выше, чтобы низ не ушёл за экран; три героя на выбор (y до 383) не закрываем
+        UpdateLayout();
+        Top = Math.Max(wa.Top + 400, Math.Min(Top, wa.Bottom - ActualHeight - 4));
     }
 
-    /// <summary>Кастомка с выбором из трёх: кого из них брать — по вашим играм здесь, а пока их мало — в обычной Доте.</summary>
-    public void RenderChoices(DraftData data, IReadOnlyList<int> heroes, string game)
+    /// <summary>
+    /// Кастомка с выбором из трёх: кого брать и почему — по вашим играм здесь, а пока их мало — в обычной Доте;
+    /// по колонке на героя: ваши игры и что даёт Пробуждение (кастомка IM) на 0, 10 и 15 минуте.
+    /// </summary>
+    public void RenderChoices(DraftData data, IReadOnlyList<int> heroes, string game, Func<int, List<string>[]?> awakening)
     {
+        Width = 1165;
         _panel.Children.Clear();
         var (choices, byCustom) = CustomStats.Rank(data, game, heroes);
         string Name(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
-        _panel.Children.Add(Text("Кастомка · выбор из трёх", 13, Fg, bold: true));
-        _panel.Children.Add(Text($"Бери: {Name(choices[0].Hero)}", 15, Good, bold: true, top: 4));
-        foreach (var c in choices)
+        var head = new StackPanel { Orientation = Orientation.Horizontal };
+        head.Children.Add(Text($"Бери: {Name(choices[0].Hero)}", 15, Good, bold: true));
+        head.Children.Add(Text(byCustom ? "   по вашим играм здесь" : "   по вашим играм в обычной Доте (здесь их пока меньше трёх)", 10, Dim, top: 4));
+        _panel.Children.Add(head);
+        _panel.Children.Add(Text("Почему: " + CustomStats.Why(choices, byCustom, Name), 11, Fg, top: 2));
+
+        var columns = new Grid { Margin = new Thickness(0, 6, 0, 0) };
+        for (int i = 0; i < choices.Count; i++)
         {
-            _panel.Children.Add(Text(Name(c.Hero), 12, c == choices[0] ? Good : Fg, top: 6));
-            _panel.Children.Add(Text(c.Here, 10, Dim));
-            _panel.Children.Add(Text(c.Usual, 10, Dim));
+            var c = choices[i];
+            columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var col = new StackPanel { Margin = new Thickness(0, 0, 12, 0) };
+            col.Children.Add(Text(Name(c.Hero), 12, i == 0 ? Good : Fg, bold: true));
+            col.Children.Add(Text(c.Here, 10, Dim));
+            col.Children.Add(Text(c.Usual, 10, Dim));
+            if (awakening(c.Hero) is { } stages)
+                for (int k = 0; k < stages.Length; k++)
+                    if (stages[k].Count > 0)
+                        col.Children.Add(Text($"{(k == 0 ? "сразу" : AwakeningInfo.StageMinutes[k] + " мин")}: {string.Join("; ", stages[k])}", 10, Accent, top: 2));
+            Grid.SetColumn(col, i);
+            columns.Children.Add(col);
         }
-        _panel.Children.Add(Text(byCustom
-            ? "по золоту в минуту в ваших играх здесь (Stratz кастомки не собирает)"
-            : "по вашим играм в обычной Доте — здесь своих игр пока меньше трёх; программа их записывает", 9, Dim, top: 6));
+        _panel.Children.Add(columns);
     }
 
     static readonly string[] RoleNames = { "любая", "лёгкая", "центр", "сложная", "поддержка", "полная поддержка" };
@@ -104,6 +126,7 @@ sealed class TurboCard : Window
     /// <param name="ownHero">Ваш герой из GSI (0 — ещё не выбран): после пика карточка показывает прогноз и состав, а не что брать.</param>
     public void Render(DraftData data, PickSnapshot snap, string recognition, int ownHero = 0)
     {
+        Width = 190; // после кастомки карточка была широкой полосой
         bool allPick = snap.Mode == "ALL_PICK";
         string N(IEnumerable<int> ids) => string.Join(", ", ids.Select(id => data.Heroes.GetValueOrDefault(id, $"#{id}")));
         // Предвыбор союзников считаем их героями: учитываем сочетание и не предлагаем.
