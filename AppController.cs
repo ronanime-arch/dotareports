@@ -57,12 +57,19 @@ sealed class AppController
     TurboCard _turboCard = null!;
     PickFrame _pickFrame = null!;   // рамка вокруг «Бери» на самом экране пика
     RatingWindow _rating = null!;
-    // лобби NEC: при старте кастомки — снимок комнаты на весь матч (за 10 минут до старта), сам прячется через 30 с
+    // лобби NEC: пока комната набирается — сразу и с каждым новым игроком (кэш NEC смотрим раз в 3 с),
+    // при старте кастомки — снимок комнаты на весь матч (за 10 минут до старта); само прячется
     RatingWindow _necLobby = null!;
-    readonly DispatcherTimer _necHide = new() { Interval = TimeSpan.FromSeconds(30) };
+    readonly DispatcherTimer _necHide = new();
+    readonly DispatcherTimer _necPoll = new() { Interval = TimeSpan.FromSeconds(3) };
+    DateTime _necStamp;                     // когда NEC последний раз переписал кэш, который мы прочитали
+    DateTime _necNewest = DateTime.Now;     // самый поздний игрок, по которому уже показывали (до запуска программы — не новость)
     List<NecPlayer>? _necSnapshot;
     DateTime _necSnapshotAt;
     bool _inCustom;
+    enum NecShow { Hotkey, Room, GameStart }
+    const int NecRoomMin = 3;   // меньше — не комната: поиск игрока, друзья, окно итогов матча
+    static readonly TimeSpan NecRoomHide = TimeSpan.FromSeconds(60), NecGameHide = TimeSpan.FromSeconds(30);
     readonly ProfileData _profile = new();
     readonly DispatcherTimer _profileTimer = new() { Interval = TimeSpan.FromSeconds(60) };
     // «Уверенность в ранге» видна только на экране профиля Dota — смотрим туда раз в 3 с, пока вы в меню
@@ -135,6 +142,8 @@ sealed class AppController
             _necHide.Stop();
             if (_necLobby.IsVisible) _necLobby.Toggle();
         };
+        _necPoll.Tick += (_, _) => CheckNecRoom();
+        _necPoll.Start();
         // после матча история в GCPD обновляется не сразу — читаем профиль через минуту после выхода в меню
         _profileTimer.Tick += async (_, _) =>
         {
@@ -198,7 +207,7 @@ sealed class AppController
         // В кастомке (Аркада) свой экран выбора и свои герои — обычная карточка советовала бы мимо (Spectre при выборе
         // из трёх своих); там своя — кого из трёх брать по вашим играм (TrackCustom).
         bool custom = !string.IsNullOrEmpty(s.CustomGame);
-        if (custom && !_inCustom) ShowNecLobby(auto: true); // кастомка загрузилась — кто был в комнате NEC перед ней
+        if (custom && !_inCustom) ShowNecLobby(NecShow.GameStart); // кастомка загрузилась — кто был в комнате NEC перед ней
         _inCustom = custom;
         if (custom && s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != s.GameState)
         {
@@ -863,49 +872,67 @@ sealed class AppController
         }
     }
 
-    // Кастомка началась (auto) — кого NEC показывал в комнате за 10 минут до неё. Ctrl+Alt+N в кастомке — тот же снимок
-    // (NEC и посреди матча подгружает посторонних), вне её — свежее за 10 минут, а если пусто — снимок прошлого матча.
-    void ShowNecLobby(bool auto)
+    // Комната NEC набирается (до запуска кастомки): NEC пишет на диск ники и профили приходящих — показываем лобби сразу
+    // и обновляем с каждым новым игроком. Перечитываем, только когда NEC переписал кэш.
+    void CheckNecRoom()
+    {
+        if (_inCustom || !NecLobby.Installed) return;
+        var stamp = NecLobby.Stamp();
+        if (stamp == _necStamp) return;
+        _necStamp = stamp;
+        var players = NecLobby.Load(DateTime.Now);
+        var newest = players.Count > 0 ? players.Max(p => p.SeenAt) : DateTime.MinValue;
+        if (newest <= _necNewest) return;
+        _necNewest = newest;
+        if (players.Count >= NecRoomMin) ShowNecLobby(NecShow.Room, players);
+    }
+
+    // Комната набирается (Room) — кто в ней сейчас; кастомка началась (GameStart) — кого NEC показывал за 10 минут до неё.
+    // Ctrl+Alt+N в кастомке — тот же снимок (NEC и посреди матча подгружает посторонних), вне её — свежее за 10 минут,
+    // а если пусто — снимок прошлого матча.
+    void ShowNecLobby(NecShow mode, List<NecPlayer>? loaded = null)
     {
         if (!NecLobby.Installed)
         {
-            if (!auto) _overlay.ShowPopup("Лобби NEC", OverlayWindow.White, new[] { ("NEC не установлен — нет папки %APPDATA%\\nec-platform.", OverlayWindow.Gray) }, PopupTime);
+            if (mode == NecShow.Hotkey) _overlay.ShowPopup("Лобби NEC", OverlayWindow.White, new[] { ("NEC не установлен — нет папки %APPDATA%\\nec-platform.", OverlayWindow.Gray) }, PopupTime);
             return;
         }
         var at = DateTime.Now;
         List<NecPlayer> players;
-        if (auto)
-        {
-            players = NecLobby.Load(at);
-            (_necSnapshot, _necSnapshotAt) = (players, at);
-            Log.Write($"NEC: кастомка началась, в кэше NEC за 10 мин {players.Count} игроков");
-            if (players.Count == 0) return;
-        }
-        else if (_inCustom && _necSnapshot != null)
+        if (mode == NecShow.Hotkey && _inCustom && _necSnapshot != null)
             (players, at) = (_necSnapshot, _necSnapshotAt);
         else
         {
-            players = NecLobby.Load(at);
-            if (players.Count == 0 && _necSnapshot is { Count: > 0 })
+            players = loaded ?? NecLobby.Load(at);
+            if (mode == NecShow.GameStart)
+            {
+                (_necSnapshot, _necSnapshotAt) = (players, at);
+                Log.Write($"NEC: кастомка началась, в кэше NEC за 10 мин {players.Count} игроков");
+                if (players.Count == 0) return;
+            }
+            else if (mode == NecShow.Hotkey && players.Count == 0 && _necSnapshot is { Count: > 0 })
                 (players, at) = (_necSnapshot, _necSnapshotAt);
         }
 
         var lines = players.Count > 0
             ? NecLobby.Lines(players, _draftData.Heroes)
             : new List<(string, Color)> { ("За 10 минут NEC никого не показывал — откройте комнату или подбор в NEC.", OverlayWindow.Gray) };
+        string source = mode == NecShow.Room ? $"комната NEC, {at:HH:mm} — обновится с новыми игроками" : $"кэш NEC за 10 мин до {at:HH:mm}";
         _necLobby.Render($"Лобби NEC · {players.Count} {Plural(players.Count, "игрок", "игрока", "игроков")}", lines,
-            $"кэш NEC за 10 мин до {at:HH:mm} · без деления на команды, могут быть ушедшие · Ctrl+Alt+N — скрыть");
+            $"{source} · без деления на команды, могут быть ушедшие · Ctrl+Alt+N — скрыть");
         if (_rating.IsVisible) _rating.Toggle(); // оба окна в одном углу
         if (!_necLobby.IsVisible) _necLobby.Toggle();
         _necHide.Stop();
-        if (auto) _necHide.Start();
+        if (mode == NecShow.Hotkey) return;
+        _necHide.Interval = mode == NecShow.Room ? NecRoomHide : NecGameHide;
+        _necHide.Start();
     }
 
     void ToggleNecLobby()
     {
         if (!_necLobby.IsVisible)
         {
-            ShowNecLobby(auto: false);
+            ShowNecLobby(NecShow.Hotkey);
             return;
         }
         _necHide.Stop();
@@ -1122,6 +1149,7 @@ sealed class AppController
             Native.UnregisterHotKey(_browser.Handle, NecHotkeyId);
         }
         _necHide.Stop();
+        _necPoll.Stop();
         if (_tray != null)
         {
             _tray.Visible = false;

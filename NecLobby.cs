@@ -36,6 +36,15 @@ static class NecLobby
     static string Root => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "nec-platform");
     public static bool Installed => Directory.Exists(Path.Combine(Root, "Cache"));
 
+    /// <summary>Когда NEC последний раз переписал кэш ников или профилей — чтобы не перечитывать без нужды.</summary>
+    public static DateTime Stamp()
+    {
+        var cache = Path.Combine(Root, "Cache");
+        var a = File.GetLastWriteTimeUtc(Path.Combine(cache, "steam-nicknames.json"));
+        var b = File.GetLastWriteTimeUtc(Path.Combine(cache, "dota-records.json"));
+        return a > b ? a : b;
+    }
+
     /// <summary>Игроки, которых NEC показывал за <see cref="Window"/> до <paramref name="until"/>, по порядку появления; свои аккаунты не входят.</summary>
     public static List<NecPlayer> Load(DateTime until)
     {
