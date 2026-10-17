@@ -928,18 +928,18 @@ sealed class AppController
     {
         bool screen = custom && state is "DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP" or "DOTA_GAMERULES_STATE_HERO_SELECTION"
             or "DOTA_GAMERULES_STATE_STRATEGY_TIME";
-        if (screen && !_badgeTimer.IsEnabled && Setup.ScreenSupported && NecLobby.Installed)
-            _badgeTimer.Start();
-        // выбор героя: карточка лобби слева закрыла бы карточку первого союзника — звания уже на плашках
+        // выбор героя: карточка лобби слева закрыла бы карточку первого союзника — звания уже у аватарок
         if (custom && state == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _necHide.IsEnabled)
         {
             _necHide.Stop();
             if (_necLobby.IsVisible) _necLobby.Toggle();
         }
+        if (screen && !_badgeTimer.IsEnabled && Setup.ScreenSupported && NecLobby.Installed)
+            _badgeTimer.Start();
         else if (!screen && _badgeTimer.IsEnabled)
         {
             _badgeTimer.Stop();
-            _badges.ShowBadges(Array.Empty<(int, int, string, Color)>());
+            _badges.ShowBadges(Array.Empty<BadgeSpot>());
             if (_onScreen.Count >= NecRoomMin)
             {
                 (_necSnapshot, _necSnapshotAt) = (_onScreen.Values.ToList(), DateTime.Now);
@@ -964,20 +964,24 @@ sealed class AppController
                     _badgeStamp = stamp;
                     _avatars.SetCandidates(NecLobby.Load(DateTime.Now, TimeSpan.FromMinutes(20)), NecLobby.OwnAvatars());
                 }
-                var area = setup ? NecScreen.SetupStrip : NecScreen.CardStrip;
-                using var strip = new System.Drawing.Bitmap(area.Width, area.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
-                using (var g = System.Drawing.Graphics.FromImage(strip))
-                    g.CopyFromScreen(area.Location, System.Drawing.Point.Empty, area.Size);
-                return NecScreen.Read(strip, setup, _avatars);
+                // до выбора героя экран бывает двух видов: список подключения из 10 и выбор команды по колонкам —
+                // берём тот, где узнано больше игроков
+                var layouts = setup ? new[] { NecLayout.Teams, NecLayout.Connect } : new[] { NecLayout.Cards };
+                List<(int Index, NecPlayer Player, BadgeSpot[] Spots, string Debug)> best = new();
+                foreach (var layout in layouts)
+                {
+                    var area = NecScreen.Strip(layout);
+                    using var strip = new System.Drawing.Bitmap(area.Width, area.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                    using (var g = System.Drawing.Graphics.FromImage(strip))
+                        g.CopyFromScreen(area.Location, System.Drawing.Point.Empty, area.Size);
+                    var read = NecScreen.Read(strip, layout, _avatars);
+                    if (read.Count > best.Count) best = read;
+                }
+                return best;
             });
             if (!_badgeTimer.IsEnabled) return; // экран уже сменился
-            foreach (var (_, p, _) in found) _onScreen[p.SteamId] = p;
-            _badges.ShowBadges(found.Select(f =>
-            {
-                var (right, top) = NecScreen.Badge(f.Index, setup);
-                var (text, color) = NecLobby.Badge(f.Player);
-                return (right, top, text, color);
-            }).ToList());
+            foreach (var f in found) _onScreen[f.Player.SteamId] = f.Player;
+            _badges.ShowBadges(found.SelectMany(f => f.Spots).ToList());
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or ArgumentException)
         {

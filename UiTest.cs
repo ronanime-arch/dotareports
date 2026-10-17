@@ -73,6 +73,22 @@ static class UiTest
             ? new[] { new List<string> { "Enfeeble: эффект удвоен" }, new List<string> { "Brain Sap: выпускает 3 раза подряд" }, new List<string>() }
             : null);
         Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices"));
+
+        // иконки ранга: все медали со звёздами, Титан и «нет медали» — в размерах экрана подключения и выбора команды
+        var sheet = new System.Windows.Controls.StackPanel();
+        foreach (var size in new[] { 34.0, 28.0 })
+        {
+            var row = new System.Windows.Controls.WrapPanel { Margin = new Thickness(6) };
+            foreach (var tier in new[] { 0, 11, 25, 33, 44, 52, 65, 71, 80 })
+            {
+                var icon = RankIcon.Build(tier, size);
+                icon.Margin = new Thickness(4);
+                icon.ToolTip = Ranks.Name(tier);
+                row.Children.Add(icon);
+            }
+            sheet.Children.Add(row);
+        }
+        Save(sheet, 9 * 42 + 12, null, new Point(0, 0), Path.Combine(dir, "rank_icons"));
         Console.WriteLine($"ui_test: {string.Join(", ", new[] { H(1), H(129) })} — готово");
     }
 
@@ -109,6 +125,50 @@ static class UiTest
             using var fs = File.Create(file + (scale == 1.0 ? "" : "_125") + ".png");
             png.Save(fs);
         }
+    }
+
+    /// <summary>--badge-test: кто узнан на снимке экрана кастомки (в .txt) и снимок со значками ранга (в .png) — тем же кодом, что в игре.</summary>
+    public static void Badges(string shotFile, NecLayout layout, DateTime at, string file)
+    {
+        var matcher = new AvatarMatcher();
+        matcher.SetCandidates(NecLobby.Load(at, TimeSpan.FromMinutes(20)), NecLobby.OwnAvatars());
+        List<(int Index, NecPlayer Player, BadgeSpot[] Spots, string Debug)> found;
+        List<string> debug;
+        using (var shot = new System.Drawing.Bitmap(shotFile))
+        {
+            var area = NecScreen.Strip(layout);
+            area.Intersect(new System.Drawing.Rectangle(0, 0, shot.Width, shot.Height));
+            using var strip = new System.Drawing.Bitmap(NecScreen.Strip(layout).Width, NecScreen.Strip(layout).Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            using (var g = System.Drawing.Graphics.FromImage(strip))
+                g.DrawImage(shot, new System.Drawing.Rectangle(area.X - NecScreen.Strip(layout).X, area.Y - NecScreen.Strip(layout).Y, area.Width, area.Height), area, System.Drawing.GraphicsUnit.Pixel);
+            found = NecScreen.Read(strip, layout, matcher);
+            debug = NecScreen.Debug(strip, layout, matcher).ToList();
+        }
+        var lines = new List<string> { $"кандидатов с аватаркой: {matcher.Count}; узнано: {found.Count}" };
+        lines.AddRange(debug);
+        lines.AddRange(found.Select(f => $"{f.Index + 1}: {f.Player.Name} — {NecLobby.Badge(f.Player).Text} ({f.Debug})"));
+        File.WriteAllLines(file + ".txt", lines);
+
+        var image = new BitmapImage(new Uri(Path.GetFullPath(shotFile)));
+        var canvas = new System.Windows.Controls.Canvas { Width = image.PixelWidth, Height = image.PixelHeight };
+        RankBadges.Fill(canvas, found.SelectMany(f => f.Spots), image.PixelWidth, Matrix.Identity);
+        canvas.Measure(new Size(image.PixelWidth, image.PixelHeight));
+        canvas.Arrange(new Rect(0, 0, image.PixelWidth, image.PixelHeight));
+        canvas.UpdateLayout();
+        var overlay = new RenderTargetBitmap(image.PixelWidth, image.PixelHeight, 96, 96, PixelFormats.Pbgra32);
+        overlay.Render(canvas);
+        var visual = new DrawingVisual();
+        using (var dc = visual.RenderOpen())
+        {
+            dc.DrawImage(image, new Rect(0, 0, image.PixelWidth, image.PixelHeight));
+            dc.DrawImage(overlay, new Rect(0, 0, image.PixelWidth, image.PixelHeight));
+        }
+        var result = new RenderTargetBitmap(image.PixelWidth, image.PixelHeight, 96, 96, PixelFormats.Pbgra32);
+        result.Render(visual);
+        var png = new PngBitmapEncoder();
+        png.Frames.Add(BitmapFrame.Create(result));
+        using var fs = File.Create(file + ".png");
+        png.Save(fs);
     }
 
     static Dictionary<int, string> LoadHeroes()

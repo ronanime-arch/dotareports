@@ -165,12 +165,16 @@ static class NecLobby
         foreach (var p in players)
         {
             var head = new DockPanel();
-            var (rank, rankColor) = (Ranks.Name(p.RankTier) ?? "без медали", p.RankTier > 0 ? Glass.GoldLight : Glass.Muted);
-            var chip = Glass.Chip(rank + (p.Country is { Length: > 0 } c ? $" · {c}" : ""), rankColor, 11.5);
-            chip.Margin = new Thickness(6, 2, 0, 0);
-            chip.VerticalAlignment = VerticalAlignment.Top;
-            DockPanel.SetDock(chip, Dock.Right);
-            head.Children.Add(chip);
+            // у ника — звание и страна; без медали — только страна (надпись «без медали» лишь шумит)
+            var label = string.Join(" · ", new[] { Ranks.Name(p.RankTier), p.Country }.Where(s => !string.IsNullOrEmpty(s)));
+            if (label.Length > 0)
+            {
+                var chip = Glass.Chip(label, p.RankTier > 0 ? Glass.GoldLight : Glass.Muted, 11.5);
+                chip.Margin = new Thickness(6, 2, 0, 0);
+                chip.VerticalAlignment = VerticalAlignment.Top;
+                DockPanel.SetDock(chip, Dock.Right);
+                head.Children.Add(chip);
+            }
             head.Children.Add(Glass.Text(p.Name, 18, Glass.Ink, serif: true, bold: true, wrap: false));
             var box = new StackPanel();
             box.Children.Add(head);
