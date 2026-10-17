@@ -39,6 +39,9 @@ sealed class PickWatcher
 
     public string Status => Setup.ScreenSupported ? _grid.Status : "экран не 1920×1080 — баны и союзники не распознаются";
 
+    /// <summary>Где герой в сетке пика на экране (клетки заданы раз при запуске — без блокировки).</summary>
+    public Rectangle? CellOf(int hero) => _grid.CellOf(hero);
+
     public void Begin(string matchId)
     {
         lock (_grid) _grid.Reset();

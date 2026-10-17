@@ -24,6 +24,28 @@ static class Program
             GridTest(args[1], args[2], Path.Combine(Paths.Root, "grid_test.txt"));
             return;
         }
+        if (args.Length >= 3 && args[0] == "--frame-test")
+        {
+            // рамка «Бери» на скриншоте 1920×1080, в frame_test.png: --frame-test <png> <герой> — клетка в сетке пика;
+            // --frame-test <png> choice <слот 0–4> <картинка 0–2> — одна из трёх в кастомке
+            var cell = args[2] == "choice" && args.Length >= 5
+                ? ChoiceReader.ThumbArea(int.Parse(args[3]), int.Parse(args[4]))
+                : new GridReader().CellOf(int.Parse(args[2]));
+            if (cell is not { } c) return;
+            using var shot = new System.Drawing.Bitmap(args[1]);
+            using (var g = System.Drawing.Graphics.FromImage(shot))
+            using (var brush = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(0x7C, 0xD9, 0x92)))
+            {
+                var o = PickFrame.Outer(c);
+                int t = PickFrame.Thickness;
+                g.FillRectangle(brush, o.Left, o.Top, o.Width, t);
+                g.FillRectangle(brush, o.Left, o.Bottom - t, o.Width, t);
+                g.FillRectangle(brush, o.Left, o.Top, t, o.Height);
+                g.FillRectangle(brush, o.Right - t, o.Top, t, o.Height);
+            }
+            shot.Save(Path.Combine(Paths.Root, "frame_test.png"));
+            return;
+        }
         if (args.Length >= 2 && args[0] == "--conf-test")
         {
             // уверенность в ранге с картинки (скриншот профиля целиком или вырезка с полосой)
