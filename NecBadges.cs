@@ -19,31 +19,48 @@ namespace DotaReports;
 /// в своём кэше (Cache\avatars). Ники тут не помогают: у многих они из значков и иероглифов.
 /// Сравниваем целиком, уменьшив до 12×12 (цвет, среднее 0, разброс 1). На записанном матче 17.10: игроки — 0,91–0,96
 /// при втором кандидате до 0,56, пустые слоты «Ожидание игрока» — до 0,63.
+/// Сначала — среди свежих записей NEC (это почти наверняка комната), затем — среди всех, кого NEC держит в кэше:
+/// знакомых он заново не пишет, и по свежим из 10 ловились 5–6. Среди всех второе место выше (на 252 кандидатах
+/// игроки дают 0,77–0,93 при отрыве 0,2–0,36), поэтому там нужен высокий счёт. «?» — у многих, и не только
+/// стандартная Steam (у одного игрока своя картинка «?»), — такие аватарки никого не выдают и не сравниваются.
 /// </summary>
 sealed class AvatarMatcher
 {
     const int N = 12;
     const double MinScore = 0.8, MinGap = 0.25;
+    const double AllScore = 0.82, AllScoreSmall = 0.75, AllGap = 0.15, LikeDefault = 0.85;
 
     readonly Dictionary<string, double[]> _vectors = new();   // по файлу аватарки: файлы NEC не меняются (имя — хеш)
-    List<(NecPlayer? Player, double[] V)> _candidates = new();
+    List<(NecPlayer? Player, double[] V)> _recent = new(), _all = new();
+    double[]? _default;
 
     /// <summary>
-    /// Кандидаты — игроки комнаты с аватаркой и ваши аккаунты (их строку узнаём, но плашку не ставим).
+    /// Кандидаты: свежие игроки комнаты, все известные NEC, ваши аккаунты (их строку узнаём, но значок не ставим)
+    /// и стандартная аватарка «?» — с ней сравниваем, чтобы такие не выдавали никого.
     /// Одна и та же картинка у двоих — кто из них на экране, не понять: таких не берём.
     /// </summary>
-    public void SetCandidates(IEnumerable<NecPlayer> players, IEnumerable<string> ownAvatars)
+    public void SetCandidates(IEnumerable<NecPlayer> recent, IEnumerable<NecPlayer> all, IEnumerable<string> ownAvatars, string? defaultAvatar)
+    {
+        _default = defaultAvatar != null ? Load(defaultAvatar) : null;
+        var own = ownAvatars.ToList();
+        _recent = Build(recent, own);
+        _all = Build(all, own);
+    }
+
+    List<(NecPlayer?, double[])> Build(IEnumerable<NecPlayer> players, List<string> own)
     {
         var all = players.Where(p => p.Avatar != null).Select(p => ((NecPlayer?)p, p.Avatar!))
-            .Concat(ownAvatars.Select(f => ((NecPlayer?)null, f))).ToList();
+            .Concat(own.Select(f => ((NecPlayer?)null, f))).ToList();
         var twice = all.GroupBy(c => c.Item2).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet();
         var list = new List<(NecPlayer?, double[])>();
         foreach (var (player, file) in all)
-            if (!twice.Contains(file) && Load(file) is { } v) list.Add((player, v));
-        _candidates = list;
+            if (!twice.Contains(file) && Load(file) is { } v && !LooksDefault(v)) list.Add((player, v));
+        return list;
     }
 
-    public int Count => _candidates.Count;
+    bool LooksDefault(double[] v) => _default != null && Dot(v, _default) > LikeDefault;
+
+    public int Count => _all.Count;
 
     /// <summary>Игрок с этой аватаркой; null — не узнан уверенно или это вы. Debug — лучший и второй счёт.</summary>
     public NecPlayer? Match(Bitmap image, Rectangle area, out string debug) => Match(image, area, out debug, out _);
@@ -53,20 +70,38 @@ sealed class AvatarMatcher
     /// чужие и «?» — до 0,58 при отрыве до 0,27 (снимок 17.10), поэтому пороги свои.</param>
     public NecPlayer? Match(Bitmap image, Rectangle area, out string debug, out bool sure, bool small = false)
     {
-        double minScore = small ? 0.62 : MinScore, minGap = small ? 0.3 : MinGap;
         var v = Vector(image, area);
+        if (LooksDefault(v))
+        {
+            (debug, sure) = ("«?»", false);
+            return null;
+        }
+        // 1) свежие записи NEC — это комната: пороги мягче
+        var (p1, s1, g1, own1) = Best(v, _recent);
+        if (s1 >= (small ? 0.62 : MinScore) && g1 >= (small ? 0.3 : MinGap))
+        {
+            (debug, sure) = ($"{(own1 ? "вы" : p1?.Name ?? "-")} {s1:0.00}/{g1:0.00}", true);
+            return own1 ? null : p1;
+        }
+        // 2) все известные NEC — кандидатов много, второе место выше: нужен высокий счёт
+        var (p2, s2, g2, own2) = Best(v, _all);
+        sure = s2 >= (small ? AllScoreSmall : AllScore) && g2 >= AllGap;
+        debug = $"{(own2 ? "вы" : p2?.Name ?? "-")} {s2:0.00}/{g2:0.00} (все)";
+        return !own2 && sure ? p2 : null;
+    }
+
+    static (NecPlayer? Player, double Score, double Gap, bool Own) Best(double[] v, List<(NecPlayer? Player, double[] V)> candidates)
+    {
         double s1 = double.MinValue, s2 = double.MinValue;
         NecPlayer? best = null;
         bool own = false;
-        foreach (var (player, c) in _candidates)
+        foreach (var (player, c) in candidates)
         {
             double s = Dot(v, c);
             if (s > s1) { s2 = s1; s1 = s; best = player; own = player == null; }
             else if (s > s2) s2 = s;
         }
-        debug = $"{(own ? "вы" : best?.Name ?? "-")} {s1:0.00}/{s1 - s2:0.00}";
-        sure = s1 >= minScore && s1 - s2 >= minGap;
-        return !own && sure ? best : null;
+        return candidates.Count == 0 ? (null, 0, 0, false) : (best, s1, s1 - (s2 == double.MinValue ? 0 : s2), own);
     }
 
     double[]? Load(string file)
@@ -120,6 +155,13 @@ sealed class AvatarMatcher
 /// <summary>Какой экран кастомки: подключение (список из 10), выбор команды (две колонки по 5), выбор героя (карточки).</summary>
 enum NecLayout { Connect, Teams, Cards }
 
+/// <summary>Узнан на экране кастомки: экран, номер строки или карточки, кто, сдвиг панели команд, счёт сравнения.</summary>
+sealed record ScreenHit(NecLayout Layout, int Index, NecPlayer Player, int Shift, string Debug)
+{
+    /// <summary>Силы Света (0) или Тьмы (1) — видно только на экране выбора команды; иначе null.</summary>
+    public int? Team => Layout == NecLayout.Teams ? (Index < 5 ? 0 : 1) : null;
+}
+
 /// <summary>
 /// Что и где нарисовать: иконка ранга (и текст — в плашке), X/Y — левый край (Right — правый, Center — середина) и верх,
 /// px экрана; Icon 0 — плашка без иконки.
@@ -150,19 +192,37 @@ static class NecScreen
         _ => CardStrip,
     };
 
-    /// <summary>Узнанные игроки: номер строки или карточки, кто там, значки и счёт сравнения (Debug).</summary>
-    public static List<(int Index, NecPlayer Player, BadgeSpot[] Spots, string Debug)> Read(Bitmap strip, NecLayout layout, AvatarMatcher matcher)
+    /// <summary>Узнанные игроки: номер строки или карточки, кто там, сдвиг панели команд и счёт сравнения (Debug).</summary>
+    public static List<ScreenHit> Read(Bitmap strip, NecLayout layout, AvatarMatcher matcher)
     {
         int shift = layout == NecLayout.Teams ? TeamsShift(strip, matcher) : 0;
-        var found = new List<(int, NecPlayer, BadgeSpot[], string)>();
+        var found = new List<ScreenHit>();
         int count = layout == NecLayout.Cards ? 5 : 10;
         for (int i = 0; i < count; i++)
         {
             var p = matcher.Match(strip, Avatar(layout, i, shift), out var debug, out _, layout == NecLayout.Teams);
-            if (p == null) continue;
-            found.Add((i, p, Spots(layout, i, shift, p), debug));
+            if (p != null) found.Add(new ScreenHit(layout, i, p, shift, debug));
         }
         return found;
+    }
+
+    /// <summary>Значки узнанного игрока (после того как, например, догрузилось звание).</summary>
+    public static BadgeSpot[] Spots(ScreenHit hit) => Spots(hit.Layout, hit.Index, hit.Shift, hit.Player);
+
+    /// <summary>
+    /// Звание тем, чей профиль NEC не загружал (знакомых он не перечитывает), — сами с OpenDota по аккаунту;
+    /// ответы запоминаются (LiveMatch), так что каждый игрок спрашивается один раз.
+    /// </summary>
+    public static async System.Threading.Tasks.Task<List<ScreenHit>> WithRanksAsync(List<ScreenHit> hits)
+    {
+        var result = new List<ScreenHit>();
+        foreach (var h in hits)
+        {
+            if (h.Player.HasProfile || NecLobby.AccountOf(h.Player.SteamId) is not { } account) { result.Add(h); continue; }
+            int tier = await LiveMatch.RankAsync(account);
+            result.Add(tier > 0 ? h with { Player = h.Player with { RankTier = tier } } : h);
+        }
+        return result;
     }
 
     /// <summary>Для --badge-test: лучший и второй счёт по каждой строке (и подобранный сдвиг панели команд).</summary>
@@ -190,8 +250,7 @@ static class NecScreen
     // Сдвиг панели команд (px, минус — выше): тот, при котором уверенно узнано больше всего строк (и вы в том числе).
     static int TeamsShift(Bitmap strip, AvatarMatcher matcher)
     {
-        int best = 0, bestCount = -1;
-        for (int shift = -TeamsShiftUp; shift <= TeamsShiftDown; shift += 2)
+        int Count(int shift)
         {
             int count = 0;
             for (int i = 0; i < 10; i++)
@@ -199,6 +258,14 @@ static class NecScreen
                 matcher.Match(strip, Avatar(NecLayout.Teams, i, shift), out _, out bool sure, small: true);
                 if (sure) count++;
             }
+            return count;
+        }
+        // обычно панель на своём месте: тогда без перебора (кандидатов — все игроки из кэша NEC, перебор недешёвый)
+        if (Count(0) >= 3) return 0;
+        int best = 0, bestCount = -1;
+        for (int shift = -TeamsShiftUp; shift <= TeamsShiftDown; shift += 2)
+        {
+            int count = Count(shift);
             if (count > bestCount || (count == bestCount && Math.Abs(shift) < Math.Abs(best))) (best, bestCount) = (shift, count);
         }
         return best;

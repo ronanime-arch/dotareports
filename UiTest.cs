@@ -133,8 +133,9 @@ static class UiTest
     {
         RankArt.EnsureAsync().GetAwaiter().GetResult(); // значки медалей — как в игре
         var matcher = new AvatarMatcher();
-        matcher.SetCandidates(NecLobby.Load(at, TimeSpan.FromMinutes(20)), NecLobby.OwnAvatars());
-        List<(int Index, NecPlayer Player, BadgeSpot[] Spots, string Debug)> found;
+        // как в игре: кандидаты — все, кого NEC держит в кэше (знакомых он заново не пишет); at — для старых снимков не важен
+        matcher.SetCandidates(NecLobby.Load(at, TimeSpan.FromMinutes(20)), NecLobby.Load(at, everyone: true), NecLobby.OwnAvatars(), NecLobby.DefaultAvatarFile());
+        List<ScreenHit> found;
         List<string> debug;
         using (var shot = new System.Drawing.Bitmap(shotFile))
         {
@@ -146,11 +147,13 @@ static class UiTest
             found = NecScreen.Read(strip, layout, matcher);
             debug = NecScreen.Debug(strip, layout, matcher).ToList();
         }
+        found = NecScreen.WithRanksAsync(found).GetAwaiter().GetResult();
         var lines = new List<string> { $"кандидатов с аватаркой: {matcher.Count}; узнано: {found.Count}" };
         lines.AddRange(debug);
-        lines.AddRange(found.Select(f => $"{f.Index + 1}: {f.Player.Name} — {NecLobby.Badge(f.Player).Text} ({f.Debug})"));
+        lines.AddRange(found.Select(f => $"{f.Index + 1}: {f.Player.Name} — {Ranks.Name(f.Player.RankTier) ?? "без медали"}" +
+            $"{(f.Team is int t ? (t == 0 ? " · Свет" : " · Тьма") : "")} ({f.Debug})"));
         File.WriteAllLines(file + ".txt", lines);
-        RenderSpots(shotFile, found.SelectMany(f => f.Spots), file + ".png");
+        RenderSpots(shotFile, found.SelectMany(NecScreen.Spots), file + ".png");
     }
 
     /// <summary>

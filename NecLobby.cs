@@ -50,10 +50,15 @@ static class NecLobby
 
     /// <summary>Игроки, которых NEC показывал за <paramref name="window"/> (по умолчанию <see cref="Window"/>) до <paramref name="until"/>,
     /// по порядку появления; свои аккаунты не входят.</summary>
-    public static List<NecPlayer> Load(DateTime until, TimeSpan? window = null)
+    /// <param name="everyone">
+    /// Все, кого NEC держит в кэше, без окна по времени, и ещё профили Steam (там и ваши друзья). Знакомых игроков NEC
+    /// заново не записывает — по времени из 10 в комнате ловятся 5–6; остальных узнаём по аватарке на экране среди всех.
+    /// </param>
+    public static List<NecPlayer> Load(DateTime until, TimeSpan? window = null, bool everyone = false)
     {
         var cache = Path.Combine(Root, "Cache");
         long to = new DateTimeOffset(until).ToUnixTimeMilliseconds(), from = to - (long)(window ?? Window).TotalMilliseconds;
+        if (everyone) (from, to) = (long.MinValue, long.MaxValue);
         var own = OwnSteamIds();
         var seen = new Dictionary<string, (long At, string Name)>();
         void Add(string? sid, long at, string? name)
@@ -78,8 +83,12 @@ static class NecLobby
             if (at >= from && at <= to) Add(Str(p, "steamid"), at, Str(p, "personaname"));
         }
         // аватарка из профилей Steam, которые NEC подгружал для карточек, свежее, чем из OpenDota
-        foreach (var (_, _, data) in Entries(Path.Combine(cache, "steam-profiles.json")))
-            if (Str(data, "steamId") is { } psid && Str(data, "avatar") is { Length: > 0 } purl) avatarUrls[psid] = purl;
+        foreach (var (_, at, data) in Entries(Path.Combine(cache, "steam-profiles.json")))
+        {
+            if (Str(data, "steamId") is not { } psid) continue;
+            if (Str(data, "avatar") is { Length: > 0 } purl) avatarUrls[psid] = purl;
+            if (everyone) Add(psid, at, Str(data, "persona"));
+        }
         // стандартная «?» Steam — у тысяч игроков, на экране никого не выдаёт (одинаковые у кандидатов отсеивает AvatarMatcher)
         var files = AvatarFiles();
         string? Avatar(string sid) => avatarUrls.TryGetValue(sid, out var u) && !u.Contains(DefaultAvatar) ? files(u) : null;
@@ -117,6 +126,13 @@ static class NecLobby
         }
         return players;
     }
+
+    /// <summary>Файл стандартной аватарки Steam «?» из кэша NEC — с ней сравниваем, чтобы такие аватарки никого не выдавали.</summary>
+    public static string? DefaultAvatarFile() => AvatarFiles()($"https://avatars.steamstatic.com/{DefaultAvatar}_full.jpg");
+
+    /// <summary>Номер аккаунта Dota по SteamID64; null — не похоже на аккаунт.</summary>
+    public static uint? AccountOf(string steamId) =>
+        ulong.TryParse(steamId, out var s64) && s64 > SteamBase && s64 - SteamBase <= uint.MaxValue ? (uint)(s64 - SteamBase) : null;
 
     /// <summary>Аватарки своих аккаунтов (из data\platform.json NEC): на экране матча их надо узнавать, чтобы не приписать чужому.</summary>
     public static List<string> OwnAvatars()

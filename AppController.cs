@@ -87,6 +87,8 @@ sealed class AppController
     DateTime _badgeStamp;
     bool _badgeBusy;
     readonly Dictionary<string, NecPlayer> _onScreen = new();   // кто из комнаты NEC узнан на экране этой кастомки
+    readonly Dictionary<string, int> _onScreenTeam = new();     // его команда (0 — Свет, 1 — Тьма), если видна на экране выбора команды
+    string? _gsiTeam;                                            // ваша сторона из GSI: radiant / dire
     // На пике в матче Valve (LiveMatch): медаль перед ником каждого игрока и «за · против» под ником — состав по
     // Steam ID сервера из console.log и Steam GetRealtimeStats; ники на экране смотрим раз в 2 с
     RankBadges _pickRanks = null!;
@@ -245,6 +247,7 @@ sealed class AppController
         _lastGsi = DateTime.Now;
         _watcher.Update(s);
         _mode.Update(s);
+        if (!string.IsNullOrEmpty(s.Team)) _gsiTeam = s.Team;
         if (s.GameState.Length == 0 && _gameState is "DOTA_GAMERULES_STATE_POST_GAME" or "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
             _profileTimer.Start();
         // В кастомке (Аркада) свой экран выбора и свои герои — обычная карточка советовала бы мимо (Spectre при выборе
@@ -253,6 +256,7 @@ sealed class AppController
         if (custom && !_inCustom)
         {
             _onScreen.Clear();
+            _onScreenTeam.Clear();
             ShowNecLobby(NecShow.GameStart); // кастомка загрузилась — кто был в комнате NEC перед ней
         }
         if (!custom && _inCustom) _necDismissed = false; // кастомка кончилась — следующую комнату снова показываем
@@ -1061,17 +1065,19 @@ sealed class AppController
             bool setup = _gameState == "DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP";
             var found = await Task.Run(() =>
             {
-                // кандидаты — комната NEC за 20 минут: состав мог прийти и до загрузки, и на экране подключения
+                // кандидаты — все, кого NEC держит в кэше (и друзья из профилей Steam): знакомых игроков NEC заново
+                // не записывает, и по свежим записям из 10 в комнате ловятся 5–6
                 var stamp = NecLobby.Stamp();
                 if (stamp != _badgeStamp || _avatars.Count == 0)
                 {
                     _badgeStamp = stamp;
-                    _avatars.SetCandidates(NecLobby.Load(DateTime.Now, TimeSpan.FromMinutes(20)), NecLobby.OwnAvatars());
+                    _avatars.SetCandidates(NecLobby.Load(DateTime.Now, TimeSpan.FromMinutes(20)), NecLobby.Load(DateTime.Now, everyone: true),
+                        NecLobby.OwnAvatars(), NecLobby.DefaultAvatarFile());
                 }
                 // до выбора героя экран бывает двух видов: список подключения из 10 и выбор команды по колонкам —
                 // берём тот, где узнано больше игроков
                 var layouts = setup ? new[] { NecLayout.Teams, NecLayout.Connect } : new[] { NecLayout.Cards };
-                List<(int Index, NecPlayer Player, BadgeSpot[] Spots, string Debug)> best = new();
+                List<ScreenHit> best = new();
                 foreach (var layout in layouts)
                 {
                     var area = NecScreen.Strip(layout);
@@ -1083,9 +1089,17 @@ sealed class AppController
                 }
                 return best;
             });
+            found = await NecScreen.WithRanksAsync(found); // у кого NEC не загружал профиль — звание с OpenDota
             if (!_badgeTimer.IsEnabled) return; // экран уже сменился
-            foreach (var f in found) _onScreen[f.Player.SteamId] = f.Player;
-            _badges.ShowBadges(found.SelectMany(f => f.Spots).ToList());
+            bool grew = false;
+            foreach (var f in found)
+            {
+                grew |= !_onScreen.ContainsKey(f.Player.SteamId);
+                _onScreen[f.Player.SteamId] = f.Player;
+                if (f.Team is int team) _onScreenTeam[f.Player.SteamId] = team;
+            }
+            _badges.ShowBadges(found.SelectMany(NecScreen.Spots).ToList());
+            if (grew && setup) ShowScreenLobby(); // до выбора героя: узнанные — сразу в карточку лобби
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or ArgumentException)
         {
@@ -1095,6 +1109,40 @@ sealed class AppController
         {
             _badgeBusy = false;
         }
+    }
+
+    // Узнанные по аватарке на экране кастомки — в карточку лобби, по командам (их видно на экране выбора команды);
+    // к ним — те, кого NEC записал за 10 минут, но на экране не узнали (стандартная «?»-аватарка, ушедшие из комнаты).
+    // Этот состав и остаётся для Ctrl+Alt+N на весь матч.
+    void ShowScreenLobby()
+    {
+        var recognized = _onScreen.Values.ToList();
+        var extra = NecLobby.Load(DateTime.Now).Where(p => !_onScreen.ContainsKey(p.SteamId)).ToList();
+        (_necSnapshot, _necSnapshotAt) = (recognized.Concat(extra).ToList(), DateTime.Now);
+        if (_necDismissed) return; // закрыли ✕ — состав запомнили, но сами не лезем
+        var body = new List<System.Windows.UIElement>();
+        void Group(string title, IEnumerable<NecPlayer> players)
+        {
+            var list = players.ToList();
+            if (list.Count == 0) return;
+            body.Add(Glass.Text(title, 12, Glass.GoldLight, bold: true, top: body.Count > 0 ? 8 : 0));
+            body.AddRange(NecLobby.Tiles(list, _draftData.Heroes));
+        }
+        int? mine = _gsiTeam switch { "radiant" => 0, "dire" => 1, _ => null };
+        string Side(int t) => (t == 0 ? "Силы Света" : "Силы Тьмы") + (mine == t ? " — ваша команда" : "");
+        int TeamOf(NecPlayer p) => _onScreenTeam.TryGetValue(p.SteamId, out var t) ? t : -1;
+        Group(Side(0), recognized.Where(p => TeamOf(p) == 0));
+        Group(Side(1), recognized.Where(p => TeamOf(p) == 1));
+        Group(_onScreenTeam.Count > 0 ? "Команда не видна" : "Узнаны на экране", recognized.Where(p => TeamOf(p) < 0));
+        Group("В комнате NEC, на экране не узнаны", extra);
+        _necLobby.Render($"Лобби NEC · {recognized.Count + extra.Count}", "Ctrl+Alt+N", body,
+            "узнаны по аватарке на экране кастомки · медали — OpenDota", RefreshNecLobby);
+        if (_rating.IsVisible) _rating.Toggle(); // оба окна в одном углу
+        if (!_necLobby.IsVisible) _necLobby.Toggle();
+        _necHide.Stop();
+        if (_reminders.Windows.NecGame <= 0) return;
+        _necHide.Interval = WindowDurations.Of(_reminders.Windows.NecGame);
+        _necHide.Start();
     }
 
     // Комната набирается (Room) — кто в ней сейчас; кастомка началась (GameStart) — кого NEC показывал за 10 минут до неё.
