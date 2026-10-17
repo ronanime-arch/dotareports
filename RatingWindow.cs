@@ -9,12 +9,12 @@ using System.Windows.Shapes;
 
 namespace DotaReports;
 
-/// <summary>Окно рейтинга слева сверху по Ctrl+Alt+S: висит, пока не нажмёте ещё раз. Клики проходят насквозь.</summary>
+/// <summary>Окно слева сверху по хоткею (рейтинг — Ctrl+Alt+S, лобби NEC — Ctrl+Alt+N): висит, пока не нажмёте ещё раз. Клики проходят насквозь.</summary>
 sealed class RatingWindow : Window
 {
     readonly StackPanel _panel = new();
 
-    public RatingWindow()
+    public RatingWindow(double width = 300)
     {
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
@@ -25,7 +25,7 @@ sealed class RatingWindow : Window
         Focusable = false;
         ResizeMode = ResizeMode.NoResize;
         SizeToContent = SizeToContent.Height;
-        Width = 300;
+        Width = width;
         Content = new Border
         {
             Background = new SolidColorBrush(Color.FromArgb(0xF0, 0x14, 0x18, 0x21)),
