@@ -122,7 +122,7 @@ sealed class OverlayWindow : GlassWindow
         }
         Grid.SetColumn(text, 1);
         grid.Children.Add(text);
-        var close = Glass.IconButton("✕", "Закрыть");
+        var close = Glass.IconButton("✕");
         AddButton(close, CloseByButton);
         close.VerticalAlignment = VerticalAlignment.Top;
         Grid.SetColumn(close, 2);

@@ -149,14 +149,13 @@ static class Glass
     }
 
     /// <summary>Кнопка в шапке: ↻ — обновить, ✕ — закрыть. Подсветку при наведении включает <see cref="GlassWindow"/>.</summary>
-    public static Border IconButton(string glyph, string tip) => new()
+    public static Border IconButton(string glyph) => new()
     {
         Width = 24, Height = 24,
         CornerRadius = new CornerRadius(7),
         Background = Brushes.Transparent,
         Margin = new Thickness(2, 0, 0, 0),
         VerticalAlignment = VerticalAlignment.Center,
-        ToolTip = tip,
         Child = new TextBlock
         {
             Text = glyph, FontFamily = Symbols, FontSize = glyph == "✕" ? 11 : 14, Foreground = B(Muted),
@@ -208,12 +207,12 @@ static class Glass
         }
         if (refresh != null)
         {
-            var r = IconButton("↻", "Обновить");
+            var r = IconButton("↻");
             window.AddButton(r, refresh);
             Grid.SetColumn(r, 3);
             grid.Children.Add(r);
         }
-        var close = IconButton("✕", "Закрыть");
+        var close = IconButton("✕");
         window.AddButton(close, window.CloseByButton);
         Grid.SetColumn(close, 4);
         grid.Children.Add(close);
