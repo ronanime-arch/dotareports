@@ -208,11 +208,11 @@ static class NecScreen
         var (text, color) = NecLobby.Badge(p);
         return layout switch
         {
-            NecLayout.Connect => new[] { new BadgeSpot(1556 - 6 - 34, 312 + 60 * i + 7, false, p.RankTier, null, color, 34) },
-            NecLayout.Teams => new[] { new BadgeSpot(1146 - 4 - 28, RowTop(i) + shift + 2, false, p.RankTier, null, color, 28) },
+            NecLayout.Connect => new[] { new BadgeSpot(1556 - 4 - 48, 312 + 60 * i, false, p.RankTier, null, color, 48) },
+            NecLayout.Teams => new[] { new BadgeSpot(1146 - 2 - 34, RowTop(i) + shift - 1, false, p.RankTier, null, color, 34) },
             _ => new[]
             {
-                new BadgeSpot(63 + 353 * i - 3, 214 + 61 - 28 + 3, false, p.RankTier, null, color, 30),
+                new BadgeSpot(63 + 353 * i - 6, 214 + 61 - 40 + 4, false, p.RankTier, null, color, 40),
                 new BadgeSpot(63 + 353 * i + 345, 254, true, p.RankTier, text, color, 0),
             },
         };
@@ -220,8 +220,8 @@ static class NecScreen
 }
 
 /// <summary>
-/// Иконка ранга: кружок цвета медали Dota (Рекрут — бронза … Легенда — золото, Божество — лёд, Титан — красный)
-/// с числом звёзд внутри; у Титана — звезда, медали нет — «?».
+/// Иконка ранга: значок медали Dota, как в клиенте (<see cref="RankArt"/>, без звёзд). Значок ещё не скачан —
+/// кружок цвета медали (Рекрут — бронза … Легенда — золото, Божество — лёд, Титан — красный) с числом звёзд.
 /// </summary>
 static class RankIcon
 {
@@ -241,6 +241,8 @@ static class RankIcon
     public static FrameworkElement Build(int rankTier, double size)
     {
         int medal = rankTier / 10 is var m and >= 1 and <= 8 ? m : 0, stars = rankTier % 10;
+        if (medal > 0 && RankArt.Medal(medal) is { } art)
+            return new System.Windows.Controls.Image { Source = art, Width = size, Height = size, Stretch = System.Windows.Media.Stretch.Uniform };
         var c = Medal[medal];
         Color Shade(double k) => Color.FromRgb((byte)(c.R * k), (byte)(c.G * k), (byte)(c.B * k));
         var light = Color.FromRgb((byte)Math.Min(255, c.R + 60), (byte)Math.Min(255, c.G + 60), (byte)Math.Min(255, c.B + 60));

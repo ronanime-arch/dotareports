@@ -134,6 +134,7 @@ sealed class AppController
     {
         Directory.CreateDirectory(Paths.Root);
         ReminderSound.Use(_reminders.Sounds); // звуки напоминаний — из настроек (микшер)
+        _ = RankArt.EnsureAsync(); // значки медалей Dota для лобби NEC — один раз в папку данных
         // Приёмник GSI — первым делом: окно токена и вход в Steam могут ждать сколько угодно, а Dota уже шлёт данные.
         string? gsiError = null;
         try

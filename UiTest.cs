@@ -20,6 +20,7 @@ static class UiTest
         Directory.CreateDirectory(dir);
         BitmapSource? shot = backdrop != null && File.Exists(backdrop) ? new BitmapImage(new Uri(Path.GetFullPath(backdrop))) : null;
         var heroes = LoadHeroes();
+        RankArt.EnsureAsync().GetAwaiter().GetResult();
         string H(int id) => heroes.GetValueOrDefault(id, $"#{id}");
 
         var rating = new RatingWindow();
@@ -130,6 +131,7 @@ static class UiTest
     /// <summary>--badge-test: кто узнан на снимке экрана кастомки (в .txt) и снимок со значками ранга (в .png) — тем же кодом, что в игре.</summary>
     public static void Badges(string shotFile, NecLayout layout, DateTime at, string file)
     {
+        RankArt.EnsureAsync().GetAwaiter().GetResult(); // значки медалей — как в игре
         var matcher = new AvatarMatcher();
         matcher.SetCandidates(NecLobby.Load(at, TimeSpan.FromMinutes(20)), NecLobby.OwnAvatars());
         List<(int Index, NecPlayer Player, BadgeSpot[] Spots, string Debug)> found;
