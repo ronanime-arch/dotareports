@@ -51,6 +51,14 @@ sealed class RatingWindow : GlassWindow
         foreach (var e in body) panel.Children.Add(e);
         panel.Children.Add(Glass.Text(footer, 11.5, Glass.Muted, top: 8));
         Content = Glass.Panel(panel, 16, new Thickness(14, 12, 14, 12));
+        // в теле кнопки — рамки с действием в Tag (ник в лобби NEC — профиль Steam): нажимаются, как ↻ и ✕
+        void Register(object node)
+        {
+            if (node is Border { Tag: Action click } b) AddButton(b, click);
+            if (node is DependencyObject d)
+                foreach (var child in LogicalTreeHelper.GetChildren(d)) Register(child);
+        }
+        Register(panel);
     }
 
     /// <summary>Рейтинг по макету: плитки 2×2, поведение с графиком, строки итогов.</summary>
