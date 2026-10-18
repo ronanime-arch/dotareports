@@ -63,13 +63,15 @@ sealed class AvatarMatcher
     public int Count => _all.Count;
 
     /// <summary>Игрок с этой аватаркой; null — не узнан уверенно или это вы. Debug — лучший и второй счёт.</summary>
-    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug) => Match(image, area, out debug, out _);
+    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug) => Match(image, area, out debug, out _, out _);
 
     /// <param name="sure">Узнан уверенно — игрок или вы (для подбора сдвига строк, где ваша строка тоже в счёт).</param>
+    /// <param name="fresh">Узнан уверенно среди свежих записей NEC (комнаты) — игрок или вы.</param>
     /// <param name="small">Аватарка 32 px (выбор команды): совпадения ниже — 0,67–0,72 у игроков при отрыве 0,4+,
     /// чужие и «?» — до 0,58 при отрыве до 0,27 (снимок 17.10), поэтому пороги свои.</param>
-    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug, out bool sure, bool small = false)
+    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug, out bool sure, out bool fresh, bool small = false)
     {
+        fresh = false;
         var v = Vector(image, area);
         if (LooksDefault(v))
         {
@@ -80,7 +82,7 @@ sealed class AvatarMatcher
         var (p1, s1, g1, own1) = Best(v, _recent);
         if (s1 >= (small ? 0.62 : MinScore) && g1 >= (small ? 0.3 : MinGap))
         {
-            (debug, sure) = ($"{(own1 ? "вы" : p1?.Name ?? "-")} {s1:0.00}/{g1:0.00}", true);
+            (debug, sure, fresh) = ($"{(own1 ? "вы" : p1?.Name ?? "-")} {s1:0.00}/{g1:0.00}", true, true);
             return own1 ? null : p1;
         }
         // 2) все известные NEC — кандидатов много, второе место выше: нужен высокий счёт
@@ -192,19 +194,28 @@ static class NecScreen
         _ => CardStrip,
     };
 
-    /// <summary>Узнанные игроки: номер строки или карточки, кто там, сдвиг панели команд и счёт сравнения (Debug).</summary>
+    /// <summary>
+    /// Узнанные игроки: номер строки или карточки, кто там, сдвиг панели команд и счёт сравнения (Debug).
+    /// До выбора героя экран может быть любым из двух: раскладка не того экрана ложится на картинку кастомки, и среди
+    /// всех 250 из кэша NEC кто-нибудь да совпадёт (mary 0,79 в «выборе команды» на снимке подключения 17.10). Поэтому
+    /// раскладку берём, только если в ней уверенно узнан хоть кто-то из свежих записей NEC (или вы): в раскладке
+    /// не того экрана таких не бывает (там 0), а свежих в комнате бывает всего 3–4.
+    /// </summary>
     public static List<ScreenHit> Read(Bitmap strip, NecLayout layout, AvatarMatcher matcher)
     {
         int shift = layout == NecLayout.Teams ? TeamsShift(strip, matcher) : 0;
         var found = new List<ScreenHit>();
-        int count = layout == NecLayout.Cards ? 5 : 10;
+        int count = layout == NecLayout.Cards ? 5 : 10, fresh = 0;
         for (int i = 0; i < count; i++)
         {
-            var p = matcher.Match(strip, Avatar(layout, i, shift), out var debug, out _, layout == NecLayout.Teams);
+            var p = matcher.Match(strip, Avatar(layout, i, shift), out var debug, out _, out bool f, layout == NecLayout.Teams);
+            if (f) fresh++;
             if (p != null) found.Add(new ScreenHit(layout, i, p, shift, debug));
         }
-        return found;
+        return layout == NecLayout.Cards || fresh >= MinFresh ? found : new List<ScreenHit>();
     }
+
+    const int MinFresh = 1;
 
     /// <summary>Значки узнанного игрока (после того как, например, догрузилось звание).</summary>
     public static BadgeSpot[] Spots(ScreenHit hit) => Spots(hit.Layout, hit.Index, hit.Shift, hit.Player);
@@ -232,7 +243,7 @@ static class NecScreen
         if (layout == NecLayout.Teams) yield return $"сдвиг панели команд: {shift}";
         for (int i = 0; i < (layout == NecLayout.Cards ? 5 : 10); i++)
         {
-            matcher.Match(strip, Avatar(layout, i, shift), out var debug, out _, layout == NecLayout.Teams);
+            matcher.Match(strip, Avatar(layout, i, shift), out var debug, out _, out _, layout == NecLayout.Teams);
             yield return $"  строка {i + 1}: {debug}";
         }
     }
@@ -255,7 +266,7 @@ static class NecScreen
             int count = 0;
             for (int i = 0; i < 10; i++)
             {
-                matcher.Match(strip, Avatar(NecLayout.Teams, i, shift), out _, out bool sure, small: true);
+                matcher.Match(strip, Avatar(NecLayout.Teams, i, shift), out _, out bool sure, out _, small: true);
                 if (sure) count++;
             }
             return count;
