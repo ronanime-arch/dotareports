@@ -71,6 +71,7 @@ sealed class AppController
     enum NecShow { Hotkey, Fresh, Room, GameStart }
     DateTime _necDismissedAt;
     const int NecRoomMin = 3;   // меньше — не комната: поиск игрока, друзья, окно итогов матча
+    const int RoomSize = 10;    // комната кастомки IM — 5 на 5, вы в том числе
     bool _necDismissed;          // лобби закрыли ✕ — само не показываем до следующей кастомки
     readonly DispatcherTimer _ratingHide = new();
     // Состав кастомки NEC иногда приходит уже после её загрузки (17.10: вторая пачка ников — на экране подключения),
@@ -1028,6 +1029,9 @@ sealed class AppController
         _necNewest = newest;
         // закрыли ✕ раньше, а теперь в комнате только пришедшие после — это уже другая комната
         if (_necDismissed && players.Count > 0 && players.All(p => p.SeenAt > _necDismissedAt)) _necDismissed = false;
+        // кастомка: кого-то уже узнали на экране — карточка по экрану (ShowScreenLobby), кэш NEC её не перебивает,
+        // иначе число игроков скачет между двумя составами
+        if (_inCustom && _onScreen.Count > 0) return;
         if (players.Count >= NecRoomMin) ShowNecLobby(_inCustom ? NecShow.GameStart : NecShow.Room, players);
     }
 
@@ -1128,7 +1132,9 @@ sealed class AppController
     void ShowScreenLobby()
     {
         var recognized = _onScreen.Values.ToList();
-        var extra = NecLobby.Load(DateTime.Now).Where(p => !_onScreen.ContainsKey(p.SteamId)).ToList();
+        // не узнанных добавляем, только пока в комнате есть места: в кэше за 10 минут и игроки прошлой комнаты
+        var extra = NecLobby.Load(DateTime.Now).Where(p => !_onScreen.ContainsKey(p.SteamId))
+            .OrderByDescending(p => p.SeenAt).Take(Math.Max(0, RoomSize - 1 - recognized.Count)).ToList();
         (_necSnapshot, _necSnapshotAt) = (recognized.Concat(extra).ToList(), DateTime.Now);
         if (_necDismissed) return; // закрыли ✕ — состав запомнили, но сами не лезем
         var body = new List<System.Windows.UIElement>();
