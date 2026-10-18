@@ -160,7 +160,11 @@ sealed class TurboCard : GlassWindow
                         col.Children.Add(Glass.Text($"{(k == 0 ? "сразу" : AwakeningInfo.StageMinutes[k] + " мин")}: {string.Join("; ", stages[k])}", 11.5, Glass.GoldLight, top: compact ? 1 : 3));
             var tile = Glass.Tile(col, padding: compact ? new Thickness(8, 4, 8, 5) : null);
             tile.Margin = new Thickness(3, 0, 3, 0);
-            if (i == 0) Gilded(tile);
+            if (i == 0) // «Бери» — яркой рамкой, как прежде вокруг картинки на экране
+            {
+                tile.BorderBrush = Glass.B(PickFrame.FrameColor);
+                tile.BorderThickness = new Thickness(2);
+            }
             Grid.SetColumn(tile, i);
             columns.Children.Add(tile);
         }

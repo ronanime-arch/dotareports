@@ -261,6 +261,28 @@ static class Program
                 Path.Combine(Paths.Root, "badge_test"));
             return;
         }
+        if (args.Length >= 1 && args[0] == "--awakening-test")
+        {
+            // описания Пробуждения всех героев из .vpk кастомки: как в кастомке → коротко, в awakening_test.txt
+            var vpk = Setup.FindDota() is { } dota ? Path.GetFullPath(Path.Combine(dota, @"..\..\workshop\content\570\3320645051\3320645051.vpk")) : null;
+            var lines = new List<string>();
+            if (vpk != null && File.Exists(vpk) && AwakeningInfo.ReadText(vpk) is { } text)
+            {
+                var names = AwakeningInfo.AbilityNames();
+                var raw = AwakeningInfo.Parse(text, names, simplify: false).All;
+                foreach (var (hero, stages) in AwakeningInfo.Parse(text, names).All.OrderBy(h => h.Key))
+                {
+                    lines.Add(hero);
+                    for (int k = 0; k < stages.Length; k++)
+                    {
+                        foreach (var e in raw[hero][k]) lines.Add($"  {AwakeningInfo.StageMinutes[k],2} было: {e}");
+                        foreach (var e in stages[k]) lines.Add($"  {AwakeningInfo.StageMinutes[k],2} стало: {e}");
+                    }
+                }
+            }
+            File.WriteAllLines(Path.Combine(Paths.Root, "awakening_test.txt"), lines);
+            return;
+        }
         if (args.Length >= 1 && args[0] == "--nec-test")
         {
             // состав комнаты NEC из его кэша за 10 минут до момента (по умолчанию — сейчас), в nec_test.txt: --nec-test 2026-10-17T11:09

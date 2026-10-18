@@ -44,7 +44,6 @@ sealed class AppController
     bool _choiceBusy;
     int _choiceCard = -1;
     int[]? _choicesShown;
-    bool _choiceMade;   // в этой кастомке герой уже выбран (GSI) — рамку вокруг картинки не показываем
     string _customGame = "";
     GsiState? _customLast;   // последнее сообщение идущей кастомки, где есть ваш герой
     string? _customWinner;
@@ -474,7 +473,6 @@ sealed class AppController
             _customGame = Path.GetFileNameWithoutExtension(s.CustomGame) ?? "";
             _choiceCard = s.TeamSlot;
             _choicesShown = null;
-            _choiceMade = false;
             _turboCard.ResetDismissed();
             _turboCard.Refresh = () => _choicesShown = null; // ↻ — перечитать три героя с экрана на следующем такте
             _choiceTimer.Start();
@@ -486,12 +484,6 @@ sealed class AppController
             if (_choicesShown == null && _choiceReader is { LastScores.Length: > 0 } reader)
                 Log.Write("Кастомка: три героя на выбор не узнаны (" + reader.LastScores + ")");
             _turboCard.Hide();
-            _pickFrame.ShowAround(null);
-        }
-        if (choosing && s.HeroId > 0 && !_choiceMade)
-        {
-            _choiceMade = true; // герой выбран — рамка вокруг одной из трёх картинок уже не нужна
-            _pickFrame.ShowAround(null);
         }
 
         if (custom && (s.WinTeam is "radiant" or "dire")) _customWinner = s.WinTeam;
@@ -529,10 +521,7 @@ sealed class AppController
             var awakening = await _awakening;
             if (!_choiceTimer.IsEnabled) return;
             _turboCard.RenderChoices(_draftData, heroes, _customGame, id => _heroNames.TryGetValue(id, out var n) ? awakening?.Of(n) : null);
-            _turboCard.ShowChoices();
-            // рамка — вокруг той из трёх картинок, кого советует «Бери»
-            int k = Array.IndexOf(heroes, _turboCard.Recommended);
-            _pickFrame.ShowAround(k >= 0 && !_choiceMade && !_turboCard.Dismissed ? ChoiceReader.ThumbArea(card, k) : null);
+            _turboCard.ShowChoices(); // «Бери» обведён в самой полосе — рядом с тем, что даёт Пробуждение, а не на картинке
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or ArgumentException)
         {
