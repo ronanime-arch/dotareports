@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -58,6 +59,8 @@ static class NecLobby
     {
         var cache = Path.Combine(Root, "Cache");
         long to = new DateTimeOffset(until).ToUnixTimeMilliseconds(), from = to - (long)(window ?? Window).TotalMilliseconds;
+        // игроки прошлой найденной игры (кто-то не принял, вышли до начала) записаны раньше, чем найдена эта — не берём
+        if (MatchFound(until) is { } found) from = Math.Max(from, new DateTimeOffset(found).ToUnixTimeMilliseconds() - 5000);
         if (everyone) (from, to) = (long.MinValue, long.MaxValue);
         var own = OwnSteamIds();
         var seen = new Dictionary<string, (long At, string Name)>();
@@ -125,6 +128,62 @@ static class NecLobby
                 hasProfile, rank, closed, wins, losses, country, last, Avatar(sid)));
         }
         return players;
+    }
+
+    const int JournalTail = 768 * 1024;
+    static readonly object MatchesGate = new();
+    static (string Path, DateTime Stamp, long Length, List<(string Id, DateTime At)> Found) _matches;
+
+    /// <summary>
+    /// Когда NEC нашёл последнюю игру до <paramref name="until"/>: её matchId впервые в состоянии MATCHED в телеметрии NEC
+    /// (operations\client-*.jsonl, событие match.settlement). Профили игроков NEC пишет в кэш сразу, как игра найдена
+    /// (18.10: найдена 11:22:39 UTC — записаны 11:22:40). null — найденных игр в журнале нет (комната без подбора).
+    /// </summary>
+    public static DateTime? MatchFound(DateTime until)
+    {
+        var dir = Path.Combine(Root, "operations");
+        if (!Directory.Exists(dir)) return null;
+        // NEC пишет в client-0 и, дойдя до 2 МБ, сдвигает файлы: последние игры — в двух самых свежих
+        var files = new DirectoryInfo(dir).GetFiles("client-*.jsonl").OrderByDescending(f => f.LastWriteTimeUtc).Take(2).ToList();
+        if (files.Count == 0) return null;
+        List<(string Id, DateTime At)> found;
+        lock (MatchesGate) // зовут и из потока окна, и из фонового (чтение экрана)
+        {
+            if (_matches.Path != files[0].FullName || _matches.Stamp != files[0].LastWriteTimeUtc || _matches.Length != files[0].Length)
+                _matches = (files[0].FullName, files[0].LastWriteTimeUtc, files[0].Length, ReadMatches(files));
+            found = _matches.Found;
+        }
+        // у каждой игры — первый раз, когда она найдена; из них последний до until
+        var starts = found.GroupBy(m => m.Id).Select(g => g.Min(m => m.At)).Where(at => at <= until).ToList();
+        return starts.Count > 0 ? starts.Max() : null;
+    }
+
+    // найденные игры (matchId, когда) из хвостов журналов: журнал пишется постоянно, последние игры — в конце
+    static List<(string Id, DateTime At)> ReadMatches(List<FileInfo> files)
+    {
+        var found = new List<(string, DateTime)>();
+        foreach (var f in files)
+            try
+            {
+                using var stream = new FileStream(f.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                if (stream.Length > JournalTail) stream.Seek(-JournalTail, SeekOrigin.End);
+                using var reader = new StreamReader(stream);
+                if (stream.Position > 0) reader.ReadLine(); // строка, разрезанная началом хвоста
+                while (reader.ReadLine() is { } line)
+                {
+                    if (!line.Contains("\"match.settlement\"") || !line.Contains("\"matchState\":\"MATCHED\"")) continue;
+                    using var doc = JsonDocument.Parse(line);
+                    var root = doc.RootElement;
+                    if (Str(root, "time") is { } time && root.TryGetProperty("detail", out var d) && Str(d, "matchId") is { Length: > 0 } id
+                        && DateTime.TryParse(time, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at))
+                        found.Add((id, at.ToLocalTime()));
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+                Log.Write($"NEC: журнал {f.Name} не прочитан: {ex.Message}");
+            }
+        return found;
     }
 
     /// <summary>Файл стандартной аватарки Steam «?» из кэша NEC — с ней сравниваем, чтобы такие аватарки никого не выдавали.</summary>
