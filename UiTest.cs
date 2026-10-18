@@ -70,17 +70,17 @@ static class UiTest
         Save(card.Root, 190, shot, new Point(1724, 120), Path.Combine(dir, "pick"));
         card.Render(data, snap, "с экрана: банов 2, занято 4", ownHero: 74);
         Save(card.Root, 190, shot, new Point(1724, 120), Path.Combine(dir, "pick_own"));
-        card.RenderChoices(data, new[] { 129, 3, 119 }, "3320645051", id => id == 3
+        card.RenderChoices(data, new[] { 129, 3, 77 }, "3320645051", id => id == 3
             ? new[] { new List<string> { "Enfeeble: эффект удвоен" }, new List<string> { "Brain Sap: выпускает 3 раза подряд" }, new List<string>() }
             : null);
         Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices"));
-        // худший случай: три героя с самыми длинными описаниями из .vpk самой кастомки (если скачана)
+        // худший случай: два героя с самыми длинными описаниями из .vpk самой кастомки (если скачана) и Ликан — с отзывами
         var names = data.HeroInternalNames();
         if (Setup.FindDota() is { } dota
             && AwakeningInfo.Load(Path.GetFullPath(Path.Combine(dota, @"..\..\workshop\content\570\3320645051\3320645051.vpk")), AwakeningInfo.AbilityNames()) is { } awakening)
         {
             int Length(int id) => awakening.Of(names.GetValueOrDefault(id))?.Sum(s => s.Sum(e => e.Length)) ?? 0;
-            var longest = names.Keys.OrderByDescending(Length).Take(3).ToArray();
+            var longest = names.Keys.Where(id => id != 77).OrderByDescending(Length).Take(2).Append(77).ToArray();
             card.RenderChoices(data, longest, "3320645051", id => awakening.Of(names.GetValueOrDefault(id)));
             Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices_long"));
             double scale = card.Root.LayoutTransform is ScaleTransform st ? st.ScaleX : 1;

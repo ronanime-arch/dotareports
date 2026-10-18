@@ -14,7 +14,7 @@ sealed record CustomGameRecord(string Game, DateTime At, int Hero, bool? Win, in
 
 /// <summary>Кого из трёх брать: оценка (выше — лучше), ваши игры на герое здесь и в обычной Доте, его винрейт в Турбо.</summary>
 sealed record CustomChoice(int Hero, double Score, int HereGames, double HereGpm, int HereWins, int HereKnown, double HereKda,
-    int UsualGames, int UsualWins, double Turbo)
+    int UsualGames, int UsualWins, double Turbo, CommunityVoice? Voice = null, double ScoreWithoutVoice = 0)
 {
     public string Here => HereGames == 0 ? "здесь ещё не играли"
         : $"здесь {HereGames} {Words.Plural(HereGames, "игра", "игры", "игр")}" + (HereKnown > 0 ? $", побед {HereWins} из {HereKnown}" : "")
@@ -24,6 +24,39 @@ sealed record CustomChoice(int Hero, double Score, int HereGames, double HereGpm
         + $" · Турбо {Turbo * 100:0.0}%";
 
     public double UsualRate => UsualGames > 0 ? 100.0 * UsualWins / UsualGames : 0;
+}
+
+/// <summary>Отзывы о герое: сколько разных людей просили его ослабить и за какой период.</summary>
+sealed record CommunityVoice(int Authors, string Period)
+{
+    public string People => $"{Authors} {Words.Plural(Authors, "человек", "человека", "человек")}";
+}
+
+/// <summary>
+/// Что пишут игроки о кастомке IM Пробуждение (мастерская 3320645051): в сети о ней почти ничего, у китайского сообщества —
+/// видео на B站 без текста. Единственный текстовый источник — комментарии в мастерской Steam (469 штук на 17.10.2026):
+/// здесь герои, которых просили ослабить хотя бы двое разных людей (один автор — не в счёт). Карту обновили 15.10.2026,
+/// жалобы старше — сильных могли уже ослабить, поэтому при них период.
+/// </summary>
+static class CommunityPicks
+{
+    public const string Game = "3320645051";
+    const double PerAuthor = 0.01, MaxShift = 0.06; // центр приора в «кого брать» — +1 п.п. винрейта за человека, не больше 6
+
+    static readonly Dictionary<string, CommunityVoice> Strong = new()
+    {
+        ["npc_dota_hero_lycan"] = new(16, "07–10.2026"),
+        ["npc_dota_hero_furion"] = new(7, "03–07.2026"),
+        ["npc_dota_hero_abaddon"] = new(6, "04–10.2026"),
+        ["npc_dota_hero_muerta"] = new(2, "03–10.2026"),
+        ["npc_dota_hero_invoker"] = new(2, "03–04.2026"),
+        ["npc_dota_hero_pangolier"] = new(2, "04.2026"),
+    };
+
+    public static CommunityVoice? Of(string game, string? heroName) =>
+        game == Game && heroName != null && Strong.TryGetValue(heroName, out var v) ? v : null;
+
+    public static double Shift(CommunityVoice? v) => v == null ? 0 : Math.Min(MaxShift, PerAuthor * v.Authors);
 }
 
 /// <summary>
@@ -69,12 +102,15 @@ static class CustomStats
     /// Три героя на выбор — от лучшего. Есть хотя бы 3 ваши игры в этой кастомке — по золоту в минуту на герое
     /// (против ботов побеждают почти всегда, а GPM показывает, насколько герой у вас разгоняется), сглаженному
     /// к вашему среднему; иначе — по вашим играм на герое в обычной Доте, сглаженным к его винрейту в Турбо.
+    /// Отзывы о слишком сильных героях (<see cref="CommunityPicks"/>) сдвигают этот винрейт вверх: решают, пока своих игр
+    /// на героях мало, а золото в минуту на сыгранных здесь героях перевешивает.
     /// </summary>
     public static (List<CustomChoice> Choices, bool ByCustom) Rank(DraftData data, string game, IReadOnlyList<int> heroes)
     {
         var here = Load().Where(r => r.Game == game && r.Gpm > 0).ToList();
         bool byCustom = here.Count >= MinGames;
         double avgGpm = here.Count > 0 ? here.Average(r => r.Gpm) : 0;
+        var names = game == CommunityPicks.Game ? data.HeroInternalNames() : new Dictionary<int, string>();
         var result = new List<CustomChoice>();
         foreach (var hero in heroes)
         {
@@ -84,13 +120,21 @@ static class CustomStats
             double kda = games.Count > 0 ? games.Average(r => (r.Kills + r.Assists) / (double)Math.Max(1, r.Deaths)) : 0;
             double turbo = data.ModeWinrate(hero, "TURBO") is { } wr ? wr.Winrate / 100 : 0.5;
             var usual = data.Pool.TryGetValue(hero, out var pool) && pool.Games > 0 ? pool : (Games: 0, Wins: 0);
-            double usualRate = (usual.Wins + OwnPrior * turbo) / (usual.Games + OwnPrior);
-            double score = byCustom ? (games.Sum(r => r.Gpm) + GpmPrior * avgGpm) / (games.Count + GpmPrior) + usualRate : usualRate;
-            result.Add(new CustomChoice(hero, score, games.Count, gpm, known.Count(r => r.Win == true), known.Count, kda,
-                usual.Games, usual.Wins, turbo));
+            var voice = CommunityPicks.Of(game, names.GetValueOrDefault(hero));
+            double Score(double shift)
+            {
+                double usualRate = (usual.Wins + OwnPrior * (turbo + shift)) / (usual.Games + OwnPrior);
+                return byCustom ? (games.Sum(r => r.Gpm) + GpmPrior * avgGpm) / (games.Count + GpmPrior) + usualRate : usualRate;
+            }
+            result.Add(new CustomChoice(hero, Score(CommunityPicks.Shift(voice)), games.Count, gpm, known.Count(r => r.Win == true), known.Count, kda,
+                usual.Games, usual.Wins, turbo, voice, Score(0)));
         }
         return (result.OrderByDescending(c => c.Score).ToList(), byCustom);
     }
+
+    /// <summary>Первым его сделали отзывы в мастерской: без них первым был бы другой.</summary>
+    public static bool DecidedByVoice(IReadOnlyList<CustomChoice> choices) =>
+        choices[0].Voice != null && choices.Skip(1).Any(o => o.ScoreWithoutVoice > choices[0].ScoreWithoutVoice);
 
     /// <summary>Почему первый из трёх: на чём основана оценка и как с этим у двух других.</summary>
     public static string Why(IReadOnlyList<CustomChoice> choices, bool byCustom, Func<int, string> name)
@@ -98,14 +142,17 @@ static class CustomStats
         var best = choices[0];
         var rest = choices.Skip(1).ToList();
         string Games(int n) => $"{n} {Words.Plural(n, "игру", "игры", "игр")}";
+        if (DecidedByVoice(choices) && best.Voice is { } v)
+            return $"в мастерской Steam {v.People} ({v.Period}) просили его ослабить — это перевесило ваши игры и Турбо";
+        string voice = best.Voice is { } bv ? $"; в мастерской его просили ослабить {bv.People}" : "";
         if (byCustom && best.HereGames > 0)
             return $"здесь у вас на нём {best.HereGpm:0} золота в минуту за {Games(best.HereGames)}; "
-                   + string.Join(", ", rest.Select(o => o.HereGames > 0 ? $"{name(o.Hero)} — {o.HereGpm:0}" : $"на {name(o.Hero)} здесь не играли"));
+                   + string.Join(", ", rest.Select(o => o.HereGames > 0 ? $"{name(o.Hero)} — {o.HereGpm:0}" : $"на {name(o.Hero)} здесь не играли")) + voice;
         if (best.UsualGames > 0)
             return $"в Доте у вас на нём {best.UsualRate:0}% побед за {Games(best.UsualGames)}; "
-                   + string.Join(", ", rest.Select(o => o.UsualGames > 0 ? $"{name(o.Hero)} — {o.UsualRate:0}% за {Games(o.UsualGames)}" : $"на {name(o.Hero)} не играли"));
+                   + string.Join(", ", rest.Select(o => o.UsualGames > 0 ? $"{name(o.Hero)} — {o.UsualRate:0}% за {Games(o.UsualGames)}" : $"на {name(o.Hero)} не играли")) + voice;
         return $"ни на ком из трёх вы не играли — у него выше винрейт в Турбо: {best.Turbo * 100:0.0}% ("
-               + string.Join(", ", rest.Select(o => $"{name(o.Hero)} {o.Turbo * 100:0.0}%")) + ")";
+               + string.Join(", ", rest.Select(o => $"{name(o.Hero)} {o.Turbo * 100:0.0}%")) + ")" + voice;
     }
 }
 
