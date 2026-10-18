@@ -122,7 +122,8 @@ sealed class TurboCard : GlassWindow
     {
         Begin(ChoicesWidth, 16, compact ? new Thickness(12, 6, 10, 8) : new Thickness(14, 10, 12, 12));
         string Name(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
-        string basis = byCustom ? "по вашим играм здесь" : "по вашим играм в обычной Доте (здесь их пока меньше трёх)";
+        string basis = CustomStats.DecidedByVoice(choices) ? "по отзывам в мастерской Steam"
+            : byCustom ? "по вашим играм здесь" : "по вашим играм в обычной Доте (здесь их пока меньше трёх)";
         string why = CustomStats.Why(choices, byCustom, Name);
         if (compact)
         {
@@ -141,7 +142,12 @@ sealed class TurboCard : GlassWindow
             var c = choices[i];
             columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var col = new StackPanel();
-            col.Children.Add(Glass.Text(Name(c.Hero), compact ? 16 : 18, i == 0 ? Glass.Good : Glass.Ink, serif: true, bold: true));
+            var title = Glass.Text(Name(c.Hero), compact ? 16 : 18, i == 0 ? Glass.Good : Glass.Ink, serif: true, bold: true);
+            // отзывы в мастерской — в строке имени: строк у полосы под кнопкой в обрез
+            if (c.Voice is { } v)
+                title.Inlines.Add(new System.Windows.Documents.Run($"  просили ослабить: {v.People}, {v.Period}")
+                    { FontFamily = Glass.Sans, FontSize = 11, FontWeight = FontWeights.Normal, Foreground = Glass.B(Glass.GoldLight) });
+            col.Children.Add(title);
             if (compact) col.Children.Add(Glass.Text(c.Here + " · " + c.Usual, 11.5, Glass.Muted));
             else
             {
