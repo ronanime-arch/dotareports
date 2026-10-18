@@ -74,6 +74,19 @@ static class UiTest
             ? new[] { new List<string> { "Enfeeble: эффект удвоен" }, new List<string> { "Brain Sap: выпускает 3 раза подряд" }, new List<string>() }
             : null);
         Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices"));
+        // худший случай: три героя с самыми длинными описаниями из .vpk самой кастомки (если скачана)
+        var names = data.HeroInternalNames();
+        if (Setup.FindDota() is { } dota
+            && AwakeningInfo.Load(Path.GetFullPath(Path.Combine(dota, @"..\..\workshop\content\570\3320645051\3320645051.vpk")), AwakeningInfo.AbilityNames()) is { } awakening)
+        {
+            int Length(int id) => awakening.Of(names.GetValueOrDefault(id))?.Sum(s => s.Sum(e => e.Length)) ?? 0;
+            var longest = names.Keys.OrderByDescending(Length).Take(3).ToArray();
+            card.RenderChoices(data, longest, "3320645051", id => awakening.Of(names.GetValueOrDefault(id)));
+            Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices_long"));
+            double scale = card.Root.LayoutTransform is ScaleTransform st ? st.ScaleX : 1;
+            File.WriteAllText(Path.Combine(dir, "choices_long.txt"),
+                $"высота {card.Root.DesiredSize.Height:0} из {TurboCard.ChoicesRoom:0} под кнопкой, масштаб {scale:0.###}");
+        }
 
         // иконки ранга: все медали со звёздами, Титан и «нет медали» — в размерах экрана подключения и выбора команды
         var sheet = new System.Windows.Controls.StackPanel();
@@ -99,7 +112,7 @@ static class UiTest
         root.Measure(new Size(width, double.PositiveInfinity));
         root.Arrange(new Rect(new Size(width, root.DesiredSize.Height)));
         root.UpdateLayout();
-        double h = Math.Ceiling(root.ActualHeight), w = Math.Ceiling(width);
+        double h = Math.Ceiling(root.DesiredSize.Height), w = Math.Ceiling(width); // не ActualHeight: в нём нет масштаба (LayoutTransform)
         foreach (var scale in new[] { 1.0, 1.25 })
         {
             // окно — отдельным снимком как есть (VisualBrush растянул бы по границам вылезшего содержимого)

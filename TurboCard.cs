@@ -65,18 +65,27 @@ sealed class TurboCard : GlassWindow
 
     /// <summary>
     /// В кастомке — широкой полосой под карточками игроков: они до y ≈ 820, кнопка «Повторный выбор героя» до 850,
-    /// справа с x 1234 — чат. Ширина — до чата.
+    /// справа с x 1234 — чат. Ширина — до чата. Координаты — экрана, не рабочей области: панель задач Dota закрывает.
     /// </summary>
     public void ShowChoices()
     {
         if (Dismissed) return;
-        var wa = SystemParameters.WorkArea;
-        Left = wa.Left + 63;
-        Top = wa.Top + 856;
+        Left = ChoicesLeft;
+        Top = ChoicesTop; // выше не поднимаем — закроет кнопку; не влезает — ужата в RenderChoices
         if (!IsVisible) Show();
-        // длинные описания Пробуждения — карточка выше, чтобы низ не ушёл за экран; три героя на выбор (y до 383) не закрываем
-        UpdateLayout();
-        Top = Math.Max(wa.Top + 400, Math.Min(Top, wa.Bottom - ActualHeight - 4));
+    }
+
+    const double ChoicesLeft = 63, ChoicesTop = 856, ChoicesWidth = 1165;
+    const double MinScale = 0.85; // мельче текст уже не прочитать
+
+    /// <summary>Сколько полосе места под кнопкой «Повторный выбор героя» — до низа экрана.</summary>
+    public static double ChoicesRoom => SystemParameters.PrimaryScreenHeight - ChoicesTop - 4;
+
+    // Высота содержимого при ширине полосы — до показа окна.
+    double ContentHeight()
+    {
+        Root.Measure(new Size(ChoicesWidth, double.PositiveInfinity));
+        return Root.DesiredSize.Height;
     }
 
     void Begin(double width, double radius, Thickness padding)
@@ -90,31 +99,60 @@ sealed class TurboCard : GlassWindow
     /// <summary>
     /// Кастомка с выбором из трёх: кого брать и почему — по вашим играм здесь, а пока их мало — в обычной Доте;
     /// по колонке на героя: ваши игры и что даёт Пробуждение (кастомка IM) на 0, 10 и 15 минуте.
+    /// Длинные описания не влезают под кнопку «Повторный выбор героя» — плотнее, а не хватит — мельче (не ниже <see cref="MinScale"/>).
     /// </summary>
     public void RenderChoices(DraftData data, IReadOnlyList<int> heroes, string game, Func<int, List<string>[]?> awakening)
     {
-        Begin(1165, 16, new Thickness(14, 10, 12, 12));
         var (choices, byCustom) = CustomStats.Rank(data, game, heroes);
         Recommended = choices[0].Hero;
-        string Name(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
-        _panel.Children.Add(Glass.Header(this, Name(choices[0].Hero), 24, Glass.Ink, null, Refresh,
-            subtitle: "БЕРИ · " + (byCustom ? "по вашим играм здесь" : "по вашим играм в обычной Доте (здесь их пока меньше трёх)")));
-        _panel.Children.Add(Glass.Text("Почему: " + CustomStats.Why(choices, byCustom, Name), 13, Glass.Ink, top: 4));
+        double room = ChoicesRoom;
+        BuildChoices(data, choices, byCustom, awakening, compact: false);
+        if (ContentHeight() <= room) return;
+        BuildChoices(data, choices, byCustom, awakening, compact: true);
+        // с масштабом текст переносится по ширине 1165/s — высота падает быстрее масштаба, поэтому подбираем шагами
+        for (double s = 1; s > MinScale && ContentHeight() > room;)
+        {
+            s = Math.Max(MinScale, s - 0.025);
+            Root.LayoutTransform = new ScaleTransform(s, s);
+        }
+    }
 
-        var columns = new Grid { Margin = new Thickness(-3, 6, -3, 0) };
+    // compact — шапка в одну строку, «здесь» и «в Доте» одной строкой, отступы меньше
+    void BuildChoices(DraftData data, List<CustomChoice> choices, bool byCustom, Func<int, List<string>[]?> awakening, bool compact)
+    {
+        Begin(ChoicesWidth, 16, compact ? new Thickness(12, 6, 10, 8) : new Thickness(14, 10, 12, 12));
+        string Name(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
+        string basis = byCustom ? "по вашим играм здесь" : "по вашим играм в обычной Доте (здесь их пока меньше трёх)";
+        string why = CustomStats.Why(choices, byCustom, Name);
+        if (compact)
+        {
+            _panel.Children.Add(Glass.Header(this, "Бери " + Name(choices[0].Hero), 18, Glass.Ink, null, Refresh));
+            _panel.Children.Add(Glass.Text($"{char.ToUpper(basis[0])}{basis[1..]} · почему: {why}", 12, Glass.Ink, top: 1));
+        }
+        else
+        {
+            _panel.Children.Add(Glass.Header(this, Name(choices[0].Hero), 24, Glass.Ink, null, Refresh, subtitle: "БЕРИ · " + basis));
+            _panel.Children.Add(Glass.Text("Почему: " + why, 13, Glass.Ink, top: 4));
+        }
+
+        var columns = new Grid { Margin = new Thickness(-3, compact ? 4 : 6, -3, 0) };
         for (int i = 0; i < choices.Count; i++)
         {
             var c = choices[i];
             columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var col = new StackPanel();
-            col.Children.Add(Glass.Text(Name(c.Hero), 18, i == 0 ? Glass.Good : Glass.Ink, serif: true, bold: true));
-            col.Children.Add(Glass.Text(c.Here, 11.5, Glass.Muted));
-            col.Children.Add(Glass.Text(c.Usual, 11.5, Glass.Muted));
+            col.Children.Add(Glass.Text(Name(c.Hero), compact ? 16 : 18, i == 0 ? Glass.Good : Glass.Ink, serif: true, bold: true));
+            if (compact) col.Children.Add(Glass.Text(c.Here + " · " + c.Usual, 11.5, Glass.Muted));
+            else
+            {
+                col.Children.Add(Glass.Text(c.Here, 11.5, Glass.Muted));
+                col.Children.Add(Glass.Text(c.Usual, 11.5, Glass.Muted));
+            }
             if (awakening(c.Hero) is { } stages)
                 for (int k = 0; k < stages.Length; k++)
                     if (stages[k].Count > 0)
-                        col.Children.Add(Glass.Text($"{(k == 0 ? "сразу" : AwakeningInfo.StageMinutes[k] + " мин")}: {string.Join("; ", stages[k])}", 11.5, Glass.GoldLight, top: 3));
-            var tile = Glass.Tile(col);
+                        col.Children.Add(Glass.Text($"{(k == 0 ? "сразу" : AwakeningInfo.StageMinutes[k] + " мин")}: {string.Join("; ", stages[k])}", 11.5, Glass.GoldLight, top: compact ? 1 : 3));
+            var tile = Glass.Tile(col, padding: compact ? new Thickness(8, 4, 8, 5) : null);
             tile.Margin = new Thickness(3, 0, 3, 0);
             if (i == 0) Gilded(tile);
             Grid.SetColumn(tile, i);
