@@ -147,7 +147,7 @@ static class UiTest
         RankArt.EnsureAsync().GetAwaiter().GetResult(); // значки медалей — как в игре
         var matcher = new AvatarMatcher();
         // как в игре: кандидаты — все, кого NEC держит в кэше (знакомых он заново не пишет); at — для старых снимков не важен
-        matcher.SetCandidates(NecLobby.Load(at, TimeSpan.FromMinutes(20)), NecLobby.Load(at, everyone: true), NecLobby.OwnAvatars(), NecLobby.DefaultAvatarFile());
+        matcher.SetCandidates(NecLobby.Load(at, TimeSpan.FromMinutes(20), sinceMatch: false), NecLobby.Load(at, everyone: true), NecLobby.OwnAvatars(), NecLobby.DefaultAvatarFile());
         List<ScreenHit> found;
         List<string> debug;
         using (var shot = new System.Drawing.Bitmap(shotFile))

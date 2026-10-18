@@ -63,7 +63,6 @@ sealed class AppController
     readonly DispatcherTimer _necHide = new();
     readonly DispatcherTimer _necPoll = new() { Interval = TimeSpan.FromSeconds(3) };
     DateTime _necStamp;                     // когда NEC последний раз переписал кэш, который мы прочитали
-    DateTime _necMatchFound;                // когда NEC нашёл последнюю игру (из его журнала)
     DateTime _necNewest = DateTime.Now;     // самый поздний игрок, по которому уже показывали (до запуска программы — не новость)
     List<NecPlayer>? _necSnapshot;
     DateTime _necSnapshotAt;
@@ -1013,18 +1012,6 @@ sealed class AppController
         var stamp = NecLobby.Stamp();
         if (stamp == _necStamp) return;
         _necStamp = stamp;
-        // NEC нашёл новую игру (профили её игроков он пишет сразу) — узнанные на экране прошлой не в счёт: её не приняли
-        // или кто-то не загрузился, а в меню между играми можно и не выйти
-        if (NecLobby.MatchFound(DateTime.Now) is { } found && found != _necMatchFound)
-        {
-            if (_necMatchFound != default)
-            {
-                _onScreen.Clear();
-                _onScreenTeam.Clear();
-                _cardHits.Clear();
-            }
-            _necMatchFound = found;
-        }
         var players = NecLobby.Load(DateTime.Now);
         var newest = players.Count > 0 ? players.Max(p => p.SeenAt) : DateTime.MinValue;
         if (newest <= _necNewest) return;
@@ -1079,7 +1066,7 @@ sealed class AppController
                 if (stamp != _badgeStamp || _avatars.Count == 0)
                 {
                     _badgeStamp = stamp;
-                    _avatars.SetCandidates(NecLobby.Load(DateTime.Now, TimeSpan.FromMinutes(20)), NecLobby.Load(DateTime.Now, everyone: true),
+                    _avatars.SetCandidates(NecLobby.Load(DateTime.Now, TimeSpan.FromMinutes(20), sinceMatch: false), NecLobby.Load(DateTime.Now, everyone: true),
                         NecLobby.OwnAvatars(), NecLobby.DefaultAvatarFile());
                 }
                 // до выбора героя экран бывает двух видов: список подключения из 10 и выбор команды по колонкам —
@@ -1209,9 +1196,18 @@ sealed class AppController
         _necHide.Start();
     }
 
-    // ↻ в лобби: перечитать кэш NEC; посреди идущей кастомки — снимок с её начала (NEC тогда подгружает посторонних).
-    void RefreshNecLobby() =>
+    // ↻ в лобби: до начала кастомки — узнанные на экране (и аватарки NEC — заново на следующем такте), а пока никого —
+    // кэш NEC; посреди идущей кастомки — снимок с её начала (NEC тогда подгружает посторонних).
+    void RefreshNecLobby()
+    {
+        if (_inCustom && CustomBeforeGame.Contains(_gameState) && _onScreen.Count > 0)
+        {
+            _badgeStamp = default;
+            ShowScreenLobby();
+            return;
+        }
         ShowNecLobby(_inCustom && !CustomBeforeGame.Contains(_gameState) ? NecShow.Hotkey : NecShow.Fresh);
+    }
 
     void ToggleNecLobby()
     {
