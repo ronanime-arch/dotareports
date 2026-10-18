@@ -63,6 +63,7 @@ sealed class AppController
     readonly DispatcherTimer _necHide = new();
     readonly DispatcherTimer _necPoll = new() { Interval = TimeSpan.FromSeconds(3) };
     DateTime _necStamp;                     // когда NEC последний раз переписал кэш, который мы прочитали
+    DateTime _necMatchFound;                // когда NEC нашёл последнюю игру (из его журнала)
     DateTime _necNewest = DateTime.Now;     // самый поздний игрок, по которому уже показывали (до запуска программы — не новость)
     List<NecPlayer>? _necSnapshot;
     DateTime _necSnapshotAt;
@@ -1012,6 +1013,18 @@ sealed class AppController
         var stamp = NecLobby.Stamp();
         if (stamp == _necStamp) return;
         _necStamp = stamp;
+        // NEC нашёл новую игру (профили её игроков он пишет сразу) — узнанные на экране прошлой не в счёт: её не приняли
+        // или кто-то не загрузился, а в меню между играми можно и не выйти
+        if (NecLobby.MatchFound(DateTime.Now) is { } found && found != _necMatchFound)
+        {
+            if (_necMatchFound != default)
+            {
+                _onScreen.Clear();
+                _onScreenTeam.Clear();
+                _cardHits.Clear();
+            }
+            _necMatchFound = found;
+        }
         var players = NecLobby.Load(DateTime.Now);
         var newest = players.Count > 0 ? players.Max(p => p.SeenAt) : DateTime.MinValue;
         if (newest <= _necNewest) return;
