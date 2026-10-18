@@ -255,11 +255,31 @@ static class NecLobby
                 DockPanel.SetDock(chip, Dock.Right);
                 head.Children.Add(chip);
             }
-            head.Children.Add(Glass.Text(p.Name, 18, Glass.Ink, serif: true, bold: true, wrap: false));
+            // ник — кнопка: профиль Steam (иначе клик проходил сквозь карточку в ссылки самой кастомки)
+            string sid = p.SteamId;
+            head.Children.Add(new Border
+            {
+                Child = Glass.Text(p.Name, 18, Glass.Ink, serif: true, bold: true, wrap: false),
+                Background = Brushes.Transparent, CornerRadius = new CornerRadius(6), Padding = new Thickness(3, 0, 3, 0),
+                Margin = new Thickness(-3, 0, 0, 0), HorizontalAlignment = HorizontalAlignment.Left, Cursor = System.Windows.Input.Cursors.Hand,
+                ToolTip = "Профиль Steam", Tag = (Action)(() => OpenProfile(sid)),
+            });
             var box = new StackPanel();
             box.Children.Add(head);
             box.Children.Add(Glass.Text(Details(p, heroes), 12, p.HistoryClosed ? Glass.Bad : Glass.Muted, top: 1));
             yield return Glass.Tile(box, top: 5, padding: new Thickness(10, 6, 8, 7));
+        }
+    }
+
+    static void OpenProfile(string steamId)
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo($"https://steamcommunity.com/profiles/{steamId}") { UseShellExecute = true });
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            Log.Write("Профиль Steam не открыт: " + ex.Message);
         }
     }
 

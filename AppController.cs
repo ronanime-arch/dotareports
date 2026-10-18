@@ -90,6 +90,9 @@ sealed class AppController
     bool _badgeBusy;
     readonly Dictionary<string, NecPlayer> _onScreen = new();   // кто из комнаты NEC узнан на экране этой кастомки
     readonly Dictionary<string, int> _onScreenTeam = new();     // его команда (0 — Свет, 1 — Тьма), если видна на экране выбора команды
+    readonly Dictionary<string, int> _onScreenSlot = new();     // его слот 0–9 (Свет 0–4, Тьма 5–9): строка «выбора команды» или своя карточка
+    readonly DispatcherTimer _topBarTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    int[] _topLeft = Array.Empty<int>();                         // где ники в верхней полосе на стратегии кастомки (−1 — ещё не видно)
     readonly Dictionary<int, ScreenHit> _cardHits = new();      // выбор героя: кто узнан в карточке i — держим до конца экрана
     string? _gsiTeam;                                            // ваша сторона из GSI: radiant / dire
     // На пике в матче Valve (LiveMatch): медаль перед ником каждого игрока и «за · против» под ником — состав по
@@ -191,6 +194,7 @@ sealed class AppController
         _badgeTimer.Tick += async (_, _) => await CheckBadgesAsync();
         _pickRanks = new RankBadges();
         _liveTimer.Tick += async (_, _) => await CheckLiveRanksAsync();
+        _topBarTimer.Tick += async (_, _) => await ShowTopBarAsync();
         _necPoll.Start();
         // после матча история в GCPD обновляется не сразу — читаем профиль через минуту после выхода в меню
         _profileTimer.Tick += async (_, _) =>
@@ -260,10 +264,12 @@ sealed class AppController
         {
             _onScreen.Clear();
             _onScreenTeam.Clear();
+            _onScreenSlot.Clear();
             ShowNecLobby(NecShow.GameStart); // кастомка загрузилась — кто был в комнате NEC перед ней
         }
         if (!custom && _inCustom) _necDismissed = false; // кастомка кончилась — следующую комнату снова показываем
         TrackBadges(custom, s.GameState, s.ClockTime);
+        TrackTopBar(custom, s.GameState, s.ClockTime);
         _inCustom = custom;
         if (custom && s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != s.GameState)
         {
@@ -1026,6 +1032,64 @@ sealed class AppController
         if (players.Count >= NecRoomMin) ShowNecLobby(_inCustom ? NecShow.GameStart : NecShow.Room, players);
     }
 
+    // Стратегия в кастомке: медаль перед ником в верхней полосе — у узнанных на экране, по их слоту; как и у карточек,
+    // за 2 с до конца стадии убираем.
+    void TrackTopBar(bool custom, string state, int? clock)
+    {
+        bool show = custom && state == "DOTA_GAMERULES_STATE_STRATEGY_TIME" && clock is not >= -2 && Setup.ScreenSupported && _onScreenSlot.Count > 0;
+        if (show && !_topBarTimer.IsEnabled)
+        {
+            _topLeft = Enumerable.Repeat(-1, 10).ToArray();
+            _topBarTimer.Start();
+            _ = ShowTopBarAsync(); // сразу, не дожидаясь такта
+        }
+        else if (!show && _topBarTimer.IsEnabled)
+        {
+            _topBarTimer.Stop();
+            _pickRanks.ShowBadges(Array.Empty<BadgeSpot>());
+        }
+    }
+
+    // Где ники — читаем, пока не найдены: потом на их месте наша же медаль (снимок экрана её видит) и сбила бы край ника.
+    async Task ShowTopBarAsync()
+    {
+        if (_topBarBusy) return;
+        _topBarBusy = true;
+        try
+        {
+            if (_topLeft.Any(x => x < 0))
+            {
+                var left = await Task.Run(() =>
+                {
+                    var band = TopBarNames.Band;
+                    using var bmp = new System.Drawing.Bitmap(band.Width, band.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                    using (var g = System.Drawing.Graphics.FromImage(bmp))
+                        g.CopyFromScreen(band.Location, System.Drawing.Point.Empty, band.Size);
+                    return TopBarNames.TextLeft(bmp);
+                });
+                for (int s = 0; s < 10; s++)
+                    if (_topLeft[s] < 0) _topLeft[s] = left[s];
+            }
+            if (!_topBarTimer.IsEnabled) return; // стадия уже кончилась
+            var players = _onScreenSlot.Where(kv => _onScreen.ContainsKey(kv.Key)).Select(kv =>
+            {
+                var p = _onScreen[kv.Key];
+                return new LivePlayer(kv.Value, NecLobby.AccountOf(p.SteamId) ?? 0, p.Name, p.RankTier);
+            }).ToList();
+            _pickRanks.ShowBadges(TopBarNames.Spots(players, _topLeft));
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or ArgumentException)
+        {
+            Log.Write("Кастомка: ники в верхней полосе не прочитаны: " + ex.Message);
+        }
+        finally
+        {
+            _topBarBusy = false;
+        }
+    }
+
+    bool _topBarBusy;
+
     // Экран подключения и выбор героя в кастомке — плашки со званием у узнанных по аватарке; потом — убрать,
     // а узнанных на экране (если их хотя бы трое) оставить составом матча для Ctrl+Alt+N.
     // Карточки выбора героя видны, пока идут его часы (от −60 до 0), но за 2 с до конца уже уезжают — значки убираем
@@ -1110,6 +1174,11 @@ sealed class AppController
                 grew |= !_onScreen.ContainsKey(f.Player.SteamId);
                 _onScreen[f.Player.SteamId] = f.Player;
                 if (f.Team is int team) _onScreenTeam[f.Player.SteamId] = team;
+                // слот — для медали у ника в верхней полосе на стратегии: строки «выбора команды» и карточки своей команды
+                // идут по порядку слотов
+                if (f.Layout == NecLayout.Teams) _onScreenSlot[f.Player.SteamId] = f.Index;
+                else if (f.Layout == NecLayout.Cards && _gsiTeam is "radiant" or "dire")
+                    _onScreenSlot[f.Player.SteamId] = (_gsiTeam == "dire" ? 5 : 0) + f.Index;
             }
             _badges.ShowBadges(found.SelectMany(NecScreen.Spots).ToList());
             if (grew && setup) ShowScreenLobby(); // до выбора героя: узнанные — сразу в карточку лобби

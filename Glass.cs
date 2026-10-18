@@ -348,14 +348,17 @@ abstract class GlassWindow : Window
         if (button == _hover) return;
         if (_hover != null)
         {
-            _hover.Background = Glass.IdleButton;
-            if (_hover.Child is TextBlock t) t.Foreground = Glass.B(Glass.Muted);
+            _hover.Background = _hoverWas.Background; // как было до наведения: у ↻ и ✕ — серые, у ника — свой цвет
+            if (_hover.Child is TextBlock t) t.Foreground = _hoverWas.Foreground;
         }
         _hover = button;
         if (button != null)
         {
+            _hoverWas = (button.Background, (button.Child as TextBlock)?.Foreground);
             button.Background = Glass.B(0x1F, 0xFF, 0xF0, 0xDC);
             if (button.Child is TextBlock t) t.Foreground = Glass.B(Glass.Ink);
         }
     }
+
+    (Brush? Background, Brush? Foreground) _hoverWas;
 }
