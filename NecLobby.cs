@@ -55,12 +55,17 @@ static class NecLobby
     /// Все, кого NEC держит в кэше, без окна по времени, и ещё профили Steam (там и ваши друзья). Знакомых игроков NEC
     /// заново не записывает — по времени из 10 в комнате ловятся 5–6; остальных узнаём по аватарке на экране среди всех.
     /// </param>
-    public static List<NecPlayer> Load(DateTime until, TimeSpan? window = null, bool everyone = false)
+    /// <param name="sinceMatch">
+    /// Только записанных после того, как NEC нашёл последнюю игру: игроки прошлой (кто-то не принял, вышли до начала) записаны
+    /// раньше. Для узнавания по аватарке — false: подбор сводит одних и тех же, а знакомых NEC заново не пишет
+    /// (18.10: Felepe Rivera и ещё трое из прошлых двух игр без этого не узнавались).
+    /// </param>
+    public static List<NecPlayer> Load(DateTime until, TimeSpan? window = null, bool everyone = false, bool sinceMatch = true)
     {
         var cache = Path.Combine(Root, "Cache");
         long to = new DateTimeOffset(until).ToUnixTimeMilliseconds(), from = to - (long)(window ?? Window).TotalMilliseconds;
-        // игроки прошлой найденной игры (кто-то не принял, вышли до начала) записаны раньше, чем найдена эта — не берём
-        if (MatchFound(until) is { } found) from = Math.Max(from, new DateTimeOffset(found).ToUnixTimeMilliseconds() - 5000);
+        if (sinceMatch && !everyone && MatchFound(until) is { } found)
+            from = Math.Max(from, new DateTimeOffset(found).ToUnixTimeMilliseconds() - 5000);
         if (everyone) (from, to) = (long.MinValue, long.MaxValue);
         var own = OwnSteamIds();
         var seen = new Dictionary<string, (long At, string Name)>();

@@ -63,15 +63,17 @@ sealed class AvatarMatcher
     public int Count => _all.Count;
 
     /// <summary>Игрок с этой аватаркой; null — не узнан уверенно или это вы. Debug — лучший и второй счёт.</summary>
-    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug) => Match(image, area, out debug, out _, out _);
+    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug) => Match(image, area, out debug, out _, out _, out _);
 
     /// <param name="sure">Узнан уверенно — игрок или вы (для подбора сдвига строк, где ваша строка тоже в счёт).</param>
     /// <param name="fresh">Узнан уверенно среди свежих записей NEC (комнаты) — игрок или вы.</param>
+    /// <param name="score">Лучшее совпадение с кем-нибудь из кандидатов — по нему подбирается сдвиг строки.</param>
     /// <param name="small">Аватарка 32 px (выбор команды): совпадения ниже — 0,67–0,72 у игроков при отрыве 0,4+,
     /// чужие и «?» — до 0,58 при отрыве до 0,27 (снимок 17.10), поэтому пороги свои.</param>
-    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug, out bool sure, out bool fresh, bool small = false)
+    public NecPlayer? Match(Bitmap image, Rectangle area, out string debug, out bool sure, out bool fresh, out double score, bool small = false)
     {
         fresh = false;
+        score = 0;
         var v = Vector(image, area);
         if (LooksDefault(v))
         {
@@ -80,6 +82,7 @@ sealed class AvatarMatcher
         }
         // 1) свежие записи NEC — это комната: пороги мягче
         var (p1, s1, g1, own1) = Best(v, _recent);
+        score = s1;
         if (s1 >= (small ? 0.62 : MinScore) && g1 >= (small ? 0.3 : MinGap))
         {
             (debug, sure, fresh) = ($"{(own1 ? "вы" : p1?.Name ?? "-")} {s1:0.00}/{g1:0.00}", true, true);
@@ -87,6 +90,7 @@ sealed class AvatarMatcher
         }
         // 2) все известные NEC — кандидатов много, второе место выше: нужен высокий счёт
         var (p2, s2, g2, own2) = Best(v, _all);
+        score = Math.Max(s1, s2);
         sure = s2 >= (small ? AllScoreSmall : AllScore) && g2 >= AllGap;
         debug = $"{(own2 ? "вы" : p2?.Name ?? "-")} {s2:0.00}/{g2:0.00} (все)";
         return !own2 && sure ? p2 : null;
@@ -181,7 +185,8 @@ sealed record BadgeSpot(int X, int Y, bool Right, int RankTier, string? Text, Co
 /// </summary>
 static class NecScreen
 {
-    public static readonly Rectangle SetupStrip = new(1556, 312, 48, 60 * 9 + 48);
+    public static readonly Rectangle SetupStrip = new(1556, 312, 48, 60 * 9 + 48 + ConnectSlack);
+    const int ConnectSlack = 24; // строки подключения бывают выше 60 px — запас снизу на сдвиг
     public static readonly Rectangle CardStrip = new(63, 214, 353 * 4 + 345, 62);
     const int TeamsTop = 412, DireTop = 635, TeamsRow = 34, TeamsShiftUp = 60, TeamsShiftDown = 20;
     // снимаем с запасом по вертикали: сдвиг панели подбирается по тому, где аватарки узнаются лучше
@@ -203,19 +208,47 @@ static class NecScreen
     /// </summary>
     public static List<ScreenHit> Read(Bitmap strip, NecLayout layout, AvatarMatcher matcher)
     {
-        int shift = layout == NecLayout.Teams ? TeamsShift(strip, matcher) : 0;
-        var found = new List<ScreenHit>();
-        int count = layout == NecLayout.Cards ? 5 : 10, fresh = 0;
-        for (int i = 0; i < count; i++)
-        {
-            var p = matcher.Match(strip, Avatar(layout, i, shift), out var debug, out _, out bool f, layout == NecLayout.Teams);
-            if (f) fresh++;
-            if (p != null) found.Add(new ScreenHit(layout, i, p, shift, debug));
-        }
-        return layout == NecLayout.Cards || fresh >= MinFresh ? found : new List<ScreenHit>();
+        var rows = Rows(strip, layout, matcher);
+        var found = rows.Where(r => r.Player != null).Select(r => new ScreenHit(layout, r.Index, r.Player!, r.Shift, r.Debug)).ToList();
+        return layout == NecLayout.Cards || rows.Count(r => r.Fresh) >= MinFresh ? found : new List<ScreenHit>();
     }
 
     const int MinFresh = 1;
+
+    /// <summary>
+    /// Каждая строка: где аватарка (сдвиг), кто и счёт. В подключении строки по 60 px, но ник с тегом клана в две строки
+    /// делает строку выше на 4 px — и все ниже съезжают (18.10: «FIX DOTA 2 ARCADE SERVER [BSLD]» и ещё один такой
+    /// сдвинули нижних на 4 и 8 px, аватарки сравнивались со сдвигом — 0,6–0,7 даже у вашей, и никто ниже не узнавался).
+    /// Поэтому там у каждой строки сдвиг подбираем от предыдущей — где совпадение лучше, но только если игрок (или вы)
+    /// узнан уверенно: на пустом слоте среди 250 кандидатов при каком-нибудь сдвиге кто-нибудь да наберёт 0,8.
+    /// </summary>
+    static List<(int Index, int Shift, NecPlayer? Player, string Debug, bool Fresh)> Rows(Bitmap strip, NecLayout layout, AvatarMatcher matcher)
+    {
+        var rows = new List<(int, int, NecPlayer?, string, bool)>();
+        int shift = layout == NecLayout.Teams ? TeamsShift(strip, matcher) : 0;
+        for (int i = 0; i < (layout == NecLayout.Cards ? 5 : 10); i++)
+        {
+            if (layout != NecLayout.Connect)
+            {
+                var p = matcher.Match(strip, Avatar(layout, i, shift), out var debug, out _, out bool fresh, out _, layout == NecLayout.Teams);
+                rows.Add((i, shift, p, debug, fresh));
+                continue;
+            }
+            (int Dy, NecPlayer? P, string D, bool F, bool Sure, double S) best = (0, null, "", false, false, double.MinValue), atZero = best;
+            for (int dy = -3; dy <= 9; dy++) // ник в две строки — +4 px, в три — +8
+            {
+                var area = Avatar(layout, i, shift + dy);
+                if (area.Top < 0 || area.Bottom > strip.Height) continue;
+                var p = matcher.Match(strip, area, out var debug, out bool sure, out bool fresh, out double score);
+                if (dy == 0) atZero = (dy, p, debug, fresh, sure, score);
+                if (score > best.S) best = (dy, p, debug, fresh, sure, score);
+            }
+            var pick = best.Sure ? best : atZero;
+            shift += pick.Dy;
+            rows.Add((i, shift, pick.P, pick.D + (shift != 0 ? $" (сдвиг {shift:+0;-0})" : ""), pick.F));
+        }
+        return rows;
+    }
 
     /// <summary>Значки узнанного игрока (после того как, например, догрузилось звание).</summary>
     public static BadgeSpot[] Spots(ScreenHit hit) => Spots(hit.Layout, hit.Index, hit.Shift, hit.Player);
@@ -239,19 +272,15 @@ static class NecScreen
     /// <summary>Для --badge-test: лучший и второй счёт по каждой строке (и подобранный сдвиг панели команд).</summary>
     public static IEnumerable<string> Debug(Bitmap strip, NecLayout layout, AvatarMatcher matcher)
     {
-        int shift = layout == NecLayout.Teams ? TeamsShift(strip, matcher) : 0;
-        if (layout == NecLayout.Teams) yield return $"сдвиг панели команд: {shift}";
-        for (int i = 0; i < (layout == NecLayout.Cards ? 5 : 10); i++)
-        {
-            matcher.Match(strip, Avatar(layout, i, shift), out var debug, out _, out _, layout == NecLayout.Teams);
-            yield return $"  строка {i + 1}: {debug}";
-        }
+        var rows = Rows(strip, layout, matcher);
+        if (layout == NecLayout.Teams) yield return $"сдвиг панели команд: {rows[0].Shift}";
+        foreach (var r in rows) yield return $"  строка {r.Index + 1}: {r.Debug}";
     }
 
     // Аватарка внутри снимка: в строке рамка 1 px, у карточки — подсветка своего игрока до 3 px.
     static Rectangle Avatar(NecLayout layout, int i, int shift) => layout switch
     {
-        NecLayout.Connect => new Rectangle(3, 3 + 60 * i, 42, 42),
+        NecLayout.Connect => new Rectangle(3, 3 + 60 * i + shift, 42, 42),
         NecLayout.Teams => new Rectangle(2, TeamsShiftUp + shift + RowTop(i) - TeamsTop + 2, 28, 28),
         _ => new Rectangle(353 * i + 9, 3, 55, 55),
     };
@@ -266,7 +295,7 @@ static class NecScreen
             int count = 0;
             for (int i = 0; i < 10; i++)
             {
-                matcher.Match(strip, Avatar(NecLayout.Teams, i, shift), out _, out bool sure, out _, small: true);
+                matcher.Match(strip, Avatar(NecLayout.Teams, i, shift), out _, out bool sure, out _, out _, small: true);
                 if (sure) count++;
             }
             return count;
@@ -290,7 +319,7 @@ static class NecScreen
         var (text, color) = NecLobby.Badge(p);
         return layout switch
         {
-            NecLayout.Connect => new[] { new BadgeSpot(1556 - 4 - 48, 312 + 60 * i, false, p.RankTier, null, color, 48) },
+            NecLayout.Connect => new[] { new BadgeSpot(1556 - 4 - 48, 312 + 60 * i + shift, false, p.RankTier, null, color, 48) },
             NecLayout.Teams => new[] { new BadgeSpot(1146 - 2 - 34, RowTop(i) + shift - 1, false, p.RankTier, null, color, 34) },
             _ => new[]
             {
