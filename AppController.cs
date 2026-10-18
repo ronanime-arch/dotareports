@@ -88,6 +88,7 @@ sealed class AppController
     bool _badgeBusy;
     readonly Dictionary<string, NecPlayer> _onScreen = new();   // кто из комнаты NEC узнан на экране этой кастомки
     readonly Dictionary<string, int> _onScreenTeam = new();     // его команда (0 — Свет, 1 — Тьма), если видна на экране выбора команды
+    readonly Dictionary<int, ScreenHit> _cardHits = new();      // выбор героя: кто узнан в карточке i — держим до конца экрана
     string? _gsiTeam;                                            // ваша сторона из GSI: radiant / dire
     // На пике в матче Valve (LiveMatch): медаль перед ником каждого игрока и «за · против» под ником — состав по
     // Steam ID сервера из console.log и Steam GetRealtimeStats; ники на экране смотрим раз в 2 с
@@ -1047,6 +1048,7 @@ sealed class AppController
         else if (!screen && _badgeTimer.IsEnabled)
         {
             _badgeTimer.Stop();
+            _cardHits.Clear();
             _badges.ShowBadges(Array.Empty<BadgeSpot>());
             if (_onScreen.Count >= NecRoomMin)
             {
@@ -1089,6 +1091,15 @@ sealed class AppController
                 }
                 return best;
             });
+            if (!_badgeTimer.IsEnabled) return; // экран уже сменился
+            // выбор героя: наша же медаль на углу аватарки попадает в снимок экрана и портит следующее чтение
+            // (счёт 0,91–0,94 → 0,55–0,89, значок гаснет и снова загорается) — узнанного в карточке держим,
+            // пока там уверенно не узнан другой
+            if (!setup)
+            {
+                foreach (var f in found) _cardHits[f.Index] = f;
+                found = _cardHits.Values.OrderBy(h => h.Index).ToList();
+            }
             found = await NecScreen.WithRanksAsync(found); // у кого NEC не загружал профиль — звание с OpenDota
             if (!_badgeTimer.IsEnabled) return; // экран уже сменился
             bool grew = false;
