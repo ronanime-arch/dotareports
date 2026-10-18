@@ -80,9 +80,11 @@ sealed class AppController
         "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD", "DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP",
         "DOTA_GAMERULES_STATE_HERO_SELECTION", "DOTA_GAMERULES_STATE_STRATEGY_TIME",
     };
-    // Звания под никами: на экране подключения и выбора героя узнаём игроков по аватарке (NecBadges.cs) раз в 1,5 с
+    // Звания под никами: на экране подключения и выбора героя узнаём игроков по аватарке (NecBadges.cs) раз в 1,5 с,
+    // на выборе героя — раз в 0,5 с: карточки появляются — значки сразу
     RankBadges _badges = null!;
-    readonly DispatcherTimer _badgeTimer = new() { Interval = TimeSpan.FromSeconds(1.5) };
+    readonly DispatcherTimer _badgeTimer = new() { Interval = BadgeTick };
+    static readonly TimeSpan BadgeTick = TimeSpan.FromSeconds(1.5), BadgeTickCards = TimeSpan.FromSeconds(0.5);
     readonly AvatarMatcher _avatars = new();
     DateTime _badgeStamp;
     bool _badgeBusy;
@@ -261,7 +263,7 @@ sealed class AppController
             ShowNecLobby(NecShow.GameStart); // кастомка загрузилась — кто был в комнате NEC перед ней
         }
         if (!custom && _inCustom) _necDismissed = false; // кастомка кончилась — следующую комнату снова показываем
-        TrackBadges(custom, s.GameState);
+        TrackBadges(custom, s.GameState, s.ClockTime);
         _inCustom = custom;
         if (custom && s.GameState == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != s.GameState)
         {
@@ -1026,10 +1028,17 @@ sealed class AppController
 
     // Экран подключения и выбор героя в кастомке — плашки со званием у узнанных по аватарке; потом — убрать,
     // а узнанных на экране (если их хотя бы трое) оставить составом матча для Ctrl+Alt+N.
-    void TrackBadges(bool custom, string state)
+    // Карточки выбора героя видны, пока идут его часы (от −60 до 0), но за 2 с до конца уже уезжают — значки убираем
+    // тогда же; на стратегии карточек нет (плашки висели над её экраном).
+    void TrackBadges(bool custom, string state, int? clock)
     {
-        bool screen = custom && state is "DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP" or "DOTA_GAMERULES_STATE_HERO_SELECTION"
-            or "DOTA_GAMERULES_STATE_STRATEGY_TIME";
+        bool screen = custom && (state == "DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP"
+                                 || state == "DOTA_GAMERULES_STATE_HERO_SELECTION" && clock is not >= -2);
+        var tick = state == "DOTA_GAMERULES_STATE_HERO_SELECTION" ? BadgeTickCards : BadgeTick;
+        if (_badgeTimer.Interval != tick) _badgeTimer.Interval = tick; // присвоение перезапускает таймер — только при смене
+        // начался выбор героя — карточки прочитать сразу, не дожидаясь такта
+        if (screen && state == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _gameState != state && _badgeTimer.IsEnabled)
+            _ = CheckBadgesAsync(state); // _gameState ещё прежний
         // выбор героя: карточка лобби слева закрыла бы карточку первого союзника — звания уже у аватарок
         if (custom && state == "DOTA_GAMERULES_STATE_HERO_SELECTION" && _necHide.IsEnabled)
         {
@@ -1051,13 +1060,13 @@ sealed class AppController
         }
     }
 
-    async Task CheckBadgesAsync()
+    async Task CheckBadgesAsync(string? state = null)
     {
         if (_badgeBusy) return;
         _badgeBusy = true;
         try
         {
-            bool setup = _gameState == "DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP";
+            bool setup = (state ?? _gameState) == "DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP";
             var found = await Task.Run(() =>
             {
                 // кандидаты — все, кого NEC держит в кэше (и друзья из профилей Steam): знакомых игроков NEC заново
