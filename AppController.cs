@@ -139,6 +139,7 @@ sealed class AppController
     Forms.ToolStripMenuItem _imbaItem = null!;  // галочка «Оставаться на итогах IMBA»
     bool _imbaSyncing;
     ImbaStay.State? _imbaLogged; // в журнал — только смена состояния карты
+    string? _imbaError;          // и только новая ошибка, а не каждую минуту одна и та же
     const string LoginTip = "Нужно войти в Steam: нажмите на это уведомление или значок в трее → «Войти в Steam…».";
 
     public AppController(System.Windows.Application app)
@@ -746,11 +747,13 @@ sealed class AppController
             if (state == ImbaStay.State.Unknown && _imbaLogged != state)
                 Log.Write("Итоги IMBA: версия карты незнакомая, правку не ставлю");
             _imbaLogged = state;
+            _imbaError = null;
             return state;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
         {
-            Log.Write("Итоги IMBA: файл карты не изменён: " + ex.Message);
+            if (_imbaError != ex.Message) Log.Write("Итоги IMBA: файл карты не изменён: " + ex.Message);
+            _imbaError = ex.Message;
             return null;
         }
         finally
