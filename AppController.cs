@@ -136,10 +136,6 @@ sealed class AppController
     AnalyticsWindow? _analytics;
     Forms.ToolStripMenuItem _updateItem = null!;
     Forms.ToolStripMenuItem _loginItem = null!; // «Войти в Steam…» — виден, только когда вход слетел
-    Forms.ToolStripMenuItem _imbaItem = null!;  // галочка «Оставаться на итогах IMBA»
-    bool _imbaSyncing;
-    ImbaStay.State? _imbaLogged; // в журнал — только смена состояния карты
-    string? _imbaError;          // и только новая ошибка, а не каждую минуту одна и та же
     const string LoginTip = "Нужно войти в Steam: нажмите на это уведомление или значок в трее → «Войти в Steam…».";
 
     public AppController(System.Windows.Application app)
@@ -704,62 +700,6 @@ sealed class AppController
             await RefreshProfileAsync();
         }
         if (!_picking) await _slotLearner.TickAsync();
-        if (!running) await SyncImbaStayAsync(); // карта обновилась в Steam — правка слетела, поставить заново
-    }
-
-    // Галочка в трее: карта IMBA AWAKEN не выкидывает в главное меню после матча. Файл карты меняется только при закрытой Dota.
-    async Task ToggleImbaStayAsync()
-    {
-        try
-        {
-            ImbaStay.Wanted = !ImbaStay.Wanted;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            Log.Write("imba_stay.txt не сохранён: " + ex.Message);
-        }
-        _imbaItem.Checked = ImbaStay.Wanted;
-        if (Setup.DotaStartedAt() != null)
-        {
-            _tray.ShowBalloonTip(6000, "Dota Reports", "Применится, когда закроете Dota: пока она открыта, файл карты IMBA не меняю.", Forms.ToolTipIcon.Info);
-            return;
-        }
-        var (text, icon) = await SyncImbaStayAsync() switch
-        {
-            ImbaStay.State.On => ("Готово: после матча IMBA остаётесь на экране итогов. NEC всё равно свернёт Dota — вернитесь в неё через Alt+Tab.", Forms.ToolTipIcon.Info),
-            ImbaStay.State.Off => ("Готово: карта IMBA снова как в оригинале.", Forms.ToolTipIcon.Info),
-            ImbaStay.State.NoMap => ("Карта IMBA AWAKEN не установлена — правка встанет, когда она скачается.", Forms.ToolTipIcon.Info),
-            ImbaStay.State.Unknown => ("Эта версия карты IMBA не подходит — правку не ставлю.", Forms.ToolTipIcon.Warning),
-            _ => ("Файл карты IMBA сейчас занят — попробую через минуту. Подробности в журнале.", Forms.ToolTipIcon.Warning),
-        };
-        _tray.ShowBalloonTip(8000, "Dota Reports", text, icon);
-    }
-
-    // Привести карту к галочке: включить правку или вернуть оригинал. null — файл занят или не прочитался.
-    async Task<ImbaStay.State?> SyncImbaStayAsync()
-    {
-        if (_imbaSyncing) return null;
-        _imbaSyncing = true;
-        try
-        {
-            bool on = ImbaStay.Wanted;
-            var state = await Task.Run(() => ImbaStay.FindVpk() is { } vpk ? ImbaStay.Sync(vpk, on) : ImbaStay.State.NoMap);
-            if (state == ImbaStay.State.Unknown && _imbaLogged != state)
-                Log.Write("Итоги IMBA: версия карты незнакомая, правку не ставлю");
-            _imbaLogged = state;
-            _imbaError = null;
-            return state;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
-        {
-            if (_imbaError != ex.Message) Log.Write("Итоги IMBA: файл карты не изменён: " + ex.Message);
-            _imbaError = ex.Message;
-            return null;
-        }
-        finally
-        {
-            _imbaSyncing = false;
-        }
     }
 
     // Dota открыта десять минут, а данных GSI нет ни разу — один раз объяснить причину.
@@ -1476,12 +1416,6 @@ sealed class AppController
         menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
         menu.Items.Add("Лобби NEC (Ctrl+Alt+N)", null, (_, _) => ToggleNecLobby());
-        _imbaItem = new Forms.ToolStripMenuItem("Оставаться на итогах IMBA", null, async (_, _) => await ToggleImbaStayAsync())
-        {
-            Checked = ImbaStay.Wanted,
-            ToolTipText = "После матча IMBA AWAKEN карта не выкидывает в главное меню — итоги в самой игре.",
-        };
-        menu.Items.Add(_imbaItem);
         menu.Items.Add("Напоминания…", null, (_, _) => OpenReminders());
         menu.Items.Add("История поведения…", null, (_, _) => OpenHistory());
         menu.Items.Add("Аналитика и Dotabuff…", null, (_, _) => OpenAnalytics());

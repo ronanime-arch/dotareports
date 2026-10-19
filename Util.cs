@@ -39,7 +39,6 @@ static class Paths
     public static string Predictions => Path.Combine(Root, "predictions.json");
     public static string CustomStats => Path.Combine(Root, "custom_stats.json"); // ваши игры в кастомках
     public static string AutostartMark => Path.Combine(Root, "autostart.txt"); // автозагрузку уже прописывали
-    public static string ImbaStay => Path.Combine(Root, "imba_stay.txt"); // галочка «Оставаться на итогах IMBA»
 }
 
 static class Words
