@@ -150,7 +150,7 @@ static class LiveMatch
     }
 
     /// <summary>
-    /// Плитки для окна «Игроки матча»: ник (клик — профиль Steam) и чип со званием, ниже — сколько вы с ним сыграли вместе
+    /// Плитки для окна «Игроки матча»: значок медали, ник (клик — профиль Steam) и чип со званием, ниже — сколько вы с ним сыграли вместе
     /// и против. peersKnown — список знакомых с OpenDota получен (иначе «не встречались» было бы неправдой).
     /// </summary>
     public static IEnumerable<UIElement> Tiles(IEnumerable<LivePlayer> players, bool peersKnown)
@@ -177,7 +177,15 @@ static class LiveMatch
             var box = new StackPanel();
             box.Children.Add(head);
             box.Children.Add(Glass.Text(detail, 12, parts.Count > 0 ? Glass.GoldLight : Glass.Muted, top: 1));
-            yield return Glass.Tile(box, top: 5, padding: new Thickness(10, 6, 8, 7));
+            // слева — значок медали, как в клиенте (без медали — кружок «?»)
+            var icon = RankIcon.Build(p.RankTier, 38);
+            icon.Margin = new Thickness(0, 0, 9, 0);
+            icon.VerticalAlignment = VerticalAlignment.Center;
+            DockPanel.SetDock(icon, Dock.Left);
+            var row = new DockPanel();
+            row.Children.Add(icon);
+            row.Children.Add(box);
+            yield return Glass.Tile(row, top: 5, padding: new Thickness(8, 6, 8, 7));
         }
     }
 }
