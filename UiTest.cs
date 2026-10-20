@@ -41,6 +41,17 @@ static class UiTest
             "комната NEC, 13:06 — обновится с новыми игроками · без деления на команды, могут быть ушедшие", () => { });
         Save(lobby.Root, 380, shot, new Point(20, 130), Path.Combine(dir, "lobby"));
 
+        var match = new RatingWindow(380);
+        var roster = new List<LivePlayer>
+        {
+            new(-1, 1, "Mollonn", 44, 3, 1), new(-1, 2, "♠foX♠", 51), new(-1, 3, "Будэика", 0), new(-1, 4, "a very long nickname here", 35),
+        };
+        var matchBody = new List<UIElement> { Glass.Text("с медалью 3 из 4 · знакомых 1", 12, Glass.GoldLight, bold: true) };
+        matchBody.AddRange(LiveMatch.Tiles(roster, peersKnown: true));
+        match.Render($"Игроки матча · {roster.Count}", "Ctrl+Alt+N", matchBody,
+            "Steam «Недавние игроки» · медали и «за · против» — OpenDota · без деления на команды", () => { });
+        Save(match.Root, 380, shot, new Point(20, 130), Path.Combine(dir, "match_players"));
+
         var popup = new OverlayWindow();
         popup.Build("На вас пожаловались", OverlayWindow.Red, new[]
         {
@@ -215,36 +226,36 @@ static class UiTest
         png.Save(fs);
     }
 
-    /// <summary>--live-test: во время матча — сервер из console.log, состав от Steam, медали и знакомые с OpenDota (в .txt).</summary>
+    /// <summary>
+    /// --live-test: последний матч Valve — подключение из файла Dota, игроки из Steam «Недавние игроки» (coplay),
+    /// ники Steam, медали и знакомые с OpenDota; для сравнения — что отдаёт Steam GetRealtimeStats по серверу (в .txt).
+    /// </summary>
     public static void Live(string file)
     {
         var lines = new List<string>();
-        var last = LiveMatch.LastServer();
-        lines.Add(last is { } s ? $"сервер {s.Server}, подключение {s.At:dd.MM HH:mm:ss}" : "в console.log нет подключения к серверу Valve");
-        if (LiveMatch.ConsoleLogOff()) lines.Add("Dota запущена без -condebug — console.log с её запуска не менялся");
-        var options = SteamLaunch.Options();
-        lines.Add(options == null ? "параметры запуска Dota: localconfig.vdf не найден"
-            : $"параметры запуска Dota: «{options}»" + (SteamLaunch.HasFlag(options) ? "" : $" — нет {SteamLaunch.Flag}"));
-        if (last is { } srv)
+        var connect = Coplay.LastConnect();
+        lines.Add(connect is { } c ? $"подключение {c.At:dd.MM HH:mm:ss}, сервер {c.Server}" : "нет dota_local_disk_lobby_data.txt — подключения к матчу не было");
+        var since = connect is { } at ? at.At.AddSeconds(-5) : DateTime.Now.AddMinutes(-30);
+        var accounts = Coplay.PlayersSince(since);
+        lines.Add($"coplay с {since:dd.MM HH:mm:ss}: игроков {accounts.Count}");
+        try
         {
-            try
+            var peers = LiveMatch.PeersAsync().GetAwaiter().GetResult();
+            if (peers == null) lines.Add("знакомые: OpenDota не ответил или нет account.txt");
+            var ranks = accounts.Select(a => LiveMatch.RankAsync(a).GetAwaiter().GetResult()).ToList();
+            var names = LiveMatch.NamesAsync(accounts).GetAwaiter().GetResult();
+            for (int i = 0; i < accounts.Count; i++)
             {
-                var list = LiveMatch.PlayersAsync(srv.Server).GetAwaiter().GetResult();
-                if (list == null) lines.Add("Steam не отдал состав (ответ — realtime_stats.json)");
-                else
-                {
-                    var peers = LiveMatch.PeersAsync().GetAwaiter().GetResult();
-                    foreach (var p in list)
-                    {
-                        var (with, against) = peers.GetValueOrDefault(p.Account);
-                        lines.Add($"слот {p.Slot}: {p.Name} ({p.Account}) — {Ranks.Name(LiveMatch.RankAsync(p.Account).GetAwaiter().GetResult()) ?? "без медали"}, за {with} · против {against}");
-                    }
-                }
+                var (with, against) = peers?.GetValueOrDefault(accounts[i]) ?? default;
+                lines.Add($"{names.GetValueOrDefault(accounts[i]) ?? "?"} ({accounts[i]}) — {Ranks.Name(ranks[i]) ?? "без медали"}, за {with} · против {against}");
             }
-            catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or System.Threading.Tasks.TaskCanceledException or System.Text.Json.JsonException)
-            {
-                lines.Add("ошибка: " + ex.Message);
-            }
+            if (connect is { } srv)
+                lines.Add(LiveMatch.PlayersAsync(srv.Server).GetAwaiter().GetResult() is { } list
+                    ? $"Steam GetRealtimeStats: игроков {list.Count}" : "Steam GetRealtimeStats: состава нет (ответ — realtime_stats.json)");
+        }
+        catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or System.Threading.Tasks.TaskCanceledException or System.Text.Json.JsonException)
+        {
+            lines.Add("ошибка: " + ex.Message);
         }
         File.WriteAllLines(file, lines);
     }

@@ -271,7 +271,7 @@ static class NecLobby
         }
     }
 
-    static void OpenProfile(string steamId)
+    public static void OpenProfile(string steamId)
     {
         try
         {

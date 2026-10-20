@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -95,16 +95,17 @@ sealed class AppController
     int[] _topLeft = Array.Empty<int>();                         // где ники в верхней полосе на стратегии кастомки (−1 — ещё не видно)
     readonly Dictionary<int, ScreenHit> _cardHits = new();      // выбор героя: кто узнан в карточке i — держим до конца экрана
     string? _gsiTeam;                                            // ваша сторона из GSI: radiant / dire
-    // На пике в матче Valve (LiveMatch): медаль перед ником каждого игрока и «за · против» под ником — состав по
-    // Steam ID сервера из console.log и Steam GetRealtimeStats; ники на экране смотрим раз в 2 с
-    RankBadges _pickRanks = null!;
-    readonly DispatcherTimer _liveTimer = new() { Interval = TimeSpan.FromSeconds(2) };
-    ulong? _liveServer;
-    List<LivePlayer>? _livePlayers;
-    string? _liveHint;                                           // что мешает званиям на пике — строкой внизу карточки
-    DateTime _liveAsked;
-    DateTime _liveStart;                                         // начало пика — сколько ещё ждать подключения в console.log
-    bool _launchTipDue, _launchTipShown;                         // подсказка про -condebug после пика — раз за запуск
+    // Матч Valve (Турбо и др.): кто в нём — из Steam «Недавние игроки» (Coplay), примерно через минуту после подключения;
+    // медаль, ник и «за · против» — списком в окне лобби (Ctrl+Alt+N): команд и слотов Steam не пишет
+    RankBadges _pickRanks = null!;                               // значки у ников в верхней полосе — у кастомок (TrackTopBar)
+    readonly DispatcherTimer _liveTimer = new() { Interval = TimeSpan.FromSeconds(3) };
+    List<LivePlayer>? _roster;                                   // игроки текущего матча Valve; null — ещё не известны
+    bool _rosterPeersKnown;                                      // знакомые с OpenDota получены — «не встречались» правда
+    DateTime _rosterSince;                                       // записи coplay не раньше — подключение к этому матчу
+    (int Count, DateTime At) _rosterSeen;                        // меньше 9 игроков — ждём, не допишет ли Steam
+    string? _liveHint;                                           // строкой внизу карточки пика: где смотреть игроков
+    DateTime _liveStart;
+    bool _necShowsMatch;                                         // в окне лобби сейчас игроки матча Valve, а не NEC
     bool _liveBusy;
     string? _liveNote;   // что последним записано в журнал — пишем только перемены
     readonly ProfileData _profile = new();
@@ -140,9 +141,6 @@ sealed class AppController
     Forms.ToolStripMenuItem _updateItem = null!;
     Forms.ToolStripMenuItem _loginItem = null!; // «Войти в Steam…» — виден, только когда вход слетел
     const string LoginTip = "Нужно войти в Steam: нажмите на это уведомление или значок в трее → «Войти в Steam…».";
-    Forms.ToolStripMenuItem _launchItem = null!; // «Включить звания в Турбо…» — виден, пока в параметрах запуска Dota нет -condebug
-    const string LaunchTip = "Звания в Турбо не видны: Dota запущена без -condebug. После игры закройте Dota и нажмите на это уведомление " +
-                             "или значок в трее → «Включить звания в Турбо…» — программа добавит его сама.";
 
     public AppController(System.Windows.Application app)
     {
@@ -182,7 +180,7 @@ sealed class AppController
         _necLobby.CloseButtonPressed = () =>
         {
             _necHide.Stop();
-            (_necDismissed, _necDismissedAt) = (true, DateTime.Now);
+            if (!_necShowsMatch) (_necDismissed, _necDismissedAt) = (true, DateTime.Now); // закрыли игроков матча Valve — NEC это не касается
         };
         _rating.CloseButtonPressed = () => _ratingHide.Stop();
         _ratingHide.Tick += (_, _) =>
@@ -337,31 +335,33 @@ sealed class AppController
         UpdatePickFrame();
     }
 
+    // Пик в матче Valve: ждём, пока Steam запишет игроков (coplay). Опорное время — подключение к матчу из файла Dota;
+    // его нет или оно давнее — пик минус 3 минуты.
     void StartLiveRanks()
     {
-        (_liveServer, _livePlayers, _liveAsked, _liveNote, _liveHint) = (null, null, DateTime.MinValue, null, null);
+        (_roster, _rosterPeersKnown, _rosterSeen, _liveNote, _liveHint) = (null, false, (0, DateTime.MinValue), null, null);
         _liveStart = DateTime.Now;
-        _topLeft = Enumerable.Repeat(-1, 10).ToArray();
-        if (!Setup.ScreenSupported) return;
-        if (!LiveMatch.HasKey)
+        try
         {
-            LiveNote("нет ключа Steam API (apikey.txt в папке данных) — звания на пике не показываем");
+            var connect = Coplay.LastConnect();
+            _rosterSince = connect is { } c && DateTime.Now - c.At < TimeSpan.FromMinutes(10) ? c.At.AddSeconds(-5) : DateTime.Now.AddMinutes(-3);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _rosterSince = DateTime.Now.AddMinutes(-3);
+        }
+        if (!File.Exists(Paths.Account))
+        {
+            LiveNote("нет account.txt — не знаю ваш SteamID, игроков матча не показываем");
             return;
         }
         _liveTimer.Start();
     }
 
+    // Пик кончился: значков у ников в матче Valve нет, а состав ждём дальше — Steam пишет его к концу пика или на стратегии
     void StopLiveRanks()
     {
-        _liveTimer.Stop();
-        _pickRanks.ShowBadges(Array.Empty<BadgeSpot>());
-        // что делать без -condebug — после пика, раз за запуск программы (во время пика карточка говорит то же)
-        if (_launchTipDue && !_launchTipShown)
-        {
-            _launchTipShown = true;
-            _tray.ShowBalloonTip(15000, "Dota Reports", LaunchTip, Forms.ToolTipIcon.Info);
-        }
-        _launchTipDue = false;
+        if (_roster != null) _liveTimer.Stop();
     }
 
     void LiveNote(string note)
@@ -371,68 +371,51 @@ sealed class AppController
         Log.Write("Звания на пике: " + note);
     }
 
-    // Пик в матче Valve: состав — раз (Steam отдаёт его не сразу — спрашиваем раз в 6 с), ники на экране — каждые 2 с.
-    // В All Pick звания Dota показывает сама — там только «за · против».
+    // Раз в 3 с — есть ли в coplay игроки этого матча. Steam пишет всех разом, примерно через минуту после подключения;
+    // меньше 9 (боты, кто-то не зашёл) — берём, если 10 с не менялось. Ждём до 4 минут или до выхода в меню.
     async Task CheckLiveRanksAsync()
     {
         if (_liveBusy) return;
         _liveBusy = true;
         try
         {
-            if (_livePlayers == null)
+            if (_roster != null || _gameState.Length == 0 || DateTime.Now - _liveStart > TimeSpan.FromMinutes(4))
             {
-                if (DateTime.Now - _liveAsked < TimeSpan.FromSeconds(6)) return;
-                _liveAsked = DateTime.Now;
-                if (_liveServer == null)
-                {
-                    // подключение к серверу — до пика; давнее — это прошлый матч (или кастомка по IP)
-                    var last = await Task.Run(LiveMatch.LastServer);
-                    if (last is not { } srv || DateTime.Now - srv.At > TimeSpan.FromMinutes(15))
-                    {
-                        if (await Task.Run(LiveMatch.ConsoleLogOff))
-                        {
-                            // без -condebug сервера не узнать никак — программа добавляет его сама (трей), подсказка — на карточке и после пика
-                            bool added = SteamLaunch.HasFlag(await Task.Run(SteamLaunch.Options));
-                            LiveNote(added ? "-condebug уже в параметрах запуска, но Dota запущена раньше — звания со следующего её запуска"
-                                           : "Dota запущена без -condebug — console.log не пишется, сервер матча не узнать");
-                            _liveHint = added ? "звания у ников: перезапустите Dota" : "звания у ников: в трее «Включить звания в Турбо»";
-                            _launchTipDue = !added;
-                            RenderCard();
-                            _liveTimer.Stop();
-                            return;
-                        }
-                        LiveNote("в console.log нет свежего подключения к серверу Valve");
-                        // строка о подключении может появиться в журнале позже начала пика — ищем ещё минуту
-                        if (DateTime.Now - _liveStart > TimeSpan.FromMinutes(1)) _liveTimer.Stop();
-                        return;
-                    }
-                    _liveServer = srv.Server;
-                }
-                var list = await LiveMatch.PlayersAsync(_liveServer.Value);
-                if (list == null)
-                {
-                    LiveNote($"Steam пока не отдаёт состав сервера {_liveServer} (ответ — realtime_stats.json)");
-                    return;
-                }
-                var peersTask = LiveMatch.PeersAsync();
-                var ranks = await Task.WhenAll(list.Select(p => LiveMatch.RankAsync(p.Account)));
-                var peers = await peersTask;
-                _livePlayers = list.Select((p, i) =>
-                {
-                    var (with, against) = peers.GetValueOrDefault(p.Account);
-                    return new LivePlayer(p.Slot, p.Account, p.Name, ranks[i], with, against);
-                }).ToList();
-                LiveNote($"игроков {_livePlayers.Count}, с медалью {_livePlayers.Count(p => p.RankTier > 0)}, " +
-                         $"знакомых {_livePlayers.Count(p => p.With + p.Against > 0)}: " +
-                         string.Join(", ", _livePlayers.Select(p => $"{p.Slot}:{p.Name}={p.RankTier}")));
+                if (_roster == null)
+                    LiveNote(_gameState.Length == 0 ? "вышли в меню раньше, чем Steam записал игроков матча"
+                                                    : $"Steam за 4 минуты не записал игроков матча (coplay, с {_rosterSince:HH:mm:ss})");
+                _liveTimer.Stop();
+                return;
             }
-            var players = _livePlayers;
-            await FillTopLeftAsync();
-            if (!_liveTimer.IsEnabled) return; // пик уже кончился
-            _pickRanks.ShowBadges(TopBarNames.Spots(players, _topLeft, medals: _mode.Mode != "ALL_PICK"));
+            var since = _rosterSince;
+            var accounts = await Task.Run(() => Coplay.PlayersSince(since));
+            if (accounts.Count == 0) return;
+            if (accounts.Count < 9)
+            {
+                if (accounts.Count != _rosterSeen.Count) _rosterSeen = (accounts.Count, DateTime.Now);
+                if (DateTime.Now - _rosterSeen.At < TimeSpan.FromSeconds(10)) return;
+            }
+            accounts = accounts.TakeLast(9).ToList(); // больше 9 — захватили конец прошлого матча: он раньше
+            var peersTask = LiveMatch.PeersAsync();
+            var ranks = await Task.WhenAll(accounts.Select(LiveMatch.RankAsync));
+            var names = await LiveMatch.NamesAsync(accounts);
+            var peers = await peersTask;
+            _rosterPeersKnown = peers != null;
+            _roster = accounts.Select((a, i) =>
+            {
+                var (with, against) = peers?.GetValueOrDefault(a) ?? default;
+                return new LivePlayer(-1, a, names.GetValueOrDefault(a) ?? $"аккаунт {a}", ranks[i], with, against);
+            }).OrderByDescending(p => p.With + p.Against).ThenByDescending(p => p.RankTier).ToList();
+            LiveNote($"из coplay {_roster.Count} игроков, с медалью {_roster.Count(p => p.RankTier > 0)}, " +
+                     $"знакомых {(_rosterPeersKnown ? _roster.Count(p => p.With + p.Against > 0).ToString() : "? (OpenDota не ответил)")}: " +
+                     string.Join(", ", _roster.Select(p => $"{p.Name}={p.RankTier}")));
+            _liveTimer.Stop();
+            _liveHint = "игроки матча — Ctrl+Alt+N";
+            RenderCard();
+            ShowMatchPlayers(auto: true);
         }
         catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or TaskCanceledException or IOException or System.Text.Json.JsonException
-                                       or System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+                                       or UnauthorizedAccessException)
         {
             LiveNote("ошибка: " + ex.Message);
         }
@@ -442,32 +425,28 @@ sealed class AppController
         }
     }
 
-    // «Включить звания в Турбо»: Steam закрывается, к параметрам запуска Dota добавляется -condebug, Steam открывается снова.
-    async Task EnableLaunchAsync()
+    // Игроки матча Valve — в окне лобби: медаль, ник, сколько вы с ним сыграли вместе и против. Сами — на время из настроек
+    // («Лобби NEC: загрузка»), не зависят от карточки пика; Ctrl+Alt+N — снова, пока идёт матч.
+    void ShowMatchPlayers(bool auto)
     {
-        if (Setup.DotaStartedAt() != null)
+        if (_roster is not { } roster) return;
+        var body = new List<System.Windows.UIElement>
         {
-            _tray.ShowBalloonTip(8000, "Dota Reports", "Сначала закройте Dota: Steam придётся перезапустить, а вместе с ним закроется и она.", Forms.ToolTipIcon.Info);
-            return;
-        }
-        if (System.Windows.MessageBox.Show("Звания и сведения об игроках в Турбо берутся из журнала консоли Dota, а она пишет его только с параметром -condebug.\n\n" +
-                "Программа закроет Steam, добавит -condebug к параметрам запуска Dota (прежние настройки — в localconfig.vdf.dotareports.bak) " +
-                "и откроет Steam снова. Продолжить?", "Dota Reports — звания в Турбо", System.Windows.MessageBoxButton.YesNo) != System.Windows.MessageBoxResult.Yes)
-            return;
-        _launchItem.Enabled = false;
-        try
-        {
-            _tray.ShowBalloonTip(8000, "Dota Reports", await SteamLaunch.EnableAsync(), Forms.ToolTipIcon.Info);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
-        {
-            Log.Write("Параметры запуска Dota не изменены: " + ex);
-            _tray.ShowBalloonTip(8000, "Dota Reports", "Не удалось: " + ex.Message, Forms.ToolTipIcon.Error);
-        }
-        finally
-        {
-            _launchItem.Enabled = true;
-        }
+            Glass.Text($"с медалью {roster.Count(p => p.RankTier > 0)} из {roster.Count} · " +
+                       (!_rosterPeersKnown ? "знакомые: OpenDota не ответил"
+                           : roster.Count(p => p.With + p.Against > 0) is int known and > 0 ? $"знакомых {known}" : "знакомых нет"),
+                12, Glass.GoldLight, bold: true),
+        };
+        body.AddRange(LiveMatch.Tiles(roster, _rosterPeersKnown));
+        _necLobby.Render($"Игроки матча · {roster.Count}", "Ctrl+Alt+N", body,
+            "Steam «Недавние игроки» · медали и «за · против» — OpenDota · без деления на команды", () => ShowMatchPlayers(auto: false));
+        _necShowsMatch = true;
+        if (_rating.IsVisible) _rating.Toggle(); // оба окна в одном углу
+        if (!_necLobby.IsVisible) _necLobby.Toggle();
+        _necHide.Stop();
+        if (!auto || _reminders.Windows.NecGame <= 0) return;
+        _necHide.Interval = WindowDurations.Of(_reminders.Windows.NecGame);
+        _necHide.Start();
     }
 
     // «Бери» — ещё и рамкой вокруг клетки героя в сетке, пока вы сами не выбрали (и карточку не закрыли ✕)
@@ -1274,6 +1253,7 @@ sealed class AppController
         Group("В комнате NEC, на экране не узнаны", extra);
         _necLobby.Render($"Лобби NEC · {recognized.Count + extra.Count}", "Ctrl+Alt+N", body,
             "узнаны по аватарке на экране кастомки · медали — OpenDota", RefreshNecLobby);
+        _necShowsMatch = false;
         if (_rating.IsVisible) _rating.Toggle(); // оба окна в одном углу
         if (!_necLobby.IsVisible) _necLobby.Toggle();
         _necHide.Stop();
@@ -1317,6 +1297,7 @@ sealed class AppController
         string source = mode == NecShow.Room ? $"комната NEC, {at:HH:mm} — обновится с новыми игроками" : $"кэш NEC за 10 мин до {at:HH:mm}";
         _necLobby.Render($"Лобби NEC · {players.Count}", "Ctrl+Alt+N", body,
             $"{source} · без деления на команды, могут быть ушедшие", RefreshNecLobby);
+        _necShowsMatch = false;
         if (_rating.IsVisible) _rating.Toggle(); // оба окна в одном углу
         if (!_necLobby.IsVisible) _necLobby.Toggle();
         _necHide.Stop();
@@ -1344,7 +1325,9 @@ sealed class AppController
     {
         if (!_necLobby.IsVisible)
         {
-            ShowNecLobby(NecShow.Hotkey);
+            // идёт матч Valve и его игроки известны — они; иначе лобби NEC
+            if (_roster != null && !_inCustom && _gameState.Length > 0) ShowMatchPlayers(auto: false);
+            else ShowNecLobby(NecShow.Hotkey);
             return;
         }
         _necHide.Stop();
@@ -1478,20 +1461,6 @@ sealed class AppController
             Setup.AskStratzToken();
             await LoadDraftAsync();
         });
-        _launchItem = new Forms.ToolStripMenuItem("Включить звания в Турбо…", null, async (_, _) => await EnableLaunchAsync()) { Visible = false };
-        menu.Items.Add(_launchItem);
-        // пункт виден, пока в параметрах запуска Dota нет -condebug
-        menu.Opening += (_, _) =>
-        {
-            try
-            {
-                _launchItem.Visible = SteamLaunch.Options() is { } options && !SteamLaunch.HasFlag(options);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                _launchItem.Visible = false;
-            }
-        };
         _updateItem = new Forms.ToolStripMenuItem($"Обновить DotaReports (у вас {Updater.Current})", null, async (_, _) => await UpdateAsync(manual: true));
         menu.Items.Add(_updateItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
@@ -1508,7 +1477,6 @@ sealed class AppController
         _tray.BalloonTipClicked += async (_, _) =>
         {
             if (_tray.BalloonTipText == LoginTip) await LoginAsync();
-            else if (_tray.BalloonTipText == LaunchTip) await EnableLaunchAsync();
         };
     }
 
