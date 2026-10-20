@@ -1,106 +1,41 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using Brushes = System.Windows.Media.Brushes;
 
 namespace DotaReports;
 
 /// <summary>
-/// Игрок матча: слот 0–9 (0–4 Силы Света, 5–9 Силы Тьмы), аккаунт, ник, медаль (rank_tier OpenDota, 0 — нет)
+/// Игрок матча: слот 0–9 (0–4 Силы Света, 5–9 Силы Тьмы; -1 — неизвестен), аккаунт, ник, медаль (rank_tier OpenDota, 0 — нет)
 /// и сколько игр вы сыграли с ним вместе и против (OpenDota, все режимы).
 /// </summary>
 sealed record LivePlayer(int Slot, uint Account, string Name, int RankTier, int With = 0, int Against = 0);
 
 /// <summary>
-/// Кто в матче — ещё на пике. Подключаясь к серверу Valve, Dota пишет в console.log его Steam ID:
-/// «Remote Connect (=[A:1:&lt;id&gt;:&lt;instance&gt;])» и в строке SteamNetSockets «steamid:9029…@…»; по нему Steam Web API
-/// IDOTA2MatchStats_570/GetRealtimeStats (ключ — apikey.txt в папке данных) отдаёт игроков с аккаунтами уже на пике
-/// (проверено 20.10 на играх из GetTopLiveGame), медали — OpenDota. console.log Dota пишет только с -condebug (SteamLaunch).
-/// Прошлый способ (страница Steam «Недавно играли вместе») не годился: Steam пишет её только после матча.
+/// Кто в матче Valve: аккаунты — из Steam «Недавние игроки» (Coplay), ники — Steam GetPlayerSummaries (ключ — apikey.txt
+/// в папке данных; без ключа — ник из OpenDota), медали и знакомые — OpenDota.
 /// </summary>
 static class LiveMatch
 {
+    const ulong SteamBase = 76561197960265728;
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
-    static readonly Regex Connect = new(@"=\[A:1:(\d+):(\d+)\]|steamid:(\d{17})");
     static readonly Dictionary<uint, int> Ranks = new();
-    const int TailBytes = 8 << 20; // console.log растёт до сотен МБ — читаем только хвост
+    static readonly Dictionary<uint, string> OpenDotaNames = new();
 
     static string KeyFile => Path.Combine(Paths.Root, "apikey.txt");
     public static bool HasKey => File.Exists(KeyFile) && new FileInfo(KeyFile).Length > 0;
 
     /// <summary>
-    /// Dota запущена без -condebug: console.log не менялся с её запуска — сервера матча из него не узнать
-    /// (19.10: Dota из Steam с параметрами без -condebug, лог стоял с утра; NEC запускает её со своим -condebug).
-    /// </summary>
-    public static bool ConsoleLogOff()
-    {
-        var procs = System.Diagnostics.Process.GetProcessesByName("dota2");
-        try
-        {
-            if (procs.Length == 0 || Setup.FindDota() is not { } dota) return false;
-            var started = procs.Min(p => p.StartTime);
-            var log = Path.Combine(dota, "game", "dota", "console.log");
-            return !File.Exists(log) || File.GetLastWriteTime(log) < started;
-        }
-        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
-        {
-            return false;
-        }
-        finally
-        {
-            foreach (var p in procs) p.Dispose();
-        }
-    }
-
-    /// <summary>Steam ID сервера, к которому Dota подключилась последней, и когда (по console.log); null — не найден.</summary>
-    public static (ulong Server, DateTime At)? LastServer()
-    {
-        if (Setup.FindDota() is not { } dota) return null;
-        var path = Path.Combine(dota, "game", "dota", "console.log");
-        if (!File.Exists(path)) return null;
-        string text;
-        using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-        {
-            long take = Math.Min(fs.Length, TailBytes);
-            fs.Seek(-take, SeekOrigin.End);
-            var buf = new byte[take];
-            fs.ReadExactly(buf);
-            text = Encoding.UTF8.GetString(buf);
-        }
-        foreach (var m in Connect.Matches(text).Reverse())
-        {
-            ulong server;
-            if (m.Groups[3].Success)
-            {
-                // steamid: бывает и ваш (тип 1) — нужен игровой сервер: тип 4 (анонимный) или 3
-                server = ulong.Parse(m.Groups[3].Value);
-                if ((server >> 52 & 0xF) is not (3 or 4)) continue;
-            }
-            else
-            {
-                ulong account = ulong.Parse(m.Groups[1].Value), instance = ulong.Parse(m.Groups[2].Value);
-                // SteamID64 анонимного игрового сервера: вселенная 1, тип 4 (A), экземпляр, номер
-                server = (1UL << 56) | (4UL << 52) | (instance << 32) | account;
-            }
-            // строка начинается со времени «MM/dd HH:mm:ss»
-            int line = text.LastIndexOf('\n', m.Index) + 1;
-            var at = line + 14 <= text.Length && DateTime.TryParseExact(text.Substring(line, 14), "MM/dd HH:mm:ss",
-                CultureInfo.InvariantCulture, DateTimeStyles.None, out var t) ? t : DateTime.MinValue;
-            return (server, at);
-        }
-        return null;
-    }
-
-    /// <summary>
-    /// Игроки матча на этом сервере (слоты по порядку в команде); null — Steam пока не отдаёт.
-    /// Последний ответ Steam — в realtime_stats.json (без ключа), чтобы разобрать, если что-то не так.
+    /// Игроки матча на этом сервере (слоты по порядку в команде); null — Steam не отдаёт. Только для --live-test:
+    /// состав обычных матчей (Турбо) Steam не отдаёт — 20.10 на пике пустой кадр, в игре «{}»; работает лишь у транслируемых топ-игр.
+    /// Последний ответ Steam — в realtime_stats.json (без ключа).
     /// </summary>
     public static async Task<List<(int Slot, uint Account, string Name)>?> PlayersAsync(ulong server)
     {
@@ -133,12 +68,12 @@ static class LiveMatch
 
     /// <summary>
     /// С кем вы уже играли: аккаунт → игр вместе и против (OpenDota players/&lt;вы&gt;/peers, significant=0 — с Турбо).
-    /// Пусто — нет account.txt или OpenDota не ответил.
+    /// null — нет account.txt или OpenDota не ответил (тогда «знакомых нет» писать нельзя).
     /// </summary>
-    public static async Task<Dictionary<uint, (int With, int Against)>> PeersAsync()
+    public static async Task<Dictionary<uint, (int With, int Against)>?> PeersAsync()
     {
+        if (!File.Exists(Paths.Account) || !uint.TryParse((await File.ReadAllTextAsync(Paths.Account)).Trim(), out var me)) return null;
         var peers = new Dictionary<uint, (int, int)>();
-        if (!File.Exists(Paths.Account) || !uint.TryParse((await File.ReadAllTextAsync(Paths.Account)).Trim(), out var me)) return peers;
         try
         {
             using var doc = JsonDocument.Parse(await Http.GetStringAsync($"https://api.opendota.com/api/players/{me}/peers?significant=0"));
@@ -150,31 +85,100 @@ static class LiveMatch
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
         {
             Log.Write("Звания на пике: знакомые с OpenDota не получены: " + ex.Message);
+            return null;
         }
         return peers;
     }
 
     static int Int(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.TryGetInt32(out var i) ? i : 0;
 
-    /// <summary>Медаль игрока с OpenDota (rank_tier); 0 — нет, скрыт или запрос не прошёл. Один раз на аккаунт.</summary>
+    /// <summary>Медаль игрока с OpenDota (rank_tier); 0 — нет, скрыт или запрос не прошёл. Один раз на аккаунт; ник — заодно.</summary>
     public static async Task<int> RankAsync(uint account)
     {
         if (account is 0 or uint.MaxValue) return 0; // бот или скрытый аккаунт
         lock (Ranks)
             if (Ranks.TryGetValue(account, out var cached)) return cached;
         int tier = 0;
+        string? name = null;
         try
         {
             using var doc = JsonDocument.Parse(await Http.GetStringAsync($"https://api.opendota.com/api/players/{account}"));
             if (doc.RootElement.TryGetProperty("rank_tier", out var rt) && rt.ValueKind == JsonValueKind.Number) tier = rt.GetInt32();
+            if (doc.RootElement.TryGetProperty("profile", out var pr) && pr.ValueKind == JsonValueKind.Object
+                && pr.TryGetProperty("personaname", out var pn) && pn.ValueKind == JsonValueKind.String) name = pn.GetString();
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
         {
             Log.Write($"Звания на пике: OpenDota для {account} не ответил: {ex.Message}");
             return 0; // не запоминаем — спросим снова
         }
-        lock (Ranks) Ranks[account] = tier;
+        lock (Ranks)
+        {
+            Ranks[account] = tier;
+            if (!string.IsNullOrEmpty(name)) OpenDotaNames[account] = name;
+        }
         return tier;
+    }
+
+    /// <summary>
+    /// Ники сейчас — как их показывает Dota (Steam GetPlayerSummaries, одним запросом); без ключа или если Steam не ответил —
+    /// ник из профиля OpenDota (после RankAsync), он бывает устаревшим.
+    /// </summary>
+    public static async Task<Dictionary<uint, string>> NamesAsync(IReadOnlyCollection<uint> accounts)
+    {
+        var names = new Dictionary<uint, string>();
+        lock (Ranks)
+            foreach (var a in accounts)
+                if (OpenDotaNames.TryGetValue(a, out var n)) names[a] = n;
+        if (!HasKey || accounts.Count == 0) return names;
+        try
+        {
+            var key = (await File.ReadAllTextAsync(KeyFile)).Trim();
+            var ids = string.Join(",", accounts.Select(a => SteamBase + a));
+            using var doc = JsonDocument.Parse(await Http.GetStringAsync($"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={key}&steamids={ids}"));
+            if (doc.RootElement.TryGetProperty("response", out var r) && r.TryGetProperty("players", out var players) && players.ValueKind == JsonValueKind.Array)
+                foreach (var p in players.EnumerateArray())
+                    if (p.TryGetProperty("steamid", out var sid) && ulong.TryParse(sid.GetString(), out var s64) && s64 > SteamBase
+                        && p.TryGetProperty("personaname", out var pn) && pn.GetString() is { Length: > 0 } name)
+                        names[(uint)(s64 - SteamBase)] = name;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or IOException)
+        {
+            Log.Write("Звания на пике: ники из Steam не получены: " + ex.Message);
+        }
+        return names;
+    }
+
+    /// <summary>
+    /// Плитки для окна «Игроки матча»: ник (клик — профиль Steam) и чип со званием, ниже — сколько вы с ним сыграли вместе
+    /// и против. peersKnown — список знакомых с OpenDota получен (иначе «не встречались» было бы неправдой).
+    /// </summary>
+    public static IEnumerable<UIElement> Tiles(IEnumerable<LivePlayer> players, bool peersKnown)
+    {
+        foreach (var p in players)
+        {
+            var head = new DockPanel();
+            var chip = Glass.Chip(DotaReports.Ranks.Name(p.RankTier) ?? "без медали", p.RankTier > 0 ? Glass.GoldLight : Glass.Muted, 11.5);
+            chip.Margin = new Thickness(6, 2, 0, 0);
+            chip.VerticalAlignment = VerticalAlignment.Top;
+            DockPanel.SetDock(chip, Dock.Right);
+            head.Children.Add(chip);
+            string sid = (SteamBase + p.Account).ToString();
+            head.Children.Add(new Border
+            {
+                Child = Glass.Text(p.Name, 18, Glass.Ink, serif: true, bold: true, wrap: false),
+                Background = Brushes.Transparent, CornerRadius = new CornerRadius(6), Padding = new Thickness(3, 0, 3, 0),
+                Margin = new Thickness(-3, 0, 0, 0), HorizontalAlignment = HorizontalAlignment.Left, Cursor = System.Windows.Input.Cursors.Hand,
+                ToolTip = "Профиль Steam", Tag = (Action)(() => NecLobby.OpenProfile(sid)),
+            });
+            // нули не пишем: «за 3», «против 2» или «за 3 · против 2»
+            var parts = new[] { p.With > 0 ? $"за {p.With}" : null, p.Against > 0 ? $"против {p.Against}" : null }.OfType<string>().ToList();
+            string detail = parts.Count > 0 ? "играли: " + string.Join(" · ", parts) : peersKnown ? "раньше не встречались" : "знакомые: OpenDota не ответил";
+            var box = new StackPanel();
+            box.Children.Add(head);
+            box.Children.Add(Glass.Text(detail, 12, parts.Count > 0 ? Glass.GoldLight : Glass.Muted, top: 1));
+            yield return Glass.Tile(box, top: 5, padding: new Thickness(10, 6, 8, 7));
+        }
     }
 }
 

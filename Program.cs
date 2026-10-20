@@ -32,7 +32,7 @@ static class Program
         }
         if (args.Length >= 1 && args[0] == "--live-test")
         {
-            // во время матча: сервер из console.log, состав от Steam, медали и знакомые с OpenDota — в live_test.txt
+            // последний матч Valve: игроки из Steam «Недавние игроки», ники, медали и знакомые — в live_test.txt
             UiTest.Live(Path.Combine(Paths.Root, "live_test.txt"));
             return;
         }
