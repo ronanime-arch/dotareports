@@ -25,6 +25,13 @@ sealed record GsiState(string GameState, string? Team, int HeroId, string? Match
     /// <summary>Вы играете сами: есть герой и сторона, не смотрите чужую игру и не в кастомке.</summary>
     public bool OwnGame => Playing && string.IsNullOrEmpty(CustomGame);
 
+    /// <summary>
+    /// Ваш пик в матче Valve: сторона есть, не смотрите чужую игру, не кастомка. Героя в начале пика ещё нет (hero 0),
+    /// поэтому <see cref="OwnGame"/> тут не подходит — звания на пике из-за него не запускались ни разу (19.10).
+    /// </summary>
+    public bool OwnPick => !Spectating && string.IsNullOrEmpty(CustomGame) &&
+        (string.Equals(Team, "radiant", StringComparison.OrdinalIgnoreCase) || string.Equals(Team, "dire", StringComparison.OrdinalIgnoreCase));
+
     /// <summary>Играете сами на обычной карте — и в кастомке, если её карта «dota» (руны и Рошан на тех же местах).</summary>
     public bool OnDotaMap => Playing && (string.IsNullOrEmpty(CustomGame) || MapName == "dota");
 

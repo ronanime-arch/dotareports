@@ -36,6 +36,30 @@ static class LiveMatch
     public static bool HasKey => File.Exists(KeyFile) && new FileInfo(KeyFile).Length > 0;
 
     /// <summary>Steam ID сервера Valve, к которому Dota подключилась последней, и когда (по console.log); null — не найден.</summary>
+    /// <summary>
+    /// Dota запущена без -condebug: console.log не менялся с её запуска — сервера матча из него не узнать
+    /// (19.10: Dota из Steam с параметрами без -condebug, лог стоял с утра; NEC запускает её со своим -condebug).
+    /// </summary>
+    public static bool ConsoleLogOff()
+    {
+        var procs = System.Diagnostics.Process.GetProcessesByName("dota2");
+        try
+        {
+            if (procs.Length == 0 || Setup.FindDota() is not { } dota) return false;
+            var started = procs.Min(p => p.StartTime);
+            var log = Path.Combine(dota, "game", "dota", "console.log");
+            return !File.Exists(log) || File.GetLastWriteTime(log) < started;
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            return false;
+        }
+        finally
+        {
+            foreach (var p in procs) p.Dispose();
+        }
+    }
+
     public static (ulong Server, DateTime At)? LastServer()
     {
         if (Setup.FindDota() is not { } dota) return null;
