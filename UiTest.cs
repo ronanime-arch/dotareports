@@ -222,6 +222,9 @@ static class UiTest
         var last = LiveMatch.LastServer();
         lines.Add(last is { } s ? $"сервер {s.Server}, подключение {s.At:dd.MM HH:mm:ss}" : "в console.log нет подключения к серверу Valve");
         if (LiveMatch.ConsoleLogOff()) lines.Add("Dota запущена без -condebug — console.log с её запуска не менялся");
+        var options = SteamLaunch.Options();
+        lines.Add(options == null ? "параметры запуска Dota: localconfig.vdf не найден"
+            : $"параметры запуска Dota: «{options}»" + (SteamLaunch.HasFlag(options) ? "" : $" — нет {SteamLaunch.Flag}"));
         if (last is { } srv)
         {
             try

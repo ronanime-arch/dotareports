@@ -19,23 +19,22 @@ namespace DotaReports;
 sealed record LivePlayer(int Slot, uint Account, string Name, int RankTier, int With = 0, int Against = 0);
 
 /// <summary>
-/// Кто в матче — ещё на пике. Подключаясь к серверу Valve, Dota пишет в console.log
-/// «Host activate: Remote Connect (=[A:1:&lt;id&gt;:&lt;instance&gt;])» — это Steam ID сервера; по нему Steam Web API
-/// IDOTA2MatchStats_570/GetRealtimeStats (ключ — apikey.txt в папке данных) отдаёт игроков с аккаунтами, медали — OpenDota.
-/// Кастомки NEC подключаются по IP — у них этого нет. Прошлый способ (страница Steam «Недавно играли вместе»)
-/// не годился: Steam пишет её только после матча.
+/// Кто в матче — ещё на пике. Подключаясь к серверу Valve, Dota пишет в console.log его Steam ID:
+/// «Remote Connect (=[A:1:&lt;id&gt;:&lt;instance&gt;])» и в строке SteamNetSockets «steamid:9029…@…»; по нему Steam Web API
+/// IDOTA2MatchStats_570/GetRealtimeStats (ключ — apikey.txt в папке данных) отдаёт игроков с аккаунтами уже на пике
+/// (проверено 20.10 на играх из GetTopLiveGame), медали — OpenDota. console.log Dota пишет только с -condebug (SteamLaunch).
+/// Прошлый способ (страница Steam «Недавно играли вместе») не годился: Steam пишет её только после матча.
 /// </summary>
 static class LiveMatch
 {
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
-    static readonly Regex Connect = new(@"Host activate: Remote Connect \(=\[A:1:(\d+):(\d+)\]\)");
+    static readonly Regex Connect = new(@"=\[A:1:(\d+):(\d+)\]|steamid:(\d{17})");
     static readonly Dictionary<uint, int> Ranks = new();
     const int TailBytes = 8 << 20; // console.log растёт до сотен МБ — читаем только хвост
 
     static string KeyFile => Path.Combine(Paths.Root, "apikey.txt");
     public static bool HasKey => File.Exists(KeyFile) && new FileInfo(KeyFile).Length > 0;
 
-    /// <summary>Steam ID сервера Valve, к которому Dota подключилась последней, и когда (по console.log); null — не найден.</summary>
     /// <summary>
     /// Dota запущена без -condebug: console.log не менялся с её запуска — сервера матча из него не узнать
     /// (19.10: Dota из Steam с параметрами без -condebug, лог стоял с утра; NEC запускает её со своим -condebug).
@@ -60,6 +59,7 @@ static class LiveMatch
         }
     }
 
+    /// <summary>Steam ID сервера, к которому Dota подключилась последней, и когда (по console.log); null — не найден.</summary>
     public static (ulong Server, DateTime At)? LastServer()
     {
         if (Setup.FindDota() is not { } dota) return null;
@@ -74,15 +74,28 @@ static class LiveMatch
             fs.ReadExactly(buf);
             text = Encoding.UTF8.GetString(buf);
         }
-        var m = Connect.Matches(text).LastOrDefault();
-        if (m == null) return null;
-        ulong account = ulong.Parse(m.Groups[1].Value), instance = ulong.Parse(m.Groups[2].Value);
-        // строка начинается со времени «MM/dd HH:mm:ss»
-        int line = text.LastIndexOf('\n', m.Index) + 1;
-        var at = line + 14 <= text.Length && DateTime.TryParseExact(text.Substring(line, 14), "MM/dd HH:mm:ss",
-            CultureInfo.InvariantCulture, DateTimeStyles.None, out var t) ? t : DateTime.MinValue;
-        // SteamID64 анонимного игрового сервера: вселенная 1, тип 4 (A), экземпляр, номер
-        return ((1UL << 56) | (4UL << 52) | (instance << 32) | account, at);
+        foreach (var m in Connect.Matches(text).Reverse())
+        {
+            ulong server;
+            if (m.Groups[3].Success)
+            {
+                // steamid: бывает и ваш (тип 1) — нужен игровой сервер: тип 4 (анонимный) или 3
+                server = ulong.Parse(m.Groups[3].Value);
+                if ((server >> 52 & 0xF) is not (3 or 4)) continue;
+            }
+            else
+            {
+                ulong account = ulong.Parse(m.Groups[1].Value), instance = ulong.Parse(m.Groups[2].Value);
+                // SteamID64 анонимного игрового сервера: вселенная 1, тип 4 (A), экземпляр, номер
+                server = (1UL << 56) | (4UL << 52) | (instance << 32) | account;
+            }
+            // строка начинается со времени «MM/dd HH:mm:ss»
+            int line = text.LastIndexOf('\n', m.Index) + 1;
+            var at = line + 14 <= text.Length && DateTime.TryParseExact(text.Substring(line, 14), "MM/dd HH:mm:ss",
+                CultureInfo.InvariantCulture, DateTimeStyles.None, out var t) ? t : DateTime.MinValue;
+            return (server, at);
+        }
+        return null;
     }
 
     /// <summary>
