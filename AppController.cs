@@ -101,6 +101,7 @@ sealed class AppController
     readonly DispatcherTimer _liveTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     ulong? _liveServer;
     List<LivePlayer>? _livePlayers;
+    string? _liveHint;                                           // что мешает званиям на пике — строкой внизу карточки
     DateTime _liveAsked;
     bool _liveBusy;
     string? _liveNote;   // что последним записано в журнал — пишем только перемены
@@ -302,7 +303,7 @@ sealed class AppController
             _lastSnap = new PickSnapshot(new HashSet<int>(), new List<int>(), new List<int>(), new List<int>(), 0, 0, null, 0);
             _turboCard.ResetDismissed(); // новый пик — карточка снова видна, даже если в прошлом её закрыли ✕
             _turboCard.Refresh = RenderCard;
-            if (s.OwnGame) StartLiveRanks();
+            if (s.OwnPick) StartLiveRanks();
             if (_draftData.TurboReady)
             {
                 _turboCard.Render(_draftData, _lastSnap, _watcher.Status, _ownHero);
@@ -326,14 +327,15 @@ sealed class AppController
     void RenderCard()
     {
         if (!_picking || _lastSnap == null || !_draftData.TurboReady) return;
-        _turboCard.Render(_draftData, _lastSnap, $"с экрана: банов {_lastSnap.Bans}, занято {_lastSnap.Taken}", _ownHero);
+        _turboCard.Render(_draftData, _lastSnap, $"с экрана: банов {_lastSnap.Bans}, занято {_lastSnap.Taken}" + (_liveHint != null ? " · " + _liveHint : ""), _ownHero);
         _turboCard.ShowCard(); // данные могли догрузиться уже посреди пика — тогда карточки ещё не было
         UpdatePickFrame();
     }
 
     void StartLiveRanks()
     {
-        (_liveServer, _livePlayers, _liveAsked, _liveNote) = (null, null, DateTime.MinValue, null);
+        (_liveServer, _livePlayers, _liveAsked, _liveNote, _liveHint) = (null, null, DateTime.MinValue, null, null);
+        _topLeft = Enumerable.Repeat(-1, 10).ToArray();
         if (!Setup.ScreenSupported) return;
         if (!LiveMatch.HasKey)
         {
@@ -374,7 +376,14 @@ sealed class AppController
                     var last = await Task.Run(LiveMatch.LastServer);
                     if (last is not { } srv || DateTime.Now - srv.At > TimeSpan.FromMinutes(15))
                     {
-                        LiveNote("в console.log нет свежего подключения к серверу Valve");
+                        if (await Task.Run(LiveMatch.ConsoleLogOff))
+                        {
+                            // без подсказки на виду звания просто молча не появлялись
+                            LiveNote("Dota запущена без -condebug — console.log не пишется, сервер матча не узнать");
+                            _liveHint = "звания у ников: добавьте -condebug в параметры запуска Dota";
+                            RenderCard();
+                        }
+                        else LiveNote("в console.log нет свежего подключения к серверу Valve");
                         _liveTimer.Stop();
                         return;
                     }
@@ -399,16 +408,9 @@ sealed class AppController
                          string.Join(", ", _livePlayers.Select(p => $"{p.Slot}:{p.Name}={p.RankTier}")));
             }
             var players = _livePlayers;
-            var left = await Task.Run(() =>
-            {
-                var band = TopBarNames.Band;
-                using var bmp = new System.Drawing.Bitmap(band.Width, band.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
-                using (var g = System.Drawing.Graphics.FromImage(bmp))
-                    g.CopyFromScreen(band.Location, System.Drawing.Point.Empty, band.Size);
-                return TopBarNames.TextLeft(bmp);
-            });
+            await FillTopLeftAsync();
             if (!_liveTimer.IsEnabled) return; // пик уже кончился
-            _pickRanks.ShowBadges(TopBarNames.Spots(players, left, medals: _mode.Mode != "ALL_PICK"));
+            _pickRanks.ShowBadges(TopBarNames.Spots(players, _topLeft, medals: _mode.Mode != "ALL_PICK"));
         }
         catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or TaskCanceledException or IOException or System.Text.Json.JsonException
                                        or System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception)
@@ -1050,26 +1052,30 @@ sealed class AppController
         }
     }
 
-    // Где ники — читаем, пока не найдены: потом на их месте наша же медаль (снимок экрана её видит) и сбила бы край ника.
+    // Где ники в верхней полосе (и на пике матча Valve, и на стратегии кастомки) — читаем, пока не найдены: потом на их
+    // месте наша же медаль (снимок экрана её видит) и сбила бы край ника.
+    async Task FillTopLeftAsync()
+    {
+        if (!_topLeft.Any(x => x < 0)) return;
+        var left = await Task.Run(() =>
+        {
+            var band = TopBarNames.Band;
+            using var bmp = new System.Drawing.Bitmap(band.Width, band.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            using (var g = System.Drawing.Graphics.FromImage(bmp))
+                g.CopyFromScreen(band.Location, System.Drawing.Point.Empty, band.Size);
+            return TopBarNames.TextLeft(bmp);
+        });
+        for (int s = 0; s < 10; s++)
+            if (_topLeft[s] < 0) _topLeft[s] = left[s];
+    }
+
     async Task ShowTopBarAsync()
     {
         if (_topBarBusy) return;
         _topBarBusy = true;
         try
         {
-            if (_topLeft.Any(x => x < 0))
-            {
-                var left = await Task.Run(() =>
-                {
-                    var band = TopBarNames.Band;
-                    using var bmp = new System.Drawing.Bitmap(band.Width, band.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
-                    using (var g = System.Drawing.Graphics.FromImage(bmp))
-                        g.CopyFromScreen(band.Location, System.Drawing.Point.Empty, band.Size);
-                    return TopBarNames.TextLeft(bmp);
-                });
-                for (int s = 0; s < 10; s++)
-                    if (_topLeft[s] < 0) _topLeft[s] = left[s];
-            }
+            await FillTopLeftAsync();
             if (!_topBarTimer.IsEnabled) return; // стадия уже кончилась
             var players = _onScreenSlot.Where(kv => _onScreen.ContainsKey(kv.Key)).Select(kv =>
             {

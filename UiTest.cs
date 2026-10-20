@@ -221,6 +221,7 @@ static class UiTest
         var lines = new List<string>();
         var last = LiveMatch.LastServer();
         lines.Add(last is { } s ? $"сервер {s.Server}, подключение {s.At:dd.MM HH:mm:ss}" : "в console.log нет подключения к серверу Valve");
+        if (LiveMatch.ConsoleLogOff()) lines.Add("Dota запущена без -condebug — console.log с её запуска не менялся");
         if (last is { } srv)
         {
             try
