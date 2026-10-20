@@ -103,6 +103,8 @@ sealed class AppController
     List<LivePlayer>? _livePlayers;
     string? _liveHint;                                           // что мешает званиям на пике — строкой внизу карточки
     DateTime _liveAsked;
+    DateTime _liveStart;                                         // начало пика — сколько ещё ждать подключения в console.log
+    bool _launchTipDue, _launchTipShown;                         // подсказка про -condebug после пика — раз за запуск
     bool _liveBusy;
     string? _liveNote;   // что последним записано в журнал — пишем только перемены
     readonly ProfileData _profile = new();
@@ -138,6 +140,9 @@ sealed class AppController
     Forms.ToolStripMenuItem _updateItem = null!;
     Forms.ToolStripMenuItem _loginItem = null!; // «Войти в Steam…» — виден, только когда вход слетел
     const string LoginTip = "Нужно войти в Steam: нажмите на это уведомление или значок в трее → «Войти в Steam…».";
+    Forms.ToolStripMenuItem _launchItem = null!; // «Включить звания в Турбо…» — виден, пока в параметрах запуска Dota нет -condebug
+    const string LaunchTip = "Звания в Турбо не видны: Dota запущена без -condebug. После игры закройте Dota и нажмите на это уведомление " +
+                             "или значок в трее → «Включить звания в Турбо…» — программа добавит его сама.";
 
     public AppController(System.Windows.Application app)
     {
@@ -335,6 +340,7 @@ sealed class AppController
     void StartLiveRanks()
     {
         (_liveServer, _livePlayers, _liveAsked, _liveNote, _liveHint) = (null, null, DateTime.MinValue, null, null);
+        _liveStart = DateTime.Now;
         _topLeft = Enumerable.Repeat(-1, 10).ToArray();
         if (!Setup.ScreenSupported) return;
         if (!LiveMatch.HasKey)
@@ -349,6 +355,13 @@ sealed class AppController
     {
         _liveTimer.Stop();
         _pickRanks.ShowBadges(Array.Empty<BadgeSpot>());
+        // что делать без -condebug — после пика, раз за запуск программы (во время пика карточка говорит то же)
+        if (_launchTipDue && !_launchTipShown)
+        {
+            _launchTipShown = true;
+            _tray.ShowBalloonTip(15000, "Dota Reports", LaunchTip, Forms.ToolTipIcon.Info);
+        }
+        _launchTipDue = false;
     }
 
     void LiveNote(string note)
@@ -378,13 +391,19 @@ sealed class AppController
                     {
                         if (await Task.Run(LiveMatch.ConsoleLogOff))
                         {
-                            // без подсказки на виду звания просто молча не появлялись
-                            LiveNote("Dota запущена без -condebug — console.log не пишется, сервер матча не узнать");
-                            _liveHint = "звания у ников: добавьте -condebug в параметры запуска Dota";
+                            // без -condebug сервера не узнать никак — программа добавляет его сама (трей), подсказка — на карточке и после пика
+                            bool added = SteamLaunch.HasFlag(await Task.Run(SteamLaunch.Options));
+                            LiveNote(added ? "-condebug уже в параметрах запуска, но Dota запущена раньше — звания со следующего её запуска"
+                                           : "Dota запущена без -condebug — console.log не пишется, сервер матча не узнать");
+                            _liveHint = added ? "звания у ников: перезапустите Dota" : "звания у ников: в трее «Включить звания в Турбо»";
+                            _launchTipDue = !added;
                             RenderCard();
+                            _liveTimer.Stop();
+                            return;
                         }
-                        else LiveNote("в console.log нет свежего подключения к серверу Valve");
-                        _liveTimer.Stop();
+                        LiveNote("в console.log нет свежего подключения к серверу Valve");
+                        // строка о подключении может появиться в журнале позже начала пика — ищем ещё минуту
+                        if (DateTime.Now - _liveStart > TimeSpan.FromMinutes(1)) _liveTimer.Stop();
                         return;
                     }
                     _liveServer = srv.Server;
@@ -413,13 +432,41 @@ sealed class AppController
             _pickRanks.ShowBadges(TopBarNames.Spots(players, _topLeft, medals: _mode.Mode != "ALL_PICK"));
         }
         catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or TaskCanceledException or IOException or System.Text.Json.JsonException
-                                       or System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception)
+                                       or System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
         {
             LiveNote("ошибка: " + ex.Message);
         }
         finally
         {
             _liveBusy = false;
+        }
+    }
+
+    // «Включить звания в Турбо»: Steam закрывается, к параметрам запуска Dota добавляется -condebug, Steam открывается снова.
+    async Task EnableLaunchAsync()
+    {
+        if (Setup.DotaStartedAt() != null)
+        {
+            _tray.ShowBalloonTip(8000, "Dota Reports", "Сначала закройте Dota: Steam придётся перезапустить, а вместе с ним закроется и она.", Forms.ToolTipIcon.Info);
+            return;
+        }
+        if (System.Windows.MessageBox.Show("Звания и сведения об игроках в Турбо берутся из журнала консоли Dota, а она пишет его только с параметром -condebug.\n\n" +
+                "Программа закроет Steam, добавит -condebug к параметрам запуска Dota (прежние настройки — в localconfig.vdf.dotareports.bak) " +
+                "и откроет Steam снова. Продолжить?", "Dota Reports — звания в Турбо", System.Windows.MessageBoxButton.YesNo) != System.Windows.MessageBoxResult.Yes)
+            return;
+        _launchItem.Enabled = false;
+        try
+        {
+            _tray.ShowBalloonTip(8000, "Dota Reports", await SteamLaunch.EnableAsync(), Forms.ToolTipIcon.Info);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            Log.Write("Параметры запуска Dota не изменены: " + ex);
+            _tray.ShowBalloonTip(8000, "Dota Reports", "Не удалось: " + ex.Message, Forms.ToolTipIcon.Error);
+        }
+        finally
+        {
+            _launchItem.Enabled = true;
         }
     }
 
@@ -1431,6 +1478,20 @@ sealed class AppController
             Setup.AskStratzToken();
             await LoadDraftAsync();
         });
+        _launchItem = new Forms.ToolStripMenuItem("Включить звания в Турбо…", null, async (_, _) => await EnableLaunchAsync()) { Visible = false };
+        menu.Items.Add(_launchItem);
+        // пункт виден, пока в параметрах запуска Dota нет -condebug
+        menu.Opening += (_, _) =>
+        {
+            try
+            {
+                _launchItem.Visible = SteamLaunch.Options() is { } options && !SteamLaunch.HasFlag(options);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _launchItem.Visible = false;
+            }
+        };
         _updateItem = new Forms.ToolStripMenuItem($"Обновить DotaReports (у вас {Updater.Current})", null, async (_, _) => await UpdateAsync(manual: true));
         menu.Items.Add(_updateItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
@@ -1447,6 +1508,7 @@ sealed class AppController
         _tray.BalloonTipClicked += async (_, _) =>
         {
             if (_tray.BalloonTipText == LoginTip) await LoginAsync();
+            else if (_tray.BalloonTipText == LaunchTip) await EnableLaunchAsync();
         };
     }
 
