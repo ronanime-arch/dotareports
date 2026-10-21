@@ -12,13 +12,19 @@ namespace DotaReports;
 /// <summary>Ваша игра в кастомке: герой, исход (null — не узнали: вышли раньше конца), K/D/A, золото и опыт в минуту, минуты.</summary>
 sealed record CustomGameRecord(string Game, DateTime At, int Hero, bool? Win, int Kills, int Deaths, int Assists, int Gpm, int Xpm, int Minutes);
 
-/// <summary>Кого из трёх брать: оценка (выше — лучше), ваши игры на герое здесь и в обычной Доте, его винрейт в Турбо.</summary>
+/// <summary>Ваша игра в кастомке для оценки — записанная программой и/или из истории NEC; Gpm 0 — неизвестно (игра только в NEC).</summary>
+sealed record HereGame(int Hero, bool? Win, int Kills, int Deaths, int Assists, int Gpm)
+{
+    public double Kda => (Kills + Assists) / (double)Math.Max(1, Deaths);
+}
+
+/// <summary>Кого из трёх брать: оценка (выше — лучше), ваши игры на герое здесь (HereGpm 0 — золота не знаем) и в обычной Доте, его винрейт в Турбо.</summary>
 sealed record CustomChoice(int Hero, double Score, int HereGames, double HereGpm, int HereWins, int HereKnown, double HereKda,
     int UsualGames, int UsualWins, double Turbo, CommunityVoice? Voice = null, double ScoreWithoutVoice = 0)
 {
     public string Here => HereGames == 0 ? "здесь ещё не играли"
         : $"здесь {HereGames} {Words.Plural(HereGames, "игра", "игры", "игр")}" + (HereKnown > 0 ? $", побед {HereWins} из {HereKnown}" : "")
-          + $" · {HereGpm:0} зол/мин · KDA {HereKda:0.0}";
+          + (HereGpm > 0 ? $" · {HereGpm:0} зол/мин" : "") + $" · KDA {HereKda:0.0}";
 
     public string Usual => (UsualGames > 0 ? $"в Доте {UsualGames} {Words.Plural(UsualGames, "игра", "игры", "игр")}, {UsualRate:0}% побед" : "в Доте не играли")
         + $" · Турбо {Turbo * 100:0.0}%";
@@ -61,14 +67,19 @@ static class CommunityPicks
 
 /// <summary>
 /// Статистика ваших игр в кастомках (custom_stats.json, последние 500): Stratz и OpenDota кастомки не собирают,
-/// поэтому единственные данные — ваши. Dota присылает в GSI героя, K/D/A, GPM, XPM и кто победил (map.win_team).
+/// поэтому единственные данные — ваши. Dota присылает в GSI героя, K/D/A, GPM, XPM и кто победил (map.win_team) —
+/// но кастомка IM Пробуждение победителя почти не присылает: её исходы — из истории NEC (<see cref="AwakenHistory"/>).
 /// </summary>
 static class CustomStats
 {
     const int Keep = 500;
     const int MinGames = 3;        // своих игр в кастомке меньше — советуем по обычной Доте
-    const double GpmPrior = 2;     // GPM героя сглаживается к вашему среднему, как будто ещё 2 игры
+    const double GpmPrior = 2;     // GPM и KDA героя сглаживаются к вашим средним здесь, как будто ещё 2 игры
     const double OwnPrior = 30;    // обычная Дота: ваши игры на герое, общий винрейт весит как 30 игр
+    const double WinPrior = 5;     // победы здесь: ожидание по Доте и игре на герое весит как 5 игр с известным исходом
+    const double FormWeight = 0.5; // на герое золота и KDA на 20% больше ваших средних — ожидание побед на 10 п.п. выше
+    const double MaxForm = 0.4;    // не больше ±40%: пара удачных игр не перевешивает победы
+    const double NecSlack = 20;    // минут: NEC пишет начало игры, мы — конец; между ними длина игры и до 20 мин выбора и итогов
 
     public static List<CustomGameRecord> Load()
     {
@@ -99,38 +110,72 @@ static class CustomStats
     }
 
     /// <summary>
-    /// Три героя на выбор — от лучшего. Есть хотя бы 3 ваши игры в этой кастомке — по золоту в минуту на герое
-    /// (против ботов побеждают почти всегда, а GPM показывает, насколько герой у вас разгоняется), сглаженному
-    /// к вашему среднему; иначе — по вашим играм на герое в обычной Доте, сглаженным к его винрейту в Турбо.
-    /// Отзывы о слишком сильных героях (<see cref="CommunityPicks"/>) сдвигают этот винрейт вверх: решают, пока своих игр
-    /// на героях мало, а золото в минуту на сыгранных здесь героях перевешивает.
+    /// Ваши игры в кастомке <paramref name="game"/>: записанные программой и, для IM Пробуждение, из истории NEC — каждая один раз.
+    /// У NEC время — начало игры, у нас — конец: та же игра, если тот же герой и NEC начал её за длину игры … +20 мин
+    /// до нашей записи (на 15 общих играх 21.10 — за 3,7–5,7 мин сверх длины, K/D/A совпали). Исход и K/D/A — от NEC, золото — наше.
     /// </summary>
-    public static (List<CustomChoice> Choices, bool ByCustom) Rank(DraftData data, string game, IReadOnlyList<int> heroes)
+    public static List<HereGame> Games(string game, IEnumerable<CustomGameRecord> own, IEnumerable<AwakenMatch> nec)
     {
-        var here = Load().Where(r => r.Game == game && r.Gpm > 0).ToList();
+        var free = game == CommunityPicks.Game ? nec.ToList() : new List<AwakenMatch>();
+        var result = new List<HereGame>();
+        foreach (var r in own.Where(r => r.Game == game && r.Gpm > 0).OrderBy(r => r.At))
+        {
+            var start = r.At.ToUniversalTime().AddMinutes(-r.Minutes); // начало по часам игры; NEC — раньше, на выбор героя
+            var same = free.Where(m => m.Hero == r.Hero && (start - m.Start.ToUniversalTime()).TotalMinutes is >= 0 and <= NecSlack)
+                .MinBy(m => start - m.Start.ToUniversalTime());
+            if (same != null) free.Remove(same);
+            result.Add(same != null ? new HereGame(r.Hero, same.Win, same.Kills, same.Deaths, same.Assists, r.Gpm)
+                : new HereGame(r.Hero, r.Win, r.Kills, r.Deaths, r.Assists, r.Gpm));
+        }
+        result.AddRange(free.Select(m => new HereGame(m.Hero, m.Win, m.Kills, m.Deaths, m.Assists, 0)));
+        return result;
+    }
+
+    /// <summary>
+    /// Три героя на выбор — от лучшего. Есть хотя бы 3 ваши игры в этой кастомке — по победам на герое здесь (исход
+    /// известен у игр из истории NEC), сглаженным к ожиданию: винрейту в обычной Доте, поправленному на то, как герой
+    /// у вас идёт здесь — золото в минуту и KDA против ваших средних здесь. Пока исходов на герое нет, решает это ожидание.
+    /// Своих игр в кастомке меньше трёх — по вашим играм на герое в обычной Доте, сглаженным к его винрейту в Турбо.
+    /// Отзывы о слишком сильных героях (<see cref="CommunityPicks"/>) сдвигают винрейт по Доте вверх: решают, пока своих игр
+    /// на героях мало, а игра на сыгранных здесь героях перевешивает.
+    /// </summary>
+    /// <param name="here">Ваши игры здесь (<see cref="Games"/>); null — из custom_stats.json и nec_awaken.json.</param>
+    public static (List<CustomChoice> Choices, bool ByCustom) Rank(DraftData data, string game, IReadOnlyList<int> heroes, IReadOnlyList<HereGame>? here = null)
+    {
+        here ??= Games(game, Load(), game == CommunityPicks.Game ? AwakenHistory.Load().Matches : Enumerable.Empty<AwakenMatch>());
         bool byCustom = here.Count >= MinGames;
-        double avgGpm = here.Count > 0 ? here.Average(r => r.Gpm) : 0;
+        var farmed = here.Where(g => g.Gpm > 0).ToList();
+        double avgGpm = farmed.Count > 0 ? farmed.Average(g => g.Gpm) : 0;
+        double avgKda = here.Count > 0 ? here.Average(g => g.Kda) : 0;
         var names = game == CommunityPicks.Game ? data.HeroInternalNames() : new Dictionary<int, string>();
         var result = new List<CustomChoice>();
         foreach (var hero in heroes)
         {
-            var games = here.Where(r => r.Hero == hero).ToList();
-            var known = games.Where(r => r.Win != null).ToList();
-            double gpm = games.Count > 0 ? games.Average(r => r.Gpm) : 0;
-            double kda = games.Count > 0 ? games.Average(r => (r.Kills + r.Assists) / (double)Math.Max(1, r.Deaths)) : 0;
+            var games = here.Where(g => g.Hero == hero).ToList();
+            var known = games.Where(g => g.Win != null).ToList();
+            int wins = known.Count(g => g.Win == true);
+            var heroFarmed = games.Where(g => g.Gpm > 0).ToList();
+            double gpm = heroFarmed.Count > 0 ? heroFarmed.Average(g => g.Gpm) : 0;
+            double kda = games.Count > 0 ? games.Average(g => g.Kda) : 0;
+            // насколько герой у вас лучше среднего здесь: золото и KDA, сглаженные к средним, как будто ещё GpmPrior игр
+            double form = Math.Clamp((Above(heroFarmed.Sum(g => g.Gpm), heroFarmed.Count, avgGpm) + Above(games.Sum(g => g.Kda), games.Count, avgKda)) / 2,
+                -MaxForm, MaxForm);
             double turbo = data.ModeWinrate(hero, "TURBO") is { } wr ? wr.Winrate / 100 : 0.5;
             var usual = data.Pool.TryGetValue(hero, out var pool) && pool.Games > 0 ? pool : (Games: 0, Wins: 0);
             var voice = CommunityPicks.Of(game, names.GetValueOrDefault(hero));
             double Score(double shift)
             {
                 double usualRate = (usual.Wins + OwnPrior * (turbo + shift)) / (usual.Games + OwnPrior);
-                return byCustom ? (games.Sum(r => r.Gpm) + GpmPrior * avgGpm) / (games.Count + GpmPrior) + usualRate : usualRate;
+                return byCustom ? (wins + WinPrior * (usualRate + FormWeight * form)) / (known.Count + WinPrior) : usualRate;
             }
-            result.Add(new CustomChoice(hero, Score(CommunityPicks.Shift(voice)), games.Count, gpm, known.Count(r => r.Win == true), known.Count, kda,
+            result.Add(new CustomChoice(hero, Score(CommunityPicks.Shift(voice)), games.Count, gpm, wins, known.Count, kda,
                 usual.Games, usual.Wins, turbo, voice, Score(0)));
         }
         return (result.OrderByDescending(c => c.Score).ToList(), byCustom);
     }
+
+    // На сколько долей среднее на герое выше вашего среднего здесь, со сглаживанием; среднего нет — 0.
+    static double Above(double sum, int n, double avg) => avg > 0 ? (sum + GpmPrior * avg) / (n + GpmPrior) / avg - 1 : 0;
 
     /// <summary>Первым его сделали отзывы в мастерской: без них первым был бы другой.</summary>
     public static bool DecidedByVoice(IReadOnlyList<CustomChoice> choices) =>
@@ -145,9 +190,18 @@ static class CustomStats
         if (DecidedByVoice(choices) && best.Voice is { } v)
             return $"в мастерской Steam {v.People} ({v.Period}) просили его ослабить — это перевесило ваши игры и Турбо";
         string voice = best.Voice is { } bv ? $"; в мастерской его просили ослабить {bv.People}" : "";
+        // исходы известны хоть у одного из трёх — сравниваем победы, иначе — золото; KDA — всегда
+        bool outcomes = choices.Any(c => c.HereKnown > 0);
+        string Here(CustomChoice c) => !outcomes ? $"{c.HereGpm:0} зол/мин, KDA {c.HereKda:0.0}"
+            : c.HereKnown > 0 ? $"{c.HereWins} из {c.HereKnown}, KDA {c.HereKda:0.0}" : $"KDA {c.HereKda:0.0}, исход неизвестен";
         if (byCustom && best.HereGames > 0)
-            return $"здесь у вас на нём {best.HereGpm:0} золота в минуту за {Games(best.HereGames)}; "
-                   + string.Join(", ", rest.Select(o => o.HereGames > 0 ? $"{name(o.Hero)} — {o.HereGpm:0}" : $"на {name(o.Hero)} здесь не играли")) + voice;
+        {
+            string mine = !outcomes ? $"{best.HereGpm:0} золота в минуту и KDA {best.HereKda:0.0} за {Games(best.HereGames)}"
+                : best.HereKnown > 0 ? $"{best.HereWins} {Words.Plural(best.HereWins, "победа", "победы", "побед")} из {best.HereKnown}, KDA {best.HereKda:0.0}"
+                : $"KDA {best.HereKda:0.0} за {Games(best.HereGames)}, исход неизвестен";
+            return $"здесь у вас на нём {mine}; "
+                   + string.Join("; ", rest.Select(o => o.HereGames > 0 ? $"{name(o.Hero)} — {Here(o)}" : $"на {name(o.Hero)} здесь не играли")) + voice;
+        }
         if (best.UsualGames > 0)
             return $"в Доте у вас на нём {best.UsualRate:0}% побед за {Games(best.UsualGames)}; "
                    + string.Join(", ", rest.Select(o => o.UsualGames > 0 ? $"{name(o.Hero)} — {o.UsualRate:0}% за {Games(o.UsualGames)}" : $"на {name(o.Hero)} не играли")) + voice;

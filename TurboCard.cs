@@ -101,14 +101,15 @@ sealed class TurboCard : GlassWindow
     /// по колонке на героя: ваши игры и что даёт Пробуждение (кастомка IM) на 0, 10 и 15 минуте.
     /// Длинные описания не влезают под кнопку «Повторный выбор героя» — плотнее, а не хватит — мельче (не ниже <see cref="MinScale"/>).
     /// </summary>
-    public void RenderChoices(DraftData data, IReadOnlyList<int> heroes, string game, Func<int, List<string>[]?> awakening)
+    /// <param name="here">Ваши игры здесь (<see cref="CustomStats.Games"/>); null — из своих файлов.</param>
+    public void RenderChoices(DraftData data, IReadOnlyList<int> heroes, string game, Func<int, List<string>[]?> awakening, IReadOnlyList<HereGame>? here = null)
     {
-        var (choices, byCustom) = CustomStats.Rank(data, game, heroes);
+        var (choices, byCustom) = CustomStats.Rank(data, game, heroes, here);
         Recommended = choices[0].Hero;
         double room = ChoicesRoom;
-        BuildChoices(data, choices, byCustom, awakening, compact: false);
+        BuildChoices(data, game, choices, byCustom, awakening, compact: false);
         if (ContentHeight() <= room) return;
-        BuildChoices(data, choices, byCustom, awakening, compact: true);
+        BuildChoices(data, game, choices, byCustom, awakening, compact: true);
         // с масштабом текст переносится по ширине 1165/s — высота падает быстрее масштаба, поэтому подбираем шагами
         for (double s = 1; s > MinScale && ContentHeight() > room;)
         {
@@ -118,12 +119,13 @@ sealed class TurboCard : GlassWindow
     }
 
     // compact — шапка в одну строку, «здесь» и «в Доте» одной строкой, отступы меньше
-    void BuildChoices(DraftData data, List<CustomChoice> choices, bool byCustom, Func<int, List<string>[]?> awakening, bool compact)
+    void BuildChoices(DraftData data, string game, List<CustomChoice> choices, bool byCustom, Func<int, List<string>[]?> awakening, bool compact)
     {
         Begin(ChoicesWidth, 16, compact ? new Thickness(12, 6, 10, 8) : new Thickness(14, 10, 12, 12));
         string Name(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
         string basis = CustomStats.DecidedByVoice(choices) ? "по отзывам в мастерской Steam"
-            : byCustom ? "по вашим играм здесь" : "по вашим играм в обычной Доте (здесь их пока меньше трёх)";
+            : byCustom ? "по вашим играм здесь" + (game == CommunityPicks.Game && choices.Any(c => c.HereKnown > 0) ? ", исходы — из истории NEC" : "")
+            : "по вашим играм в обычной Доте (здесь их пока меньше трёх)";
         string why = CustomStats.Why(choices, byCustom, Name);
         if (compact)
         {

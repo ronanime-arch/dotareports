@@ -193,7 +193,11 @@ sealed class AppController
             _necHide.Stop();
             if (_necLobby.IsVisible) _necLobby.Toggle();
         };
-        _necPoll.Tick += (_, _) => CheckNecRoom();
+        _necPoll.Tick += (_, _) =>
+        {
+            AwakenHistory.Sync(); // NEC хранит открытые страницы истории Пробуждения 7 дней — копим их у себя
+            CheckNecRoom();
+        };
         _badges = new RankBadges();
         _badgeTimer.Tick += async (_, _) => await CheckBadgesAsync();
         _pickRanks = new RankBadges();

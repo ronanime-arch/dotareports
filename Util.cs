@@ -38,6 +38,7 @@ static class Paths
     public static string MatchMode => Path.Combine(Root, "match_mode.json");
     public static string Predictions => Path.Combine(Root, "predictions.json");
     public static string CustomStats => Path.Combine(Root, "custom_stats.json"); // ваши игры в кастомках
+    public static string AwakenHistory => Path.Combine(Root, "nec_awaken.json"); // ваши игры в IM Пробуждение — из истории NEC
     public static string AutostartMark => Path.Combine(Root, "autostart.txt"); // автозагрузку уже прописывали
 }
 

@@ -85,14 +85,21 @@ static class UiTest
             ? new[] { new List<string> { "Enfeeble: эффект удвоен" }, new List<string> { "Brain Sap: выпускает 3 раза подряд" }, new List<string>() }
             : null);
         Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices"));
-        // худший случай: два героя с самыми длинными описаниями из .vpk самой кастомки (если скачана) и Ликан — с отзывами
+        // худший случай: два героя с самыми длинными описаниями из .vpk самой кастомки (если скачана) и Ликан — с отзывами;
+        // у всех троих по десятку игр здесь с исходами, золотом и KDA — самые длинные строки «здесь…» и «Почему»
         var names = data.HeroInternalNames();
         if (Setup.FindDota() is { } dota
             && AwakeningInfo.Load(Path.GetFullPath(Path.Combine(dota, @"..\..\workshop\content\570\3320645051\3320645051.vpk")), AwakeningInfo.AbilityNames()) is { } awakening)
         {
             int Length(int id) => awakening.Of(names.GetValueOrDefault(id))?.Sum(s => s.Sum(e => e.Length)) ?? 0;
             var longest = names.Keys.Where(id => id != 77).OrderByDescending(Length).Take(2).Append(77).ToArray();
-            card.RenderChoices(data, longest, "3320645051", id => awakening.Of(names.GetValueOrDefault(id)));
+            var here = new List<HereGame>();
+            void Played(int hero, int games, int wins, int gpm, int kills, int deaths, int assists) =>
+                here.AddRange(Enumerable.Range(0, games).Select(i => new HereGame(hero, i < wins, kills, deaths, assists, gpm)));
+            Played(77, 12, 9, 1250, 14, 8, 13);
+            Played(longest[0], 11, 5, 1180, 9, 10, 12);
+            Played(longest[1], 10, 4, 1050, 8, 11, 13);
+            card.RenderChoices(data, longest, "3320645051", id => awakening.Of(names.GetValueOrDefault(id)), here);
             Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices_long"));
             double scale = card.Root.LayoutTransform is ScaleTransform st ? st.ScaleX : 1;
             File.WriteAllText(Path.Combine(dir, "choices_long.txt"),
