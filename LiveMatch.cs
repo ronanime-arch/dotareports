@@ -228,6 +228,13 @@ static class TopBarNames
         return left;
     }
 
+    /// <summary>Под каким слотом текст с центром в x (px экрана): ближайший центр ника, не дальше полуширины; null — ничей.</summary>
+    public static int? SlotOf(double x)
+    {
+        int best = Enumerable.Range(0, 10).MinBy(s => Math.Abs(SlotX[s] + 50 - x));
+        return Math.Abs(SlotX[best] + 50 - x) <= Half ? best : null;
+    }
+
     /// <summary>
     /// Медаль перед ником (у кого она есть и ник виден) и под ником — «за N · против M», если вы уже играли
     /// с этим игроком (вместе / друг против друга).

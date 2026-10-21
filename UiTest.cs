@@ -204,9 +204,14 @@ static class UiTest
     /// --names-test: ники в полосе под портретами на кадре пика (frames\…_top.png или скриншот) и медали перед ними —
     /// на условных званиях (все медали по слотам, у двоих — «за · против»); левые края ников — в .txt.
     /// </summary>
-    public static void Names(string shotFile, string file)
+    public static void Names(string shotFile, string file, string? rosterFile = null)
     {
         RankArt.EnsureAsync().GetAwaiter().GetResult();
+        if (rosterFile != null)
+        {
+            NamesOcr(shotFile, file, rosterFile);
+            return;
+        }
         int[] left;
         using (var shot = new System.Drawing.Bitmap(shotFile))
         using (var band = new System.Drawing.Bitmap(TopBarNames.Band.Width, TopBarNames.Band.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb))
@@ -219,6 +224,28 @@ static class UiTest
         var players = Enumerable.Range(0, 10).Select(s => new LivePlayer(s, 0, $"слот {s}", tiers[s], s == 1 ? 3 : 0, s == 6 ? 2 : 0)).ToList();
         File.WriteAllLines(file + ".txt", left.Select((x, s) => $"слот {s}: ник с x = {x}"));
         RenderSpots(shotFile, TopBarNames.Spots(players, left), file + ".png");
+    }
+
+    // Пик матча Valve: состав coplay — строки «ник=звание», как в журнале «Звания на пике»; слоты — по нику в полосе (OCR)
+    static void NamesOcr(string shotFile, string file, string rosterFile)
+    {
+        var roster = File.ReadAllLines(rosterFile).Where(l => l.Contains('=')).Select(l =>
+        {
+            int eq = l.LastIndexOf('=');
+            return new LivePlayer(-1, 0, l[..eq].Trim(), int.Parse(l[(eq + 1)..]));
+        }).ToList();
+        using var shot = new System.Drawing.Bitmap(shotFile);
+        using var area = shot.Clone(TopBarOcr.Area, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+        var read = System.Threading.Tasks.Task.Run(() => TopBarOcr.ReadAsync(area)).GetAwaiter().GetResult();
+        var slots = TopBarOcr.Match(roster.Select(p => p.Name).ToList(), read.Texts);
+        var players = roster.Select((p, i) => p with { Slot = slots[i] }).ToList();
+        var lines = Enumerable.Range(0, 10).Select(s => $"слот {s}: ник с x = {read.Left[s]}; прочитано: " +
+            string.Join(" | ", read.Texts[s].Select(t => $"«{t}»"))).ToList();
+        lines.Add(TopBarOcr.Describe(players, read.Texts));
+        lines.AddRange(players.Select(p => $"{p.Name}: слот {p.Slot}, сходство со слотами " +
+            string.Join(" ", read.Texts.Select((t, s) => $"{s}:{t.Max(x => TopBarOcr.Score(p.Name, x)):0.00}"))));
+        File.WriteAllLines(file + ".txt", lines);
+        RenderSpots(shotFile, TopBarNames.Spots(players, read.Left), file + ".png");
     }
 
     // Значки и плашки тем же кодом, что в игре (RankBadges.Fill), поверх картинки — в png.

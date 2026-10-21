@@ -362,10 +362,62 @@ sealed class AppController
         _liveTimer.Start();
     }
 
-    // Пик кончился: значков у ников в матче Valve нет, а состав ждём дальше — Steam пишет его к концу пика или на стратегии
+    // Пик и стратегия кончились: медали у ников убрать, а состав ждём дальше — Steam пишет его к концу пика или на стратегии
     void StopLiveRanks()
     {
         if (_roster != null) _liveTimer.Stop();
+        _pickRanks.ShowBadges(Array.Empty<BadgeSpot>());
+    }
+
+    // Пик и стратегия в матче Valve: в coplay слотов нет — медаль ставим перед ником Steam, найденным в верхней полосе (OCR).
+    // Читаем, пока наших медалей там нет: снимок экрана их видит. Не нашли никого (экран пика не виден) — снова через 3 с.
+    // В All Pick звания Dota показывает сама — только «за · против».
+    /// <param name="missed">Что прочитано в прошлый раз — в журнал, если пик кончился раньше, чем ники нашлись.</param>
+    async Task ShowLiveTopBarAsync(int attempt = 0, string? missed = null)
+    {
+        if (_roster is not { } roster || !Setup.ScreenSupported) return;
+        if (!_picking)
+        {
+            LiveNote(missed != null ? "пик кончился раньше, чем ники нашлись: " + missed : "состав пришёл после пика — медалей у ников не будет");
+            return;
+        }
+        try
+        {
+            var read = await Task.Run(async () =>
+            {
+                var area = TopBarOcr.Area;
+                using var bmp = new System.Drawing.Bitmap(area.Width, area.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                using (var g = System.Drawing.Graphics.FromImage(bmp))
+                    g.CopyFromScreen(area.Location, System.Drawing.Point.Empty, area.Size);
+                return await TopBarOcr.ReadAsync(bmp);
+            });
+            if (_roster != roster) return; // уже другой матч
+            var slots = TopBarOcr.Match(roster.Select(p => p.Name).ToList(), read.Texts);
+            var placed = roster.Select((p, i) => p with { Slot = slots[i] }).ToList();
+            if (!_picking)
+            {
+                LiveNote("пик кончился, пока читали ники: " + TopBarOcr.Describe(placed, read.Texts));
+                return;
+            }
+            if (slots.All(s => s < 0) && attempt < 20)
+            {
+                _ = Retry(TopBarOcr.Describe(placed, read.Texts));
+                return;
+            }
+            LiveNote(TopBarOcr.Describe(placed, read.Texts));
+            _pickRanks.ShowBadges(TopBarNames.Spots(placed, read.Left, medals: _mode.Mode != "ALL_PICK"));
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException or System.ComponentModel.Win32Exception or ArgumentException
+                                       or InvalidOperationException or UnauthorizedAccessException)
+        {
+            LiveNote("ники в верхней полосе не прочитаны: " + ex.Message);
+        }
+
+        async Task Retry(string read)
+        {
+            await Task.Delay(3000);
+            await ShowLiveTopBarAsync(attempt + 1, read);
+        }
     }
 
     void LiveNote(string note)
@@ -416,6 +468,7 @@ sealed class AppController
             _liveTimer.Stop();
             _liveHint = "игроки матча — Ctrl+Alt+N";
             RenderCard();
+            await ShowLiveTopBarAsync(); // до окна игроков: ники читаются со снимка экрана
             ShowMatchPlayers(auto: true);
         }
         catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or TaskCanceledException or IOException or System.Text.Json.JsonException
