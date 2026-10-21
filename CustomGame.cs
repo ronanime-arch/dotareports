@@ -78,7 +78,6 @@ static class CommunityPicks
 /// </summary>
 static class TierList
 {
-    public const string Source = "тир-лист B站, 7.41, апрель 2026";
     const string Order = "SABCD";
     const double PerRow = 0.015;
 
@@ -244,7 +243,7 @@ static class CustomStats
         if (DecidedByTier(choices))
         {
             static string Row(CustomChoice c) => c.Tier is { } r ? r.ToString() : "нет в таблице";
-            return $"{TierList.Source}: у него ряд {Row(best)}, " + string.Join(", ", rest.Select(o => $"{name(o.Hero)} — {Row(o)}"))
+            return (best.Tier is { } bt ? $"у него ряд {bt}, " : "его в таблице нет, ") + string.Join(", ", rest.Select(o => $"{name(o.Hero)} — {Row(o)}"))
                    + " (S — сильнейшие, D — слабейшие); это перевесило ваши игры и Турбо";
         }
         string voice = best.Voice is { } bv ? $"; в мастерской его просили ослабить {bv.People}" : "";
