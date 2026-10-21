@@ -26,8 +26,9 @@ static class Program
         }
         if (args.Length >= 2 && args[0] == "--names-test")
         {
-            // ники под портретами на кадре пика и медали перед ними (условные звания) — names_test.txt / .png
-            UiTest.Names(args[1], Path.Combine(Paths.Root, "names_test"));
+            // ники под портретами на кадре пика и медали перед ними (условные звания) — names_test.txt / .png;
+            // третьим — файл «ник=звание» (состав coplay): тогда слоты по нику, прочитанному OCR
+            UiTest.Names(args[1], Path.Combine(Paths.Root, "names_test"), args.Length >= 3 ? args[2] : null);
             return;
         }
         if (args.Length >= 1 && args[0] == "--live-test")
