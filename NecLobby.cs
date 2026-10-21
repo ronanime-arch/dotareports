@@ -56,16 +56,20 @@ static class NecLobby
     /// заново не записывает — по времени из 10 в комнате ловятся 5–6; остальных узнаём по аватарке на экране среди всех.
     /// </param>
     /// <param name="sinceMatch">
-    /// Только записанных после того, как NEC нашёл последнюю игру: игроки прошлой (кто-то не принял, вышли до начала) записаны
-    /// раньше. Для узнавания по аватарке — false: подбор сводит одних и тех же, а знакомых NEC заново не пишет
-    /// (18.10: Felepe Rivera и ещё трое из прошлых двух игр без этого не узнавались).
+    /// Состав текущей игры NEC (<see cref="CurrentMatch"/>): записанные с её находки — без окна по времени (комната набирается
+    /// и дольше 10 минут: ↻ обнулял список); поиск или игры нет — никого (после выхода и нового поиска ↻ показывал прошлых).
+    /// Игроки прошлой игры (кто-то не принял, вышли до начала) записаны раньше. Для узнавания по аватарке — false: подбор
+    /// сводит одних и тех же, а знакомых NEC заново не пишет (18.10: Felepe Rivera и ещё трое без этого не узнавались).
     /// </param>
     public static List<NecPlayer> Load(DateTime until, TimeSpan? window = null, bool everyone = false, bool sinceMatch = true)
     {
         var cache = Path.Combine(Root, "Cache");
         long to = new DateTimeOffset(until).ToUnixTimeMilliseconds(), from = to - (long)(window ?? Window).TotalMilliseconds;
-        if (sinceMatch && !everyone && MatchFound(until) is { } found)
-            from = Math.Max(from, new DateTimeOffset(found).ToUnixTimeMilliseconds() - 5000);
+        if (sinceMatch && !everyone && CurrentMatch(until) is { Known: true } match)
+        {
+            if (match.Id == null) return new List<NecPlayer>();
+            from = new DateTimeOffset(match.Found).ToUnixTimeMilliseconds() - 5000;
+        }
         if (everyone) (from, to) = (long.MinValue, long.MaxValue);
         var own = OwnSteamIds();
         var seen = new Dictionary<string, (long At, string Name)>();
@@ -136,37 +140,44 @@ static class NecLobby
     }
 
     const int JournalTail = 768 * 1024;
+    static readonly TimeSpan JournalStale = TimeSpan.FromHours(2); // дольше игра не идёт — NEC закрыт, его журнал не в счёт
     static readonly object MatchesGate = new();
-    static (string Path, DateTime Stamp, long Length, List<(string Id, DateTime At)> Found) _matches;
+    static (string Path, DateTime Stamp, long Length, List<(DateTime At, string Id, string State)> States) _matches;
 
     /// <summary>
-    /// Когда NEC нашёл последнюю игру до <paramref name="until"/>: её matchId впервые в состоянии MATCHED в телеметрии NEC
-    /// (operations\client-*.jsonl, событие match.settlement). Профили игроков NEC пишет в кэш сразу, как игра найдена
-    /// (18.10: найдена 11:22:39 UTC — записаны 11:22:40). null — найденных игр в журнале нет (комната без подбора).
+    /// Игра NEC на момент <paramref name="until"/> — по телеметрии NEC (operations\client-*.jsonl, match.settlement):
+    /// поиск (QUEUED) → найдена (MATCHED) → приняли (READY) → идёт (IN_PROGRESS) → вышли или кончилась (NONE). Кто-то не
+    /// принял — после MATCHED снова QUEUED. Профили игроков NEC пишет в кэш сразу, как игра найдена (18.10: найдена
+    /// 11:22:39 UTC — записаны 11:22:40). Known=false — журнала нет или он давний (комнаты без подбора, NEC закрыт);
+    /// Id=null — поиск или игры нет: комнаты нет.
     /// </summary>
-    public static DateTime? MatchFound(DateTime until)
+    public static (bool Known, string? Id, DateTime Found) CurrentMatch(DateTime until)
     {
         var dir = Path.Combine(Root, "operations");
-        if (!Directory.Exists(dir)) return null;
+        if (!Directory.Exists(dir)) return default;
         // NEC пишет в client-0 и, дойдя до 2 МБ, сдвигает файлы: последние игры — в двух самых свежих
         var files = new DirectoryInfo(dir).GetFiles("client-*.jsonl").OrderByDescending(f => f.LastWriteTimeUtc).Take(2).ToList();
-        if (files.Count == 0) return null;
-        List<(string Id, DateTime At)> found;
+        if (files.Count == 0) return default;
+        List<(DateTime At, string Id, string State)> states;
         lock (MatchesGate) // зовут и из потока окна, и из фонового (чтение экрана)
         {
             if (_matches.Path != files[0].FullName || _matches.Stamp != files[0].LastWriteTimeUtc || _matches.Length != files[0].Length)
-                _matches = (files[0].FullName, files[0].LastWriteTimeUtc, files[0].Length, ReadMatches(files));
-            found = _matches.Found;
+                _matches = (files[0].FullName, files[0].LastWriteTimeUtc, files[0].Length, ReadStates(files));
+            states = _matches.States;
         }
-        // у каждой игры — первый раз, когда она найдена; из них последний до until
-        var starts = found.GroupBy(m => m.Id).Select(g => g.Min(m => m.At)).Where(at => at <= until).ToList();
-        return starts.Count > 0 ? starts.Max() : null;
+        var past = states.Where(s => s.At <= until).ToList();
+        if (past.Count == 0) return default;
+        var last = past.MaxBy(s => s.At);
+        if (until - last.At > JournalStale) return default;
+        if (last.State is not ("MATCHED" or "READY" or "IN_PROGRESS") || last.Id.Length == 0) return (true, null, default);
+        var found = past.Where(s => s.Id == last.Id).Select(s => s.At).Min();
+        return (true, last.Id, found);
     }
 
-    // найденные игры (matchId, когда) из хвостов журналов: журнал пишется постоянно, последние игры — в конце
-    static List<(string Id, DateTime At)> ReadMatches(List<FileInfo> files)
+    // состояния игры (когда, matchId, matchState) из хвостов журналов: журнал пишется постоянно, последние игры — в конце
+    static List<(DateTime At, string Id, string State)> ReadStates(List<FileInfo> files)
     {
-        var found = new List<(string, DateTime)>();
+        var states = new List<(DateTime, string, string)>();
         foreach (var f in files)
             try
             {
@@ -176,19 +187,20 @@ static class NecLobby
                 if (stream.Position > 0) reader.ReadLine(); // строка, разрезанная началом хвоста
                 while (reader.ReadLine() is { } line)
                 {
-                    if (!line.Contains("\"match.settlement\"") || !line.Contains("\"matchState\":\"MATCHED\"")) continue;
+                    if (!line.Contains("\"match.settlement\"") || !line.Contains("\"matchState\":\"")) continue;
                     using var doc = JsonDocument.Parse(line);
                     var root = doc.RootElement;
-                    if (Str(root, "time") is { } time && root.TryGetProperty("detail", out var d) && Str(d, "matchId") is { Length: > 0 } id
+                    // у поиска matchId пуст или прошлый — важно только состояние
+                    if (Str(root, "time") is { } time && root.TryGetProperty("detail", out var d) && Str(d, "matchState") is { Length: > 0 } state
                         && DateTime.TryParse(time, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at))
-                        found.Add((id, at.ToLocalTime()));
+                        states.Add((at.ToLocalTime(), Str(d, "matchId") ?? "", state));
                 }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
                 Log.Write($"NEC: журнал {f.Name} не прочитан: {ex.Message}");
             }
-        return found;
+        return states;
     }
 
     /// <summary>Файл стандартной аватарки Steam «?» из кэша NEC — с ней сравниваем, чтобы такие аватарки никого не выдавали.</summary>

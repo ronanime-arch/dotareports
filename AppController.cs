@@ -1228,14 +1228,18 @@ sealed class AppController
     // Узнанные по аватарке на экране кастомки — в карточку лобби, по командам (их видно на экране выбора команды);
     // к ним — те, кого NEC записал за 10 минут, но на экране не узнали (стандартная «?»-аватарка, ушедшие из комнаты).
     // Этот состав и остаётся для Ctrl+Alt+N на весь матч.
-    void ShowScreenLobby()
+    /// <param name="manual">↻ или Ctrl+Alt+N: показать, даже если раньше закрыли ✕, и не прятать по таймеру.</param>
+    void ShowScreenLobby(bool manual = false)
     {
         var recognized = _onScreen.Values.ToList();
-        // не узнанных добавляем, только пока в комнате есть места: в кэше за 10 минут и игроки прошлой комнаты
-        var extra = NecLobby.Load(DateTime.Now).Where(p => !_onScreen.ContainsKey(p.SteamId))
+        // не узнанных добавляем, только пока в комнате есть места; в идущей игре NEC подгружает посторонних —
+        // тогда берём их из состава на её начало
+        bool beforeGame = CustomBeforeGame.Contains(_gameState);
+        var pool = !beforeGame && _necSnapshot != null ? _necSnapshot : NecLobby.Load(DateTime.Now);
+        var extra = pool.Where(p => !_onScreen.ContainsKey(p.SteamId))
             .OrderByDescending(p => p.SeenAt).Take(Math.Max(0, RoomSize - 1 - recognized.Count)).ToList();
-        (_necSnapshot, _necSnapshotAt) = (recognized.Concat(extra).ToList(), DateTime.Now);
-        if (_necDismissed) return; // закрыли ✕ — состав запомнили, но сами не лезем
+        if (beforeGame) (_necSnapshot, _necSnapshotAt) = (recognized.Concat(extra).ToList(), DateTime.Now);
+        if (_necDismissed && !manual) return; // закрыли ✕ — состав запомнили, но сами не лезем
         var body = new List<System.Windows.UIElement>();
         void Group(string title, IEnumerable<NecPlayer> players)
         {
@@ -1257,7 +1261,7 @@ sealed class AppController
         if (_rating.IsVisible) _rating.Toggle(); // оба окна в одном углу
         if (!_necLobby.IsVisible) _necLobby.Toggle();
         _necHide.Stop();
-        if (_reminders.Windows.NecGame <= 0) return;
+        if (manual || _reminders.Windows.NecGame <= 0) return;
         _necHide.Interval = WindowDurations.Of(_reminders.Windows.NecGame);
         _necHide.Start();
     }
@@ -1291,10 +1295,14 @@ sealed class AppController
         }
         if (auto && _necDismissed) return; // закрыли ✕ — сами не лезем (Ctrl+Alt+N и ↻ — пожалуйста)
 
+        var match = NecLobby.CurrentMatch(at);
         var body = players.Count > 0
             ? NecLobby.Tiles(players, _draftData.Heroes).ToList()
-            : new List<System.Windows.UIElement> { Glass.Text("За 10 минут NEC никого не показывал — откройте комнату или подбор в NEC.", 13, Glass.Muted) };
-        string source = mode == NecShow.Room ? $"комната NEC, {at:HH:mm} — обновится с новыми игроками" : $"кэш NEC за 10 мин до {at:HH:mm}";
+            : new List<System.Windows.UIElement> { Glass.Text(match is { Known: true, Id: null }
+                ? "Игра в NEC ещё не найдена — состав появится, когда найдётся."
+                : "За 10 минут NEC никого не показывал — откройте комнату или подбор в NEC.", 13, Glass.Muted) };
+        string source = mode == NecShow.Room ? $"комната NEC, {at:HH:mm} — обновится с новыми игроками"
+            : match is { Known: true, Id: not null } ? $"кэш NEC с находки игры в {match.Found:HH:mm}" : $"кэш NEC за 10 мин до {at:HH:mm}";
         _necLobby.Render($"Лобби NEC · {players.Count}", "Ctrl+Alt+N", body,
             $"{source} · без деления на команды, могут быть ушедшие", RefreshNecLobby);
         _necShowsMatch = false;
@@ -1308,14 +1316,15 @@ sealed class AppController
         _necHide.Start();
     }
 
-    // ↻ в лобби: до начала кастомки — узнанные на экране (и аватарки NEC — заново на следующем такте), а пока никого —
-    // кэш NEC; посреди идущей кастомки — снимок с её начала (NEC тогда подгружает посторонних).
+    // ↻ в лобби: в кастомке, когда кого-то узнали на экране, — карточка по экрану (аватарки NEC — заново на следующем
+    // такте); иначе — кэш NEC текущей игры (поиск — никого), а посреди идущей кастомки — снимок с её начала.
     void RefreshNecLobby()
     {
-        if (_inCustom && CustomBeforeGame.Contains(_gameState) && _onScreen.Count > 0)
+        // кастомка, кого-то узнали на экране — карточка по экрану и в идущей игре (раньше ↻ там давал плоский снимок)
+        if (_inCustom && _onScreen.Count > 0)
         {
             _badgeStamp = default;
-            ShowScreenLobby();
+            ShowScreenLobby(manual: true);
             return;
         }
         ShowNecLobby(_inCustom && !CustomBeforeGame.Contains(_gameState) ? NecShow.Hotkey : NecShow.Fresh);
@@ -1327,6 +1336,7 @@ sealed class AppController
         {
             // идёт матч Valve и его игроки известны — они; иначе лобби NEC
             if (_roster != null && !_inCustom && _gameState.Length > 0) ShowMatchPlayers(auto: false);
+            else if (_inCustom && _onScreen.Count > 0) ShowScreenLobby(manual: true);
             else ShowNecLobby(NecShow.Hotkey);
             return;
         }
