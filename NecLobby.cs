@@ -37,7 +37,7 @@ static class NecLobby
         "xp_per_min", "hero_damage", "tower_damage", "hero_healing", "last_hits", "average_rank", "party_size", "version",
     }.Select(f => "project=" + f));
 
-    static string Root => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "nec-platform");
+    public static string Root => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "nec-platform");
     public static bool Installed => Directory.Exists(Path.Combine(Root, "Cache"));
 
     /// <summary>Когда NEC последний раз переписал кэш ников или профилей — чтобы не перечитывать без нужды.</summary>
@@ -324,7 +324,7 @@ static class NecLobby
     }
 
     /// <summary>Записи кэша NEC: {"entries":[[ключ,{"at":мс,"data":…}],…]}.</summary>
-    static IEnumerable<(string Key, long At, JsonElement Data)> Entries(string path)
+    public static IEnumerable<(string Key, long At, JsonElement Data)> Entries(string path)
     {
         if (Read(path) is not { } root || !root.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array) yield break;
         foreach (var e in entries.EnumerateArray())
@@ -351,6 +351,6 @@ static class NecLobby
 
     static string Sha(string s) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s))).ToLowerInvariant();
     static string? Str(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-    static int? Int(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i) ? i : null;
-    static long? Int64(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var i) ? i : null;
+    public static int? Int(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i) ? i : null;
+    public static long? Int64(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var i) ? i : null;
 }
