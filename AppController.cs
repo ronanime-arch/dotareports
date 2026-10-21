@@ -372,9 +372,15 @@ sealed class AppController
     // Пик и стратегия в матче Valve: в coplay слотов нет — медаль ставим перед ником Steam, найденным в верхней полосе (OCR).
     // Читаем, пока наших медалей там нет: снимок экрана их видит. Не нашли никого (экран пика не виден) — снова через 3 с.
     // В All Pick звания Dota показывает сама — только «за · против».
-    async Task ShowLiveTopBarAsync(int attempt = 0)
+    /// <param name="missed">Что прочитано в прошлый раз — в журнал, если пик кончился раньше, чем ники нашлись.</param>
+    async Task ShowLiveTopBarAsync(int attempt = 0, string? missed = null)
     {
-        if (_roster is not { } roster || !_picking || !Setup.ScreenSupported) return;
+        if (_roster is not { } roster || !Setup.ScreenSupported) return;
+        if (!_picking)
+        {
+            LiveNote(missed != null ? "пик кончился раньше, чем ники нашлись: " + missed : "состав пришёл после пика — медалей у ников не будет");
+            return;
+        }
         try
         {
             var read = await Task.Run(async () =>
@@ -385,14 +391,19 @@ sealed class AppController
                     g.CopyFromScreen(area.Location, System.Drawing.Point.Empty, area.Size);
                 return await TopBarOcr.ReadAsync(bmp);
             });
-            if (!_picking || _roster != roster) return; // пик кончился, пока читали
+            if (_roster != roster) return; // уже другой матч
             var slots = TopBarOcr.Match(roster.Select(p => p.Name).ToList(), read.Texts);
-            if (slots.All(s => s < 0) && attempt < 20)
+            var placed = roster.Select((p, i) => p with { Slot = slots[i] }).ToList();
+            if (!_picking)
             {
-                _ = Retry();
+                LiveNote("пик кончился, пока читали ники: " + TopBarOcr.Describe(placed, read.Texts));
                 return;
             }
-            var placed = roster.Select((p, i) => p with { Slot = slots[i] }).ToList();
+            if (slots.All(s => s < 0) && attempt < 20)
+            {
+                _ = Retry(TopBarOcr.Describe(placed, read.Texts));
+                return;
+            }
             LiveNote(TopBarOcr.Describe(placed, read.Texts));
             _pickRanks.ShowBadges(TopBarNames.Spots(placed, read.Left, medals: _mode.Mode != "ALL_PICK"));
         }
@@ -402,10 +413,10 @@ sealed class AppController
             LiveNote("ники в верхней полосе не прочитаны: " + ex.Message);
         }
 
-        async Task Retry()
+        async Task Retry(string read)
         {
             await Task.Delay(3000);
-            await ShowLiveTopBarAsync(attempt + 1);
+            await ShowLiveTopBarAsync(attempt + 1, read);
         }
     }
 
