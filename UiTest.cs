@@ -86,24 +86,27 @@ static class UiTest
             : null);
         Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices"));
         // худший случай: два героя с самыми длинными описаниями из .vpk самой кастомки (если скачана) и Ликан — с отзывами;
-        // у всех троих по десятку игр здесь с исходами, золотом и KDA — самые длинные строки «здесь…» и «Почему»
+        // у всех троих по десятку игр здесь с исходами, золотом и KDA и сотня в Доте, а Ликан первый лишь по Доте —
+        // самые длинные строки «здесь…» и «Почему» (оценки заданы руками: в BeatenByDota — второй, отзывы не решили)
         var names = data.HeroInternalNames();
         if (Setup.FindDota() is { } dota
             && AwakeningInfo.Load(Path.GetFullPath(Path.Combine(dota, @"..\..\workshop\content\570\3320645051\3320645051.vpk")), AwakeningInfo.AbilityNames()) is { } awakening)
         {
             int Length(int id) => awakening.Of(names.GetValueOrDefault(id))?.Sum(s => s.Sum(e => e.Length)) ?? 0;
-            var longest = names.Keys.Where(id => id != 77).OrderByDescending(Length).Take(2).Append(77).ToArray();
-            var here = new List<HereGame>();
-            void Played(int hero, int games, int wins, int gpm, int kills, int deaths, int assists) =>
-                here.AddRange(Enumerable.Range(0, games).Select(i => new HereGame(hero, i < wins, kills, deaths, assists, gpm)));
-            Played(77, 12, 9, 1250, 14, 8, 13);
-            Played(longest[0], 11, 5, 1180, 9, 10, 12);
-            Played(longest[1], 10, 4, 1050, 8, 11, 13);
-            card.RenderChoices(data, longest, "3320645051", id => awakening.Of(names.GetValueOrDefault(id)), here);
+            var longest = names.Keys.Where(id => id != 77).OrderByDescending(Length).Take(2).ToArray();
+            double Turbo(int id) => data.ModeWinrate(id, "TURBO") is { } wr ? wr.Winrate / 100 : 0.5;
+            var worst = new List<CustomChoice>
+            {
+                new(77, 0.62, 12, 1250, 6, 12, 3.4, 125, 73, Turbo(77), CommunityPicks.Of(CommunityPicks.Game, names.GetValueOrDefault(77)), 0.60, 0.50),
+                new(longest[0], 0.58, 11, 1180, 7, 11, 2.1, 104, 45, Turbo(longest[0]), null, 0.58, 0.56),
+                new(longest[1], 0.45, 10, 1050, 4, 10, 1.9, 33, 15, Turbo(longest[1]), null, 0.45, 0.44),
+            };
+            card.RenderChoices(data, CommunityPicks.Game, worst, true, id => awakening.Of(names.GetValueOrDefault(id)));
             Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices_long"));
             double scale = card.Root.LayoutTransform is ScaleTransform st ? st.ScaleX : 1;
             File.WriteAllText(Path.Combine(dir, "choices_long.txt"),
-                $"высота {card.Root.DesiredSize.Height:0} из {TurboCard.ChoicesRoom:0} под кнопкой, масштаб {scale:0.###}");
+                $"высота {card.Root.DesiredSize.Height:0} из {TurboCard.ChoicesRoom:0} под кнопкой, масштаб {scale:0.###}\n"
+                + "почему: " + CustomStats.Why(worst, true, id => data.Heroes.GetValueOrDefault(id, $"#{id}")));
         }
 
         // иконки ранга: все медали со звёздами, Титан и «нет медали» — в размерах экрана подключения и выбора команды

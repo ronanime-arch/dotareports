@@ -101,10 +101,15 @@ sealed class TurboCard : GlassWindow
     /// по колонке на героя: ваши игры и что даёт Пробуждение (кастомка IM) на 0, 10 и 15 минуте.
     /// Длинные описания не влезают под кнопку «Повторный выбор героя» — плотнее, а не хватит — мельче (не ниже <see cref="MinScale"/>).
     /// </summary>
-    /// <param name="here">Ваши игры здесь (<see cref="CustomStats.Games"/>); null — из своих файлов.</param>
-    public void RenderChoices(DraftData data, IReadOnlyList<int> heroes, string game, Func<int, List<string>[]?> awakening, IReadOnlyList<HereGame>? here = null)
+    public void RenderChoices(DraftData data, IReadOnlyList<int> heroes, string game, Func<int, List<string>[]?> awakening)
     {
-        var (choices, byCustom) = CustomStats.Rank(data, game, heroes, here);
+        var (choices, byCustom) = CustomStats.Rank(data, game, heroes);
+        RenderChoices(data, game, choices, byCustom, awakening);
+    }
+
+    /// <summary>Три героя уже оценены (<see cref="CustomStats.Rank"/>; в --ui-test — заданы руками, худший случай по высоте).</summary>
+    public void RenderChoices(DraftData data, string game, List<CustomChoice> choices, bool byCustom, Func<int, List<string>[]?> awakening)
+    {
         Recommended = choices[0].Hero;
         double room = ChoicesRoom;
         BuildChoices(data, game, choices, byCustom, awakening, compact: false);

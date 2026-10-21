@@ -18,9 +18,12 @@ sealed record HereGame(int Hero, bool? Win, int Kills, int Deaths, int Assists, 
     public double Kda => (Kills + Assists) / (double)Math.Max(1, Deaths);
 }
 
-/// <summary>Кого из трёх брать: оценка (выше — лучше), ваши игры на герое здесь (HereGpm 0 — золота не знаем) и в обычной Доте, его винрейт в Турбо.</summary>
+/// <summary>
+/// Кого из трёх брать: оценка (выше — лучше), ваши игры на герое здесь (HereGpm 0 — золота не знаем) и в обычной Доте, его винрейт в Турбо;
+/// оценка без отзывов в мастерской и без обычной Доты — чтобы сказать, что решило выбор.
+/// </summary>
 sealed record CustomChoice(int Hero, double Score, int HereGames, double HereGpm, int HereWins, int HereKnown, double HereKda,
-    int UsualGames, int UsualWins, double Turbo, CommunityVoice? Voice = null, double ScoreWithoutVoice = 0)
+    int UsualGames, int UsualWins, double Turbo, CommunityVoice? Voice = null, double ScoreWithoutVoice = 0, double ScoreWithoutDota = 0)
 {
     public string Here => HereGames == 0 ? "здесь ещё не играли"
         : $"здесь {HereGames} {Words.Plural(HereGames, "игра", "игры", "игр")}" + (HereKnown > 0 ? $", побед {HereWins} из {HereKnown}" : "")
@@ -139,10 +142,9 @@ static class CustomStats
     /// Отзывы о слишком сильных героях (<see cref="CommunityPicks"/>) сдвигают винрейт по Доте вверх: решают, пока своих игр
     /// на героях мало, а игра на сыгранных здесь героях перевешивает.
     /// </summary>
-    /// <param name="here">Ваши игры здесь (<see cref="Games"/>); null — из custom_stats.json и nec_awaken.json.</param>
-    public static (List<CustomChoice> Choices, bool ByCustom) Rank(DraftData data, string game, IReadOnlyList<int> heroes, IReadOnlyList<HereGame>? here = null)
+    public static (List<CustomChoice> Choices, bool ByCustom) Rank(DraftData data, string game, IReadOnlyList<int> heroes)
     {
-        here ??= Games(game, Load(), game == CommunityPicks.Game ? AwakenHistory.Load().Matches : Enumerable.Empty<AwakenMatch>());
+        var here = Games(game, Load(), game == CommunityPicks.Game ? AwakenHistory.Load().Matches : Enumerable.Empty<AwakenMatch>());
         bool byCustom = here.Count >= MinGames;
         var farmed = here.Where(g => g.Gpm > 0).ToList();
         double avgGpm = farmed.Count > 0 ? farmed.Average(g => g.Gpm) : 0;
@@ -163,13 +165,14 @@ static class CustomStats
             double turbo = data.ModeWinrate(hero, "TURBO") is { } wr ? wr.Winrate / 100 : 0.5;
             var usual = data.Pool.TryGetValue(hero, out var pool) && pool.Games > 0 ? pool : (Games: 0, Wins: 0);
             var voice = CommunityPicks.Of(game, names.GetValueOrDefault(hero));
-            double Score(double shift)
+            double Score(double shift, bool dota = true)
             {
-                double usualRate = (usual.Wins + OwnPrior * (turbo + shift)) / (usual.Games + OwnPrior);
+                // без Доты — как будто там на герое не играли, а его винрейт в Турбо — 50%
+                double usualRate = dota ? (usual.Wins + OwnPrior * (turbo + shift)) / (usual.Games + OwnPrior) : 0.5 + shift;
                 return byCustom ? (wins + WinPrior * (usualRate + FormWeight * form)) / (known.Count + WinPrior) : usualRate;
             }
             result.Add(new CustomChoice(hero, Score(CommunityPicks.Shift(voice)), games.Count, gpm, wins, known.Count, kda,
-                usual.Games, usual.Wins, turbo, voice, Score(0)));
+                usual.Games, usual.Wins, turbo, voice, Score(0), Score(CommunityPicks.Shift(voice), dota: false)));
         }
         return (result.OrderByDescending(c => c.Score).ToList(), byCustom);
     }
@@ -180,6 +183,10 @@ static class CustomStats
     /// <summary>Первым его сделали отзывы в мастерской: без них первым был бы другой.</summary>
     public static bool DecidedByVoice(IReadOnlyList<CustomChoice> choices) =>
         choices[0].Voice != null && choices.Skip(1).Any(o => o.ScoreWithoutVoice > choices[0].ScoreWithoutVoice);
+
+    /// <summary>Кто был бы первым без обычной Доты (ваших игр там и винрейта в Турбо): первый обошёл его только ею; null — решили не они.</summary>
+    public static CustomChoice? BeatenByDota(IReadOnlyList<CustomChoice> choices) =>
+        choices.Skip(1).Where(o => o.ScoreWithoutDota > choices[0].ScoreWithoutDota).MaxBy(o => o.ScoreWithoutDota);
 
     /// <summary>Почему первый из трёх: на чём основана оценка и как с этим у двух других.</summary>
     public static string Why(IReadOnlyList<CustomChoice> choices, bool byCustom, Func<int, string> name)
@@ -199,8 +206,15 @@ static class CustomStats
             string mine = !outcomes ? $"{best.HereGpm:0} золота в минуту и KDA {best.HereKda:0.0} за {Games(best.HereGames)}"
                 : best.HereKnown > 0 ? $"{best.HereWins} {Words.Plural(best.HereWins, "победа", "победы", "побед")} из {best.HereKnown}, KDA {best.HereKda:0.0}"
                 : $"KDA {best.HereKda:0.0} за {Games(best.HereGames)}, исход неизвестен";
+            // по играм здесь первым был бы другой — назвать, чем обычная Дота перевесила
+            string Dota(CustomChoice c) => c.UsualGames > 0 ? $"на {name(c.Hero)} у вас {c.UsualRate:0}% побед за {Games(c.UsualGames)}"
+                : $"на {name(c.Hero)} не играли, его Турбо {c.Turbo * 100:0.0}%";
+            string dota = BeatenByDota(choices) is not { } other ? ""
+                : best.UsualGames == 0 && other.UsualGames == 0
+                    ? $"; перевесил винрейт в Турбо: {name(best.Hero)} {best.Turbo * 100:0.0}%, {name(other.Hero)} {other.Turbo * 100:0.0}%"
+                    : $"; перевесила обычная Дота: {Dota(best)}, {Dota(other)}";
             return $"здесь у вас на нём {mine}; "
-                   + string.Join("; ", rest.Select(o => o.HereGames > 0 ? $"{name(o.Hero)} — {Here(o)}" : $"на {name(o.Hero)} здесь не играли")) + voice;
+                   + string.Join("; ", rest.Select(o => o.HereGames > 0 ? $"{name(o.Hero)} — {Here(o)}" : $"на {name(o.Hero)} здесь не играли")) + dota + voice;
         }
         if (best.UsualGames > 0)
             return $"в Доте у вас на нём {best.UsualRate:0}% побед за {Games(best.UsualGames)}; "
