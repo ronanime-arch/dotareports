@@ -85,6 +85,15 @@ static class UiTest
             ? new[] { new List<string> { "Enfeeble: эффект удвоен" }, new List<string> { "Brain Sap: выпускает 3 раза подряд" }, new List<string>() }
             : null);
         Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices"));
+        // первым его сделал тир-лист B站: своих игр нет, без рядов первым был бы Dark Seer (D) — у него Турбо выше
+        var byTier = new List<CustomChoice>
+        {
+            new(2, 0.530, 0, 0, 0, 0, 0, 0, 0, 0.500, null, 0.530, 0.530, 'S', 0.500),
+            new(55, 0.505, 0, 0, 0, 0, 0, 0, 0, 0.535, null, 0.505, 0.470, 'D', 0.535),
+            new(12, 0.490, 0, 0, 0, 0, 0, 0, 0, 0.520, null, 0.490, 0.470, 'D', 0.520),
+        };
+        card.RenderChoices(data, CommunityPicks.Game, byTier, false, _ => null);
+        Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices_tier"));
         // худший случай: два героя с самыми длинными описаниями из .vpk самой кастомки (если скачана) и Пророк — с отзывами
         // и рядом S в тир-листе B站; у всех троих по десятку игр здесь с исходами, золотом и KDA и сотня в Доте, а Пророк первый
         // лишь по Доте — самые длинные строки «здесь…» и «Почему» (оценки заданы руками: в BeatenByDota — второй, отзывы и ряды не решили)
