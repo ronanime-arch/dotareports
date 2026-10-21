@@ -85,21 +85,31 @@ static class UiTest
             ? new[] { new List<string> { "Enfeeble: эффект удвоен" }, new List<string> { "Brain Sap: выпускает 3 раза подряд" }, new List<string>() }
             : null);
         Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices"));
-        // худший случай: два героя с самыми длинными описаниями из .vpk самой кастомки (если скачана) и Ликан — с отзывами;
-        // у всех троих по десятку игр здесь с исходами, золотом и KDA и сотня в Доте, а Ликан первый лишь по Доте —
-        // самые длинные строки «здесь…» и «Почему» (оценки заданы руками: в BeatenByDota — второй, отзывы не решили)
+        // первым его сделал тир-лист B站: своих игр нет, без рядов первым был бы Dark Seer (D) — у него Турбо выше
+        var byTier = new List<CustomChoice>
+        {
+            new(2, 0.530, 0, 0, 0, 0, 0, 0, 0, 0.500, null, 0.530, 0.530, 'S', 0.500),
+            new(55, 0.505, 0, 0, 0, 0, 0, 0, 0, 0.535, null, 0.505, 0.470, 'D', 0.535),
+            new(12, 0.490, 0, 0, 0, 0, 0, 0, 0, 0.520, null, 0.490, 0.470, 'D', 0.520),
+        };
+        card.RenderChoices(data, CommunityPicks.Game, byTier, false, _ => null);
+        Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices_tier"));
+        // худший случай: два героя с самыми длинными описаниями из .vpk самой кастомки (если скачана) и Пророк — с отзывами
+        // и рядом S в тир-листе B站; у всех троих по десятку игр здесь с исходами, золотом и KDA и сотня в Доте, а Пророк первый
+        // лишь по Доте — самые длинные строки «здесь…» и «Почему» (оценки заданы руками: в BeatenByDota — второй, отзывы и ряды не решили)
         var names = data.HeroInternalNames();
         if (Setup.FindDota() is { } dota
             && AwakeningInfo.Load(Path.GetFullPath(Path.Combine(dota, @"..\..\workshop\content\570\3320645051\3320645051.vpk")), AwakeningInfo.AbilityNames()) is { } awakening)
         {
             int Length(int id) => awakening.Of(names.GetValueOrDefault(id))?.Sum(s => s.Sum(e => e.Length)) ?? 0;
-            var longest = names.Keys.Where(id => id != 77).OrderByDescending(Length).Take(2).ToArray();
+            var longest = names.Keys.Where(id => id != 53).OrderByDescending(Length).Take(2).ToArray();
             double Turbo(int id) => data.ModeWinrate(id, "TURBO") is { } wr ? wr.Winrate / 100 : 0.5;
+            char? Tier(int id) => TierList.Of(CommunityPicks.Game, names.GetValueOrDefault(id));
             var worst = new List<CustomChoice>
             {
-                new(77, 0.62, 12, 1250, 6, 12, 3.4, 125, 73, Turbo(77), CommunityPicks.Of(CommunityPicks.Game, names.GetValueOrDefault(77)), 0.60, 0.50),
-                new(longest[0], 0.58, 11, 1180, 7, 11, 2.1, 104, 45, Turbo(longest[0]), null, 0.58, 0.56),
-                new(longest[1], 0.45, 10, 1050, 4, 10, 1.9, 33, 15, Turbo(longest[1]), null, 0.45, 0.44),
+                new(53, 0.62, 12, 1250, 6, 12, 3.4, 125, 73, Turbo(53), CommunityPicks.Of(CommunityPicks.Game, names.GetValueOrDefault(53)), 0.60, 0.50, Tier(53), 0.61),
+                new(longest[0], 0.58, 11, 1180, 7, 11, 2.1, 104, 45, Turbo(longest[0]), null, 0.58, 0.56, Tier(longest[0]), 0.58),
+                new(longest[1], 0.45, 10, 1050, 4, 10, 1.9, 33, 15, Turbo(longest[1]), null, 0.45, 0.44, Tier(longest[1]), 0.45),
             };
             card.RenderChoices(data, CommunityPicks.Game, worst, true, id => awakening.Of(names.GetValueOrDefault(id)));
             Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices_long"));

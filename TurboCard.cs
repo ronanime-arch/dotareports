@@ -129,6 +129,7 @@ sealed class TurboCard : GlassWindow
         Begin(ChoicesWidth, 16, compact ? new Thickness(12, 6, 10, 8) : new Thickness(14, 10, 12, 12));
         string Name(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
         string basis = CustomStats.DecidedByVoice(choices) ? "по отзывам в мастерской Steam"
+            : CustomStats.DecidedByTier(choices) ? "по тир-листу B站 (7.41, апрель 2026)"
             : byCustom ? "по вашим играм здесь" + (game == CommunityPicks.Game && choices.Any(c => c.HereKnown > 0) ? ", исходы — из истории NEC" : "")
             : "по вашим играм в обычной Доте (здесь их пока меньше трёх)";
         string why = CustomStats.Why(choices, byCustom, Name);
@@ -150,9 +151,10 @@ sealed class TurboCard : GlassWindow
             columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var col = new StackPanel();
             var title = Glass.Text(Name(c.Hero), compact ? 16 : 18, i == 0 ? Glass.Good : Glass.Ink, serif: true, bold: true);
-            // отзывы в мастерской — в строке имени: строк у полосы под кнопкой в обрез
-            if (c.Voice is { } v)
-                title.Inlines.Add(new System.Windows.Documents.Run($"  просили ослабить: {v.People}, {v.Period}")
+            // отзывы в мастерской и ряд в тир-листе B站 — в строке имени: строк у полосы под кнопкой в обрез
+            string note = (c.Tier is { } t ? $"  тир-лист B站: {t}" : "") + (c.Voice is { } v ? $"  просили ослабить: {v.People}, {v.Period}" : "");
+            if (note != "")
+                title.Inlines.Add(new System.Windows.Documents.Run(note)
                     { FontFamily = Glass.Sans, FontSize = 11, FontWeight = FontWeights.Normal, Foreground = Glass.B(Glass.GoldLight) });
             col.Children.Add(title);
             if (compact) col.Children.Add(Glass.Text(c.Here + " · " + c.Usual, 11.5, Glass.Muted));
