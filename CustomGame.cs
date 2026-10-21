@@ -20,10 +20,11 @@ sealed record HereGame(int Hero, bool? Win, int Kills, int Deaths, int Assists, 
 
 /// <summary>
 /// Кого из трёх брать: оценка (выше — лучше), ваши игры на герое здесь (HereGpm 0 — золота не знаем) и в обычной Доте, его винрейт в Турбо;
-/// оценка без отзывов в мастерской и без обычной Доты — чтобы сказать, что решило выбор.
+/// оценка без отзывов в мастерской, без обычной Доты и без тир-листа — чтобы сказать, что решило выбор.
 /// </summary>
 sealed record CustomChoice(int Hero, double Score, int HereGames, double HereGpm, int HereWins, int HereKnown, double HereKda,
-    int UsualGames, int UsualWins, double Turbo, CommunityVoice? Voice = null, double ScoreWithoutVoice = 0, double ScoreWithoutDota = 0)
+    int UsualGames, int UsualWins, double Turbo, CommunityVoice? Voice = null, double ScoreWithoutVoice = 0, double ScoreWithoutDota = 0,
+    char? Tier = null, double ScoreWithoutTier = 0)
 {
     public string Here => HereGames == 0 ? "здесь ещё не играли"
         : $"здесь {HereGames} {Words.Plural(HereGames, "игра", "игры", "игр")}" + (HereKnown > 0 ? $", побед {HereWins} из {HereKnown}" : "")
@@ -43,7 +44,7 @@ sealed record CommunityVoice(int Authors, string Period)
 
 /// <summary>
 /// Что пишут игроки о кастомке IM Пробуждение (мастерская 3320645051): в сети о ней почти ничего, у китайского сообщества —
-/// видео на B站 без текста. Единственный текстовый источник — комментарии в мастерской Steam (469 штук на 17.10.2026):
+/// видео на B站 без текста (тир-лист из одного — <see cref="TierList"/>). Единственный текстовый источник — комментарии в мастерской Steam (469 штук на 17.10.2026):
 /// здесь герои, которых просили ослабить хотя бы двое разных людей (один автор — не в счёт). Карту обновили 15.10.2026,
 /// жалобы старше — сильных могли уже ослабить, поэтому при них период.
 /// </summary>
@@ -66,6 +67,42 @@ static class CommunityPicks
         game == Game && heroName != null && Strong.TryGetValue(heroName, out var v) ? v : null;
 
     public static double Shift(CommunityVoice? v) => v == null ? 0 : Math.Min(MaxShift, PerAuthor * v.Authors);
+}
+
+/// <summary>
+/// Тир-лист IM Пробуждение с B站: видео «DOTA2 IM觉醒 7.41版本英雄从夯到拉» (BV1iXSRBuEm1, апрель 2026) — все герои кастомки
+/// по рядам S–D. Разобран по снимку итоговой таблицы сопоставлением с портретами Valve, как <see cref="ChoiceReader"/>
+/// (21.10.2026, 119 героев). В таблице нет Ликана, Брюмастера, Мипо, Визажа, Арк Вардена, Бруды, Чена и Рингмастера —
+/// им поправки нет: Ликан в кастомке есть, и его как раз просят ослабить. Таблица до обновления карты 15.10.2026 —
+/// поэтому поправка слабее отзывов в мастерской: центр приора ±1,5 п.п. винрейта за ряд от B.
+/// </summary>
+static class TierList
+{
+    public const string Source = "тир-лист B站, 7.41, апрель 2026";
+    const string Order = "SABCD";
+    const double PerRow = 0.015;
+
+    static readonly Dictionary<string, char> Rows = new (char Row, string Heroes)[]
+    {
+        ('S', "axe weaver invoker leshrac earthshaker lion lone_druid furion puck storm_spirit"),
+        ('A', "alchemist batrider antimage dark_willow gyrocopter luna wisp lich monkey_king bloodseeker naga_siren bristleback templar_assassin "
+              + "nyx_assassin night_stalker spirit_breaker omniknight lina pangolier phoenix zuus queenofpain skywrath_mage sand_king snapfire "
+              + "largo warlock primal_beast silencer"),
+        ('B', "bane beastmaster bounty_hunter centaur clinkz terrorblade rattletrap death_prophet disruptor drow_ranger earth_spirit ember_spirit "
+              + "elder_titan enigma faceless_void jakiro magnataur mars medusa necrolyte kez ogre_magi pudge oracle pugna rubick shadow_demon "
+              + "nevermore slardar spectre sven razor techies tidehunter tiny tusk abyssal_underlord undying ursa vengefulspirit venomancer "
+              + "void_spirit windrunner winter_wyvern skeleton_king hoodwink dawnbreaker muerta"),
+        ('C', "abaddon ancient_apparition chaos_knight crystal_maiden dazzle doom_bringer dragon_knight enchantress grimstroke huskar juggernaut "
+              + "keeper_of_the_light kunkka legion_commander life_stealer sniper mirana morphling obsidian_destroyer phantom_assassin riki "
+              + "shadow_shaman slark troll_warlord shredder tinker treant viper witch_doctor marci"),
+        ('D', "dark_seer phantom_lancer"),
+    }.SelectMany(t => t.Heroes.Split(' ').Select(h => (Name: "npc_dota_hero_" + h, t.Row))).ToDictionary(p => p.Name, p => p.Row);
+
+    /// <summary>Ряд героя (S — сильнейшие … D — слабейшие); null — не IM Пробуждение или героя в таблице нет.</summary>
+    public static char? Of(string game, string? heroName) =>
+        game == CommunityPicks.Game && heroName != null && Rows.TryGetValue(heroName, out var r) ? r : null;
+
+    public static double Shift(char? row) => row is { } r ? PerRow * (Order.IndexOf('B') - Order.IndexOf(r)) : 0;
 }
 
 /// <summary>
@@ -140,7 +177,8 @@ static class CustomStats
     /// у вас идёт здесь — золото в минуту и KDA против ваших средних здесь. Пока исходов на герое нет, решает это ожидание.
     /// Своих игр в кастомке меньше трёх — по вашим играм на герое в обычной Доте, сглаженным к его винрейту в Турбо.
     /// Отзывы о слишком сильных героях (<see cref="CommunityPicks"/>) сдвигают винрейт по Доте вверх: решают, пока своих игр
-    /// на героях мало, а игра на сыгранных здесь героях перевешивает.
+    /// на героях мало, а игра на сыгранных здесь героях перевешивает. Ряд в тир-листе B站 (<see cref="TierList"/>) сдвигает
+    /// так же, но слабее.
     /// </summary>
     public static (List<CustomChoice> Choices, bool ByCustom) Rank(DraftData data, string game, IReadOnlyList<int> heroes)
     {
@@ -165,14 +203,17 @@ static class CustomStats
             double turbo = data.ModeWinrate(hero, "TURBO") is { } wr ? wr.Winrate / 100 : 0.5;
             var usual = data.Pool.TryGetValue(hero, out var pool) && pool.Games > 0 ? pool : (Games: 0, Wins: 0);
             var voice = CommunityPicks.Of(game, names.GetValueOrDefault(hero));
-            double Score(double shift, bool dota = true)
+            var tier = TierList.Of(game, names.GetValueOrDefault(hero));
+            double Score(double voiceShift, double tierShift, bool dota = true)
             {
                 // без Доты — как будто там на герое не играли, а его винрейт в Турбо — 50%
+                double shift = voiceShift + tierShift;
                 double usualRate = dota ? (usual.Wins + OwnPrior * (turbo + shift)) / (usual.Games + OwnPrior) : 0.5 + shift;
                 return byCustom ? (wins + WinPrior * (usualRate + FormWeight * form)) / (known.Count + WinPrior) : usualRate;
             }
-            result.Add(new CustomChoice(hero, Score(CommunityPicks.Shift(voice)), games.Count, gpm, wins, known.Count, kda,
-                usual.Games, usual.Wins, turbo, voice, Score(0), Score(CommunityPicks.Shift(voice), dota: false)));
+            double vs = CommunityPicks.Shift(voice), ts = TierList.Shift(tier);
+            result.Add(new CustomChoice(hero, Score(vs, ts), games.Count, gpm, wins, known.Count, kda,
+                usual.Games, usual.Wins, turbo, voice, Score(0, ts), Score(vs, ts, dota: false), tier, Score(vs, 0)));
         }
         return (result.OrderByDescending(c => c.Score).ToList(), byCustom);
     }
@@ -183,6 +224,10 @@ static class CustomStats
     /// <summary>Первым его сделали отзывы в мастерской: без них первым был бы другой.</summary>
     public static bool DecidedByVoice(IReadOnlyList<CustomChoice> choices) =>
         choices[0].Voice != null && choices.Skip(1).Any(o => o.ScoreWithoutVoice > choices[0].ScoreWithoutVoice);
+
+    /// <summary>Первым его сделал тир-лист B站: без рядов первым был бы другой (поднял его ряд или опустил чужой).</summary>
+    public static bool DecidedByTier(IReadOnlyList<CustomChoice> choices) =>
+        choices.Skip(1).Any(o => o.ScoreWithoutTier > choices[0].ScoreWithoutTier);
 
     /// <summary>Кто был бы первым без обычной Доты (ваших игр там и винрейта в Турбо): первый обошёл его только ею; null — решили не они.</summary>
     public static CustomChoice? BeatenByDota(IReadOnlyList<CustomChoice> choices) =>
@@ -196,6 +241,12 @@ static class CustomStats
         string Games(int n) => $"{n} {Words.Plural(n, "игру", "игры", "игр")}";
         if (DecidedByVoice(choices) && best.Voice is { } v)
             return $"в мастерской Steam {v.People} ({v.Period}) просили его ослабить — это перевесило ваши игры и Турбо";
+        if (DecidedByTier(choices))
+        {
+            static string Row(CustomChoice c) => c.Tier is { } r ? r.ToString() : "нет в таблице";
+            return $"{TierList.Source}: у него ряд {Row(best)}, " + string.Join(", ", rest.Select(o => $"{name(o.Hero)} — {Row(o)}"))
+                   + " (S — сильнейшие, D — слабейшие); это перевесило ваши игры и Турбо";
+        }
         string voice = best.Voice is { } bv ? $"; в мастерской его просили ослабить {bv.People}" : "";
         // исходы известны хоть у одного из трёх — сравниваем победы, иначе — золото; KDA — всегда
         bool outcomes = choices.Any(c => c.HereKnown > 0);
