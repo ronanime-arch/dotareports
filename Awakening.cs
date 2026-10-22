@@ -12,6 +12,8 @@ namespace DotaReports;
 /// Кастомка «IM Пробуждение» (NEC, мастерская 3320645051): на 0, 10 и 15 минуте каждый герой получает свои усиления.
 /// Их описания лежат в самой кастомке — resource/addon_russian.txt внутри её .vpk (путь присылает GSI в customgamename):
 /// ключи npc_dota_hero_{герой}_Awakening{0|1|2}_{способность}. Названия способностей — из списка Valve (abilitylist).
+/// В русском файле бывают потерянные строки, и описания ниже съезжают на одну (Storm Spirit) — сдвиг находится сверкой
+/// чисел с addon_english.txt (<see cref="Realign"/>); текст остаётся русским.
 /// </summary>
 sealed class AwakeningInfo
 {
@@ -20,13 +22,18 @@ sealed class AwakeningInfo
 
     static readonly Regex KeyValue = new("^\\s*\"([^\"]+)\"\\s+\"((?:[^\"\\\\]|\\\\.)*)\"", RegexOptions.Compiled);
     static readonly Regex Key = new("^npc_dota_hero_(.+?)_Awakening([012])_(.+)$", RegexOptions.Compiled);
+    static readonly Regex AnyKey = new("^(?://)?npc_dota_hero_.+?_Awakening[012]_.+$", RegexOptions.Compiled); // и закомментированные
     static readonly Regex Tag = new("<[^>]+>", RegexOptions.Compiled);
+    static readonly Regex Number = new(@"\d+(?:\.\d+)?", RegexOptions.Compiled);
     static (string Path, DateTime Stamp, AwakeningInfo? Info) _cache;
 
     // герой (npc_dota_hero_…) → три ступени, в каждой — усиления «Способность: что даёт»
     readonly Dictionary<string, List<string>[]> _heroes = new();
 
     public int Count => _heroes.Count;
+
+    /// <summary>Сколько русских описаний переставлено к своей способности (<see cref="Realign"/>).</summary>
+    public int Realigned { get; private set; }
 
     /// <summary>Все герои — для --awakening-test.</summary>
     public IReadOnlyDictionary<string, List<string>[]> All => _heroes;
@@ -46,9 +53,10 @@ sealed class AwakeningInfo
         AwakeningInfo? info = null;
         try
         {
-            if (ReadText(vpkPath) is { } text) info = Parse(text, abilityNames);
+            if (ReadText(vpkPath) is { } text) info = Parse(text, abilityNames, english: ReadEnglish(vpkPath));
             Log.Write(info is { Count: > 0 }
                 ? $"Пробуждение: описания {info.Count} героев из {Path.GetFileName(vpkPath)}"
+                  + (info.Realigned > 0 ? $", {info.Realigned} переставлены к своей способности (в русском файле съехали строки)" : "")
                 : $"Пробуждение: в {Path.GetFileName(vpkPath)} описаний нет");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException or NotSupportedException)
@@ -70,20 +78,28 @@ sealed class AwakeningInfo
         : bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF ? Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3)
         : Encoding.UTF8.GetString(bytes);
 
+    /// <summary>Английский файл локализации кастомки — сверять с ним русский (<see cref="Realign"/>); null — нет.</summary>
+    public static string? ReadEnglish(string vpkPath) =>
+        Vpk.Read(vpkPath, "resource/addon_english.txt") is { } bytes ? Decode(bytes) : null;
+
     /// <param name="simplify">Коротко (<see cref="AwakeningText"/>); false — как в кастомке, для сравнения в --awakening-test.</param>
-    public static AwakeningInfo Parse(string text, IReadOnlyDictionary<string, string> abilityNames, bool simplify = true)
+    /// <param name="english">Английский файл кастомки — только сверить, не съехали ли русские строки (с simplify).</param>
+    public static AwakeningInfo Parse(string text, IReadOnlyDictionary<string, string> abilityNames, bool simplify = true, string? english = null)
     {
         var info = new AwakeningInfo();
-        foreach (var line in text.Split('\n'))
+        var entries = Entries(text).ToList();
+        if (simplify && english != null)
         {
-            var kv = KeyValue.Match(line);
-            if (!kv.Success) continue;
-            var key = Key.Match(kv.Groups[1].Value);
-            if (!key.Success) continue;
+            entries = Realign(entries, Entries(english).ToList(), out int moved);
+            info.Realigned = moved;
+        }
+        foreach (var (k, original) in entries)
+        {
+            var key = Key.Match(k);
+            if (!key.Success) continue; // закомментированная («//npc_…»): в игре её нет
             string hero = "npc_dota_hero_" + key.Groups[1].Value;
             int stage = key.Groups[2].Value[0] - '0';
-            string value = Regex.Replace(Tag.Replace(kv.Groups[2].Value.Replace("\\n", " ").Replace("\\\"", "\""), ""), "\\s+", " ").Trim();
-            if (simplify) value = AwakeningText.Simplify(value);
+            string value = simplify ? AwakeningText.Simplify(original) : original;
             if (value.Length == 0) continue;
             if (value.Length > MaxText) value = value[..(MaxText - 1)].TrimEnd() + "…";
             // своё «способность» у кастомки (pudge_awaken, antimage_base) в списке Valve не найдётся — тогда без названия
@@ -105,6 +121,43 @@ sealed class AwakeningInfo
     }
 
     // «Blink: +500 дальность» — с названием способности из списка Valve
+    // строки описаний Пробуждения «ключ — значение» по порядку в файле (и закомментированные — по ним тоже идёт сдвиг); значение без тегов
+    static IEnumerable<(string Key, string Value)> Entries(string text)
+    {
+        foreach (var line in text.Split('\n'))
+        {
+            var kv = KeyValue.Match(line);
+            if (!kv.Success || !AnyKey.IsMatch(kv.Groups[1].Value)) continue;
+            yield return (kv.Groups[1].Value, Regex.Replace(Tag.Replace(kv.Groups[2].Value.Replace("\\n", " ").Replace("\\\"", "\""), ""), "\\s+", " ").Trim());
+        }
+    }
+
+    /// <summary>
+    /// В русском файле потерялась строка — описания ниже съехали на одну: у Storm Spirit «+15» от Ball Lightning стоит
+    /// у Overload, «+400 радиус» от Electric Vortex — у Ball Lightning. Русская строка, где числа не как у той же строки
+    /// английского файла, а как у следующей, переносится к следующему ключу — если таких две и больше подряд
+    /// (одно совпадение вроде «−50%» — случайность). Ключ, с которого строка ушла, остаётся пустым.
+    /// </summary>
+    static List<(string Key, string Value)> Realign(List<(string Key, string Value)> ru, List<(string Key, string Value)> en, out int moved)
+    {
+        var index = new Dictionary<string, int>();
+        for (int i = 0; i < en.Count; i++) index.TryAdd(en[i].Key, i);
+        bool Same(string a, string b) => Numbers(a).SequenceEqual(Numbers(b));
+        var next = ru.Select(r => index.TryGetValue(r.Key, out int j) && j + 1 < en.Count && Number.IsMatch(r.Value)
+            && !Same(r.Value, en[j].Value) && Same(r.Value, en[j + 1].Value) ? en[j + 1].Key : null).ToList();
+        var result = new List<(string Key, string Value)>();
+        moved = 0;
+        for (int i = 0; i < ru.Count; i++)
+        {
+            bool run = next[i] != null && (i > 0 && next[i - 1] != null || i + 1 < ru.Count && next[i + 1] != null);
+            if (run) moved++;
+            result.Add(run ? (next[i]!, ru[i].Value) : ru[i]);
+        }
+        return result;
+    }
+
+    static List<string> Numbers(string s) => Number.Matches(s).Select(m => m.Value).Order().ToList();
+
     static bool Named(string entry) => Regex.IsMatch(entry, "^[A-Z][^:]{0,40}: ");
 
     /// <summary>Названия способностей по внутренним именам из списка Valve (abilitylist): ищем все пары name / name_loc.</summary>
@@ -150,6 +203,8 @@ static class AwakeningText
     // белорусские и машинно переведённые куски (по .vpk от 15.10.2026) — до разбора по запятым
     static readonly (Regex From, string To)[] Phrases =
     {
+        (new(@"час/секунда\s*Волшебное восстановление", I), "восстановление маны"), // Storm Spirit, «mana regen»
+        (new("ранить", I), "урон"),                                               // «damage» глаголом
         (new("−?50% да скарачэння часу аднаўлення", I), "−50% cd"),
         (new(@"Скарачэнне часу аднаўлення −50%\s*", I), "−50% cd, "),
         (new("падвойнае максімальнае аднаўленне здароўя", I), "×2 макс. лечение"),
@@ -232,6 +287,7 @@ static class AwakeningText
         string s = Regex.Replace(value, @"[㐀-鿿]+", " "); // «+150/200/250伤害 к урону» — иероглифы лишние
         s = s.Replace('，', ',').Replace('、', ',').Replace('；', ',');
         s = Regex.Replace(s, @"\+\s+(?=\d)", "+");
+        s = Regex.Replace(s, @"(?<=\d)(?=[А-Яа-яЁё]{2,})", " ");          // «+200ранить» → «+200 ранить»
         s = Regex.Replace(s, @"(?<=\d)\s*/\s*(?=\d)", "/");
         s = Regex.Replace(s, @"(?<=\d)%/(?=\d)", "/");                 // «20%/30%/40%» → «20/30/40%»
         s = Regex.Replace(s, @"(?<![\w.])-(?=\d)", "−");

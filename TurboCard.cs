@@ -129,9 +129,11 @@ sealed class TurboCard : GlassWindow
         Begin(ChoicesWidth, 16, compact ? new Thickness(12, 6, 10, 8) : new Thickness(14, 10, 12, 12));
         string Name(int id) => data.Heroes.GetValueOrDefault(id, $"#{id}");
         string basis = CustomStats.DecidedByVoice(choices) ? "по отзывам в мастерской Steam"
-            : CustomStats.DecidedByTier(choices) ? "по тир-листу B站 (7.41, апрель 2026)"
-            : byCustom ? "по вашим играм здесь" + (game == CommunityPicks.Game && choices.Any(c => c.HereKnown > 0) ? ", исходы — из истории NEC" : "")
-            : "по вашим играм в обычной Доте (здесь их пока меньше трёх)";
+            : CustomStats.DecidedByTier(choices) ? "по тир-листу (7.41, апрель 2026)"
+            // как в «Почему»: на первом здесь не играли — решила обычная Дота, а нет и её — Турбо
+            : byCustom && choices[0].HereGames > 0 ? "по вашим играм здесь" + (game == CommunityPicks.Game && choices.Any(c => c.HereKnown > 0) ? ", исходы — из истории NEC" : "")
+            : choices[0].UsualGames == 0 ? "по винрейту в Турбо"
+            : "по вашим играм в обычной Доте" + (byCustom ? " (на нём здесь не играли)" : " (здесь их пока меньше трёх)");
         string why = CustomStats.Why(choices, byCustom, Name);
         if (compact)
         {
@@ -151,10 +153,23 @@ sealed class TurboCard : GlassWindow
             columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var col = new StackPanel();
             var title = Glass.Text(Name(c.Hero), compact ? 16 : 18, i == 0 ? Glass.Good : Glass.Ink, serif: true, bold: true);
-            // отзывы в мастерской и ряд в тир-листе B站 — в строке имени: строк у полосы под кнопкой в обрез
-            string note = (c.Tier is { } t ? $"  тир-лист B站: {t}" : "") + (c.Voice is { } v ? $"  просили ослабить: {v.People}, {v.Period}" : "");
-            if (note != "")
-                title.Inlines.Add(new System.Windows.Documents.Run(note)
+            // ряд в тир-листе — буквой в рамке, отзывы в мастерской — текстом; всё в строке имени: строк у полосы под кнопкой в обрез
+            if (c.Tier is { } t)
+                title.Inlines.Add(new System.Windows.Documents.InlineUIContainer(new Border
+                {
+                    BorderBrush = Glass.B(Glass.GoldLight),
+                    BorderThickness = new Thickness(1.5),
+                    CornerRadius = new CornerRadius(3),
+                    Padding = new Thickness(5, 0, 5, 0),
+                    Margin = new Thickness(8, 0, 0, 0),
+                    Child = new TextBlock
+                    {
+                        Text = t.ToString(), FontFamily = Glass.Sans, FontSize = compact ? 14 : 16, FontWeight = FontWeights.Bold,
+                        Foreground = Glass.B(Glass.GoldLight),
+                    },
+                }) { BaselineAlignment = BaselineAlignment.Center });
+            if (c.Voice is { } v)
+                title.Inlines.Add(new System.Windows.Documents.Run($"  просили ослабить: {v.People}, {v.Period}")
                     { FontFamily = Glass.Sans, FontSize = 11, FontWeight = FontWeights.Normal, Foreground = Glass.B(Glass.GoldLight) });
             col.Children.Add(title);
             if (compact) col.Children.Add(Glass.Text(c.Here + " · " + c.Usual, 11.5, Glass.Muted));
