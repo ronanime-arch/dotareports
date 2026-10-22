@@ -117,6 +117,16 @@ static class UiTest
             File.WriteAllText(Path.Combine(dir, "choices_long.txt"),
                 $"высота {card.Root.DesiredSize.Height:0} из {TurboCard.ChoicesRoom:0} под кнопкой, масштаб {scale:0.###}\n"
                 + "почему: " + CustomStats.Why(worst, true, id => data.Heroes.GetValueOrDefault(id, $"#{id}")));
+            // как на снимке 22.10: игр здесь хватает, но на этих троих не играли — решила обычная Дота; у Storm Spirit
+            // в русском файле кастомки съехали строки (Realign)
+            var dotaOnly = new List<CustomChoice>
+            {
+                new(63, 0.515, 0, 0, 0, 0, 0, 51, 26, 0.496, null, 0.515, 0.53, Tier(63), 0.51),
+                new(78, 0.48, 0, 0, 0, 0, 0, 21, 10, 0.471, null, 0.48, 0.47, Tier(78), 0.48),
+                new(17, 0.42, 0, 0, 0, 0, 0, 63, 25, 0.476, null, 0.42, 0.51, Tier(17), 0.41),
+            };
+            card.RenderChoices(data, CommunityPicks.Game, dotaOnly, true, id => awakening.Of(names.GetValueOrDefault(id)));
+            Save(card.Root, 1165, shot, new Point(63, 856), Path.Combine(dir, "choices_dota"));
         }
 
         // иконки ранга: все медали со звёздами, Титан и «нет медали» — в размерах экрана подключения и выбора команды

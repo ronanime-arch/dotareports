@@ -271,7 +271,9 @@ static class Program
             {
                 var names = AwakeningInfo.AbilityNames();
                 var raw = AwakeningInfo.Parse(text, names, simplify: false).All;
-                foreach (var (hero, stages) in AwakeningInfo.Parse(text, names).All.OrderBy(h => h.Key))
+                var info = AwakeningInfo.Parse(text, names, english: AwakeningInfo.ReadEnglish(vpk));
+                lines.Add($"переставлено к своей способности (съехавшие строки русского файла): {info.Realigned}");
+                foreach (var (hero, stages) in info.All.OrderBy(h => h.Key))
                 {
                     lines.Add(hero);
                     for (int k = 0; k < stages.Length; k++)
