@@ -387,6 +387,7 @@ static class Program
         string N(IEnumerable<int> ids) => string.Join(", ", ids.Select(id => names.GetValueOrDefault(id, $"#{id}")));
 
         if (Directory.Exists(folder)) SlotReader.IgnoreLearnedFrom = Path.GetFileName(folder.TrimEnd('\\', '/'));
+        AllyIconReader.Verbose = true;
         var grid = new GridReader();
         var lines = new List<string> { grid.Status };
         if (File.Exists(folder))
@@ -399,11 +400,16 @@ static class Program
             using (var g = System.Drawing.Graphics.FromImage(top)) g.DrawImageUnscaled(shot, 0, 0); // скриншоты бывают 1919×1079
             var frame = new ScreenFrame(top);
             for (int i = 0; i < 3; i++) grid.Process(frame, i * 0.5, parts[0], 0, slot);
+            if (grid.AllyDebug != "") lines.Add("ряд линий: " + grid.AllyDebug);
             lines.Add($"{Path.GetFileName(folder)}: режим {grid.Mode} роль {grid.Position} | баны [{N(grid.Banned)}] заняты [{N(grid.Taken)}] враги [{N(grid.Enemies)}] союзники [{N(grid.Allies)}] собираются [{N(grid.Planned)}]");
             File.WriteAllLines(outPath, lines);
             return;
         }
-        foreach (var gridPng in Directory.GetFiles(folder, "*_grid.png").OrderBy(f => f))
+        string allyDebug = "";
+        var gridPngs = Directory.GetFiles(folder, "*_grid.png").OrderBy(f => f).ToList();
+        if (gridPngs.Count > 0)
+            using (var first = new System.Drawing.Bitmap(gridPngs[0])) AllyIconReader.CutFrames = first.Width < 1280;
+        foreach (var gridPng in gridPngs)
         {
             var name = Path.GetFileName(gridPng);
             double t = int.Parse(name.Split('_')[1].TrimEnd('s'));
@@ -412,6 +418,8 @@ static class Program
             // ваш герой — из имени кадра (…_hero42_grid.png): так же, как его отдавал GSI в тот момент
             int own = int.TryParse(name.Split('_')[2].Replace("hero", ""), out var h) ? h : 0;
             bool changed = grid.Process(new ScreenFrame(bmp), t, tp[0], own, tp.Length > 1 ? int.Parse(tp[1]) : -1);
+            if (grid.AllyDebug != "" && grid.AllyDebug != allyDebug) lines.Add($"{name}: ряд линий: {grid.AllyDebug}");
+            allyDebug = grid.AllyDebug;
             if (changed)
                 lines.Add($"{name}: режим {grid.Mode} роль {grid.Position} | баны [{N(grid.Banned)}] заняты [{N(grid.Taken)}] враги [{N(grid.Enemies)}] союзники [{N(grid.Allies)}] собираются [{N(grid.Planned)}]");
         }

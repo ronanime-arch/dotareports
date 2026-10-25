@@ -28,37 +28,45 @@ sealed class EnemyIconReader
 
     public EnemyIconReader()
     {
-        if (!Directory.Exists(Paths.Icons)) return;
+        foreach (var (hero, rgb) in LoadIcons(Size))
+            _icons[hero] = (rgb, rgb.Count(v => !double.IsNaN(v)) / 3);
+    }
+
+    /// <summary>Иконки героев size×size: RGB непрозрачных пикселей, на месте прозрачных — NaN (не сравниваем).</summary>
+    public static Dictionary<int, double[]> LoadIcons(int size)
+    {
+        var icons = new Dictionary<int, double[]>();
+        if (!Directory.Exists(Paths.Icons)) return icons;
         foreach (var file in Directory.GetFiles(Paths.Icons, "*.png"))
         {
             if (!int.TryParse(Path.GetFileNameWithoutExtension(file), out var hero)) continue;
             try
             {
                 using var src = new Bitmap(file);
-                using var bmp = new Bitmap(Size, Size, PixelFormat.Format32bppArgb);
+                using var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
                 using (var g = Graphics.FromImage(bmp))
                 {
                     g.InterpolationMode = InterpolationMode.HighQualityBilinear;
-                    g.DrawImage(src, 0, 0, Size, Size);
+                    g.DrawImage(src, 0, 0, size, size);
                 }
-                // непрозрачные пиксели иконки; на месте прозрачных — NaN (не сравниваем)
-                var rgb = new double[Size * Size * 3];
+                var rgb = new double[size * size * 3];
                 int n = 0;
-                for (int y = 0; y < Size; y++)
-                    for (int x = 0; x < Size; x++)
+                for (int y = 0; y < size; y++)
+                    for (int x = 0; x < size; x++)
                     {
                         var c = bmp.GetPixel(x, y);
-                        int i = (y * Size + x) * 3;
+                        int i = (y * size + x) * 3;
                         if (c.A > 200) { rgb[i] = c.R; rgb[i + 1] = c.G; rgb[i + 2] = c.B; n++; }
                         else rgb[i] = rgb[i + 1] = rgb[i + 2] = double.NaN;
                     }
-                if (n >= 20) _icons[hero] = (rgb, n);
+                if (n >= 20) icons[hero] = rgb;
             }
             catch (ArgumentException ex)
             {
                 Log.Write($"Иконка {file} не прочитана: {ex.Message}");
             }
         }
+        return icons;
     }
 
     /// <summary>Герои в ячейках блока «ПОЗИЦИИ ВРАГА» по порядку вражеских слотов; 0 — ячейка пуста или не узнана.</summary>

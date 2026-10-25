@@ -24,7 +24,8 @@ sealed class PickWatcher
     const double SaveAllUntilSec = 20; // начало пика (баны и первые выборы) — каждый кадр
     const int KeepMatches = 2;
     static readonly Rectangle TopBar = new(0, 0, 1920, 110);
-    static readonly Rectangle GridArea = new(100, 175, 1220, 535);
+    // до x = 1380 — с пятыми ячейками рядов «ВЫБЕРИТЕ ЛИНИЮ» и «ПОЗИЦИИ ВРАГА» (до 25.10 кадры обрезаны по 1320)
+    static readonly Rectangle GridArea = new(100, 175, 1280, 535);
 
     readonly GridReader _grid = new();
     string? _dir;
