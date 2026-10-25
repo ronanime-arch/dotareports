@@ -101,6 +101,9 @@ sealed class GridReader
     readonly EnemyIconReader _iconReader = new();
     // блок «ПОЗИЦИИ ВРАГА» на экране героя: ячейка k — вражеский слот k; герой подтверждён двумя кадрами подряд
     readonly int[] _iconRaw = new int[5], _iconHero = new int[5];
+    readonly AllyIconReader _allyReader = new();
+    // ряд «ВЫБЕРИТЕ ЛИНИЮ»: иконки съезжают с каждым пиком, поэтому подтверждаем героя, а не ячейку — два кадра подряд
+    readonly HashSet<int> _allyRaw = new(), _allyIcon = new();
     readonly bool[] _slotSure = new bool[10];     // узнан уверенно — годится для «собираются взять»
     readonly bool[] _slotFaded = new bool[10];    // портрет бледный: пустой слот или предвыбор, а не взятый герой
     readonly int[] _slotRaw = new int[10];      // последний узнанный герой в слоте
@@ -123,7 +126,10 @@ sealed class GridReader
         _cells.FirstOrDefault(c => c.HeroId == hero) is { HeroId: > 0 } c ? new Rectangle(c.X, c.Y, CellW, CellH) : null;
     public HashSet<int> Banned { get; } = new();
     public HashSet<int> Taken { get; } = new();
-    /// <summary>Герои союзников: стали недоступны одновременно со скачком слота вашей команды (без вас).</summary>
+    /// <summary>
+    /// Герои союзников (без вас): портрет в слоте своей команды, ряд «ВЫБЕРИТЕ ЛИНИЮ», скачок своего слота одновременно с пиком;
+    /// в Турбо ещё взятый в сетке и не засвеченный у врага.
+    /// </summary>
     public List<int> Allies { get; } = new();
     /// <summary>Герои врагов: в All Pick — их пики, в Турбо — засвеченные при конфликте выбора.</summary>
     public List<int> Enemies { get; } = new();
@@ -169,6 +175,8 @@ sealed class GridReader
         Array.Clear(_slotSure);
         Array.Clear(_iconRaw);
         Array.Clear(_iconHero);
+        _allyRaw.Clear();
+        _allyIcon.Clear();
         Array.Clear(_slotFaded);
         Array.Clear(_slotHero);
         Array.Clear(_slotPicked);
@@ -191,7 +199,7 @@ sealed class GridReader
         if (!GridVisible(f))
         {
             // После вашего пика сетки нет: врагов берём из блока «ПОЗИЦИИ ВРАГА» на экране героя, а союзников,
-            // выбравших после вас, — из верхней полосы (она на экране и до конца стратегии).
+            // выбравших после вас, — из ряда «ВЫБЕРИТЕ ЛИНИЮ» там же и из верхней полосы (она на экране и до конца стратегии).
             ReadIcons(f);
             if (TopBarVisible(f, ownIndex, ownHero)) ReadSlotHeroes(f, ownIndex, ownHero, radiant);
             return Combine(radiant, ownHero, ownIndex, gridVisible: false) | changed;
@@ -414,7 +422,14 @@ sealed class GridReader
             if (cells[k] != 0 && cells[k] == _iconRaw[k]) _iconHero[k] = cells[k];
             _iconRaw[k] = cells[k];
         }
+        var allies = _allyReader.Read(f);
+        _allyIcon.UnionWith(allies.Where(_allyRaw.Contains));
+        _allyRaw.Clear();
+        _allyRaw.UnionWith(allies);
     }
+
+    /// <summary>Для --grid-test: ячейки ряда «ВЫБЕРИТЕ ЛИНИЮ» на последнем кадре без сетки.</summary>
+    public string AllyDebug => _allyReader.Debug;
 
     // Без сетки верхняя полоса — та же, что в пике, если ваш слот узнаётся как ваш герой или хоть один
     // узнанный раньше слот выглядит так же. Иначе поверх игры другое окно — слоты не читаем.
@@ -448,6 +463,11 @@ sealed class GridReader
             if (_iconHero[k] != 0 && _iconHero[k] != ownHero && !Banned.Contains(_iconHero[k])) enemySlots[k] = _iconHero[k];
         foreach (var hero in enemySlots)
             if (hero != 0) slotSide[hero] = true;
+        // ряд «ВЫБЕРИТЕ ЛИНИЮ» — вся своя команда, кто бы когда ни выбирал: союзник, взятый после вас, держится не на одном
+        // портрете в полосе (облик, тёмный портрет — Luna 24.10 узнавалась на 0,24). Герой и там, и у врага — ошибка чтения, не берём.
+        // Бан не помеха: забаненного в ряду своей команды не бывает, а в «баны» попадает и взятый (Tiny 9060571379 на 38 с).
+        foreach (var hero in _allyIcon)
+            if (hero != ownHero && !slotSide.ContainsKey(hero)) slotSide[hero] = false;
         // сначала узнанные в слотах, потом сопоставленные по времени — и не больше, чем мест в команде
         // (было: шестой враг Undying, которого в матче не было)
         var enemies = slotSide.Where(kv => kv.Value).Select(kv => kv.Key)
