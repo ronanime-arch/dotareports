@@ -161,9 +161,9 @@ static class LiveMatch
     {
         var known = roster.Where(p => p.Known).ToList();
         int hidden = roster.Count - known.Count;
-        string unknown = peersKnown ? "без медали и раньше не встречались" : "без медали, знакомы ли — неизвестно (OpenDota не ответил)";
+        string unknown = peersKnown ? "без медали и раньше не встречались" : "без медали, знакомы ли — неизвестно";
         if (known.Count == 0)
-            return new List<UIElement> { Glass.Text($"Все {roster.Count} — {unknown}.", 13, Glass.Muted, top: 2) };
+            return new List<UIElement> { Glass.Text($"Все {roster.Count} — {unknown}" + (peersKnown ? "." : " (OpenDota не ответил)."), 13, Glass.Muted, top: 2) };
         int met = roster.Count(p => p.With + p.Against > 0);
         string count = hidden > 0 ? $"показаны {known.Count} из {roster.Count} · с медалью {roster.Count(p => p.RankTier > 0)}"
             : $"с медалью {roster.Count(p => p.RankTier > 0)} из {roster.Count}";

@@ -108,9 +108,8 @@ sealed class GridReader
     readonly HashSet<int> _takenLogged = new();   // узнанные среди взятых — в журнал по разу за пик
     readonly HashSet<(int Slot, int Hero)> _grayLogged = new(); // серый предвыбор — тоже
     readonly double[]?[] _slotEmpty = new double[10][]; // как слот выглядел в начале пика (пустой: плашка ранга)
-    // Слот занят (пик или предвыбор) и слот взят (цветной) — два кадра подряд; назад не сбрасываются до нового пика:
+    // Слот взят: изменился с начала пика и цветной два кадра подряд; назад не сбрасывается до нового пика —
     // взятый герой в предвыбор не возвращается, бледным слот бывает только под затемнением экрана («Ножницы» Windows и т. п.).
-    readonly bool[] _slotFilled = new bool[10], _filledRaw = new bool[10];
     readonly bool[] _slotPicked = new bool[10], _pickedRaw = new bool[10];
     readonly List<int> _assocAllies = new(), _assocEnemies = new();
     double? _firstValidAt;
@@ -140,7 +139,7 @@ sealed class GridReader
     public string Debug => "скачки: " + string.Join(" ", _slotEvents.Select(e => $"{(e.Slot < 5 ? "R" : "D")}{e.Slot % 5 + 1}@{e.T:0.#}:{e.Mag:0}"))
         + " | недоступны с: " + string.Join(" ", _firstRaw.OrderBy(kv => kv.Value).Select(kv => $"{kv.Key}@{kv.Value:0.#}"))
         + " | в слотах: " + string.Join(" ", Enumerable.Range(0, 10).Where(s => _slotHero[s] != 0).Select(s => $"{(s < 5 ? "R" : "D")}{s % 5 + 1}={_slotHero[s]}"))
-        + " | заняты слоты (* — цветной): " + string.Join(" ", Enumerable.Range(0, 10).Where(s => _slotFilled[s]).Select(s => $"{(s < 5 ? "R" : "D")}{s % 5 + 1}{(_slotPicked[s] ? "*" : "")}"));
+        + " | взяты слоты: " + string.Join(" ", Enumerable.Range(0, 10).Where(s => _slotPicked[s]).Select(s => $"{(s < 5 ? "R" : "D")}{s % 5 + 1}"));
 
     public GridReader()
     {
@@ -172,8 +171,6 @@ sealed class GridReader
         Array.Clear(_iconHero);
         Array.Clear(_slotFaded);
         Array.Clear(_slotHero);
-        Array.Clear(_slotFilled);
-        Array.Clear(_filledRaw);
         Array.Clear(_slotPicked);
         Array.Clear(_pickedRaw);
         _takenLogged.Clear();
@@ -331,9 +328,7 @@ sealed class GridReader
             bool changed = diff / look.Length >= EmptySlotDiff;
             if (!dim)
             {
-                if (changed && _filledRaw[s]) _slotFilled[s] = true;
                 if (changed && !faded && _pickedRaw[s]) _slotPicked[s] = true;
-                _filledRaw[s] = changed;
                 _pickedRaw[s] = changed && !faded;
             }
             if (!changed && (gray || score < SureSlotScore)) hero = 0;
@@ -461,15 +456,16 @@ sealed class GridReader
             .Concat(_assocAllies.Where(h => !slotSide.ContainsKey(h))).Distinct().Take(4).ToList();
         // В Турбо сетка серит только пики своей команды (вражеские скрыты), поэтому взятый герой, которого нет у врага, — союзник,
         // даже если портрет в полосе не узнан и скачок слота не совпал по времени (24.10 Luna: портрет 0,24, скачок на 6 с раньше
-        // серой клетки — карточка показала трёх союзников из четырёх). Таких не больше, чем занятых слотов своей команды без
-        // узнанного героя: засвеченный при конфликте выбора враг тоже серый. Больше — не решаем. Без сетки и без вашего героя
+        // серой клетки — карточка показала трёх союзников из четырёх). Таких не больше, чем взятых (цветных) слотов своей команды
+        // без узнанного героя: засвеченный при конфликте выбора враг тоже серый, а отвергнутый предвыбор союзника слот не берёт
+        // (Leshrac 9032642267 отсекла привязка к скачку вражеского слота). Больше — не решаем. Без сетки и без вашего героя
         // от GSI (в Турбо он приходит только к стратегии) не решаем: ваш герой мог успеть посереть в сетке.
         if (Mode == "TURBO" && (gridVisible || ownHero > 0))
         {
             var extra = Taken.Where(h => h != ownHero && !allies.Contains(h) && !enemies.Contains(h) && !planned.Contains(h))
                 .OrderBy(h => _firstRaw.GetValueOrDefault(h)).ToList();
-            int room = Enumerable.Range(radiant ? 0 : 5, 5).Count(s => s != ownIndex && _slotFilled[s])
-                - (ownIndex < 0 ? 1 : 0) - allies.Count - planned.Count;
+            int room = Enumerable.Range(radiant ? 0 : 5, 5).Count(s => s != ownIndex && _slotPicked[s])
+                - (ownIndex < 0 ? 1 : 0) - allies.Count;
             if (extra.Count > 0 && extra.Count <= room && allies.Count + extra.Count <= 4) allies.AddRange(extra);
         }
         if (allies.SequenceEqual(Allies) && enemies.SequenceEqual(Enemies) && planned.SequenceEqual(Planned)) return false;
