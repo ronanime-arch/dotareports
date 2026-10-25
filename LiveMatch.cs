@@ -16,7 +16,11 @@ namespace DotaReports;
 /// Игрок матча: слот 0–9 (0–4 Силы Света, 5–9 Силы Тьмы; -1 — неизвестен), аккаунт, ник, медаль (rank_tier OpenDota, 0 — нет)
 /// и сколько игр вы сыграли с ним вместе и против (OpenDota, все режимы).
 /// </summary>
-sealed record LivePlayer(int Slot, uint Account, string Name, int RankTier, int With = 0, int Against = 0);
+sealed record LivePlayer(int Slot, uint Account, string Name, int RankTier, int With = 0, int Against = 0)
+{
+    /// <summary>О нём есть что показать: медаль или общие матчи. Остальных окно «Игроки матча» не перечисляет.</summary>
+    public bool Known => RankTier > 0 || With + Against > 0;
+}
 
 /// <summary>
 /// Кто в матче Valve: аккаунты — из Steam «Недавние игроки» (Coplay), ники — Steam GetPlayerSummaries (ключ — apikey.txt
@@ -147,6 +151,30 @@ static class LiveMatch
             Log.Write("Звания на пике: ники из Steam не получены: " + ex.Message);
         }
         return names;
+    }
+
+    /// <summary>
+    /// Окно «Игроки матча»: шапка со счётом и плитки только тех, о ком что-то известно (медаль или общие матчи);
+    /// пустые — одной строкой счёта, а если пустые все — строка вместо списка.
+    /// </summary>
+    public static List<UIElement> RosterBody(IReadOnlyList<LivePlayer> roster, bool peersKnown)
+    {
+        var known = roster.Where(p => p.Known).ToList();
+        int hidden = roster.Count - known.Count;
+        string unknown = peersKnown ? "без медали и раньше не встречались" : "без медали, знакомы ли — неизвестно";
+        if (known.Count == 0)
+            return new List<UIElement> { Glass.Text($"Все {roster.Count} — {unknown}" + (peersKnown ? "." : " (OpenDota не ответил)."), 13, Glass.Muted, top: 2) };
+        int met = roster.Count(p => p.With + p.Against > 0);
+        string count = hidden > 0 ? $"показаны {known.Count} из {roster.Count} · с медалью {roster.Count(p => p.RankTier > 0)}"
+            : $"с медалью {roster.Count(p => p.RankTier > 0)} из {roster.Count}";
+        var body = new List<UIElement>
+        {
+            Glass.Text(count + " · " + (!peersKnown ? "знакомые: OpenDota не ответил" : met > 0 ? $"знакомых {met}" : "знакомых нет"),
+                12, Glass.GoldLight, bold: true),
+        };
+        if (hidden > 0) body.Add(Glass.Text($"остальные {hidden} — {unknown}", 11.5, Glass.Muted, top: 1));
+        body.AddRange(Tiles(known, peersKnown));
+        return body;
     }
 
     /// <summary>

@@ -46,11 +46,17 @@ static class UiTest
         {
             new(-1, 1, "Mollonn", 44, 3, 1), new(-1, 2, "♠foX♠", 51), new(-1, 3, "Будэика", 0), new(-1, 4, "a very long nickname here", 35),
         };
-        var matchBody = new List<UIElement> { Glass.Text("с медалью 3 из 4 · знакомых 1", 12, Glass.GoldLight, bold: true) };
-        matchBody.AddRange(LiveMatch.Tiles(roster, peersKnown: true));
-        match.Render($"Игроки матча · {roster.Count}", "Ctrl+Alt+N", matchBody,
+        roster.AddRange(new LivePlayer[] { new(-1, 5, "ветеран", 0), new(-1, 6, "R4Y", 0) }); // о них ничего — в список не идут
+        match.Render($"Игроки матча · {roster.Count}", "Ctrl+Alt+N", LiveMatch.RosterBody(roster, peersKnown: true),
             "Steam «Недавние игроки» · медали и «за · против» — OpenDota · без деления на команды", () => { });
         Save(match.Root, 380, shot, new Point(20, 130), Path.Combine(dir, "match_players"));
+
+        // пустые все — строка вместо списка
+        var empty = new RatingWindow(380);
+        var nobody = roster.Select(p => p with { RankTier = 0, With = 0, Against = 0 }).ToList();
+        empty.Render($"Игроки матча · {nobody.Count}", "Ctrl+Alt+N", LiveMatch.RosterBody(nobody, peersKnown: true),
+            "Steam «Недавние игроки» · медали и «за · против» — OpenDota · без деления на команды", () => { });
+        Save(empty.Root, 380, shot, new Point(20, 130), Path.Combine(dir, "match_players_empty"));
 
         var popup = new OverlayWindow();
         popup.Build("На вас пожаловались", OverlayWindow.Red, new[]
