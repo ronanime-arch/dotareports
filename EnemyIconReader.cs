@@ -61,7 +61,7 @@ sealed class EnemyIconReader
                     }
                 if (n >= 20) icons[hero] = rgb;
             }
-            catch (ArgumentException ex)
+            catch (Exception ex) when (ex is ArgumentException or IOException) // битый или ещё качается (DraftData)
             {
                 Log.Write($"Иконка {file} не прочитана: {ex.Message}");
             }

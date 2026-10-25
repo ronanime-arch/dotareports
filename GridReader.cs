@@ -152,6 +152,7 @@ sealed class GridReader
         LoadCells();
         LoadRefs();
         LoadRoleTemplates();
+        if (!_iconReader.Enabled) Log.Write("Пик: иконок героев нет — блоки «ПОЗИЦИИ ВРАГА» и «ВЫБЕРИТЕ ЛИНИЮ» не читаются");
     }
 
     /// <summary>Новый пик: сбросить состояние матча (эталоны остаются).</summary>
@@ -423,7 +424,8 @@ sealed class GridReader
             _iconRaw[k] = cells[k];
         }
         var allies = _allyReader.Read(f);
-        _allyIcon.UnionWith(allies.Where(_allyRaw.Contains));
+        foreach (var hero in allies.Where(_allyRaw.Contains))
+            if (_allyIcon.Add(hero)) Log.Write($"Пик: ряд «ВЫБЕРИТЕ ЛИНИЮ» — союзник {hero} ({_allyReader.Debug})");
         _allyRaw.Clear();
         _allyRaw.UnionWith(allies);
     }
@@ -464,10 +466,13 @@ sealed class GridReader
         foreach (var hero in enemySlots)
             if (hero != 0) slotSide[hero] = true;
         // ряд «ВЫБЕРИТЕ ЛИНИЮ» — вся своя команда, кто бы когда ни выбирал: союзник, взятый после вас, держится не на одном
-        // портрете в полосе (облик, тёмный портрет — Luna 24.10 узнавалась на 0,24). Герой и там, и у врага — ошибка чтения, не берём.
-        // Бан не помеха: забаненного в ряду своей команды не бывает, а в «баны» попадает и взятый (Tiny 9060571379 на 38 с).
+        // портрете в полосе (облик, тёмный портрет — Luna 24.10 узнавалась на 0,24). Враг по портрету или по «ПОЗИЦИИ ВРАГА» —
+        // противоречие, такого не берём; враг, сопоставленный только по времени, ряду уступает. Бан не помеха: забаненного
+        // в ряду своей команды не бывает, а в «баны» попадает и взятый (Tiny 9060571379 на 38 с, Ogre Magi 9060673593 на 50 с).
+        // Взятый — уже не «собирается взять».
         foreach (var hero in _allyIcon)
             if (hero != ownHero && !slotSide.ContainsKey(hero)) slotSide[hero] = false;
+        planned.RemoveAll(_allyIcon.Contains);
         // сначала узнанные в слотах, потом сопоставленные по времени — и не больше, чем мест в команде
         // (было: шестой враг Undying, которого в матче не было)
         var enemies = slotSide.Where(kv => kv.Value).Select(kv => kv.Key)
