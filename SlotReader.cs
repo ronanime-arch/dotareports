@@ -37,6 +37,9 @@ sealed class SlotReader
 
     public bool Enabled => _portraits.Count > 0;
 
+    /// <summary>Для --grid-test: эталоны, выученные после этого матча (*_auto_{папка}.png), не берём — иначе прогон подсматривает ответ.</summary>
+    public static string? IgnoreLearnedFrom;
+
     public SlotReader()
     {
         if (!Directory.Exists(Paths.Portraits)) return;
@@ -64,7 +67,8 @@ sealed class SlotReader
         // и из папки данных, и из seed рядом с программой: в папку данных seed копируется уже после создания читателя
         var files = new[] { Paths.SlotRefs, Path.Combine(AppContext.BaseDirectory, "seed", "slots") }
             .Where(Directory.Exists).SelectMany(d => Directory.GetFiles(d, "*.png"))
-            .GroupBy(f => Path.GetFileName(f)).Select(g => g.First());
+            .GroupBy(f => Path.GetFileName(f)).Select(g => g.First())
+            .Where(f => IgnoreLearnedFrom == null || !Path.GetFileNameWithoutExtension(f).EndsWith("_auto_" + IgnoreLearnedFrom));
         foreach (var file in files)
         {
             if (!int.TryParse(Path.GetFileNameWithoutExtension(file).Split('_')[0], out var hero)) continue;

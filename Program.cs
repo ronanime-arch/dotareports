@@ -386,6 +386,7 @@ static class Program
                 names[h.GetProperty("id").GetInt32()] = h.GetProperty("name_loc").GetString() ?? "";
         string N(IEnumerable<int> ids) => string.Join(", ", ids.Select(id => names.GetValueOrDefault(id, $"#{id}")));
 
+        if (Directory.Exists(folder)) SlotReader.IgnoreLearnedFrom = Path.GetFileName(folder.TrimEnd('\\', '/'));
         var grid = new GridReader();
         var lines = new List<string> { grid.Status };
         if (File.Exists(folder))
@@ -408,7 +409,9 @@ static class Program
             double t = int.Parse(name.Split('_')[1].TrimEnd('s'));
             using var bmp = PickWatcher.Compose(gridPng.Replace("_grid.png", "_top.png"), gridPng);
             var tp = team.Split(':');
-            bool changed = grid.Process(new ScreenFrame(bmp), t, tp[0], 0, tp.Length > 1 ? int.Parse(tp[1]) : -1);
+            // ваш герой — из имени кадра (…_hero42_grid.png): так же, как его отдавал GSI в тот момент
+            int own = int.TryParse(name.Split('_')[2].Replace("hero", ""), out var h) ? h : 0;
+            bool changed = grid.Process(new ScreenFrame(bmp), t, tp[0], own, tp.Length > 1 ? int.Parse(tp[1]) : -1);
             if (changed)
                 lines.Add($"{name}: режим {grid.Mode} роль {grid.Position} | баны [{N(grid.Banned)}] заняты [{N(grid.Taken)}] враги [{N(grid.Enemies)}] союзники [{N(grid.Allies)}] собираются [{N(grid.Planned)}]");
         }

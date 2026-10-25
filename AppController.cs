@@ -487,14 +487,7 @@ sealed class AppController
     void ShowMatchPlayers(bool auto)
     {
         if (_roster is not { } roster) return;
-        var body = new List<System.Windows.UIElement>
-        {
-            Glass.Text($"с медалью {roster.Count(p => p.RankTier > 0)} из {roster.Count} · " +
-                       (!_rosterPeersKnown ? "знакомые: OpenDota не ответил"
-                           : roster.Count(p => p.With + p.Against > 0) is int known and > 0 ? $"знакомых {known}" : "знакомых нет"),
-                12, Glass.GoldLight, bold: true),
-        };
-        body.AddRange(LiveMatch.Tiles(roster, _rosterPeersKnown));
+        var body = LiveMatch.RosterBody(roster, _rosterPeersKnown);
         _necLobby.Render($"Игроки матча · {roster.Count}", "Ctrl+Alt+N", body,
             "Steam «Недавние игроки» · медали и «за · против» — OpenDota · без деления на команды", () => ShowMatchPlayers(auto: false));
         _necShowsMatch = true;
