@@ -10,14 +10,16 @@ namespace DotaReports;
 
 /// <summary>
 /// Блок «ПОЗИЦИИ ВРАГА» на экране героя (после вашего пика): иконки уже известных вражеских героев в красной подсветке,
-/// пять ячеек по порядку вражеских слотов, центры x = 1152 + 40·k, y = 353 (1920×1080).
+/// пять ячеек по порядку вражеских слотов, центры x = 1152 + 40·k (1920×1080). Высота ряда плавает: y = 353, когда
+/// у союзников в «ВЫБЕРИТЕ ЛИНИЮ» есть подписи линий, и 343 без них (24.10, Pudge: враги не узнаны ни одним кадром) —
+/// ряд ищем по красной подсветке.
 /// Сравнение с официальными иконками Valve (icons\{id}.png, 32×32 RGBA) по непрозрачной части, сдвиг ±2 px.
 /// На скриншотах: AA, Skywrath, Drow, Invoker, Venomancer, Terrorblade, SF — узнаны с отрывом 0,07–0,33;
 /// у пустой ячейки отрыв ≤ 0,02 и нет красной подсветки.
 /// </summary>
 sealed class EnemyIconReader
 {
-    const int Size = 28, X0 = 1152, StepX = 40, Y = 353;
+    const int Size = 28, X0 = 1152, StepX = 40, YMin = 320, YMax = 390;
     const double MinScore = 0.55, MinGap = 0.05;
 
     readonly Dictionary<int, (double[] Rgb, int N)> _icons = new();
@@ -63,11 +65,11 @@ sealed class EnemyIconReader
     public int[] Read(ScreenFrame f)
     {
         var found = new int[5];
-        if (!Enabled) return found;
+        if (!Enabled || RowY(f) is not int cy) return found;
         for (int k = 0; k < 5; k++)
         {
             int cx = X0 + StepX * k;
-            if (!RedGlow(f, cx, Y)) continue;
+            if (!RedGlow(f, cx, cy)) continue;
             int best = 0;
             double s1 = double.MinValue, s2 = double.MinValue;
             foreach (var (hero, icon) in _icons)
@@ -75,13 +77,35 @@ sealed class EnemyIconReader
                 double s = double.MinValue;
                 for (int dy = -2; dy <= 2; dy += 2)
                     for (int dx = -2; dx <= 2; dx += 2)
-                        s = Math.Max(s, Ncc(f, cx + dx - Size / 2, Y + dy - Size / 2, icon.Rgb));
+                        s = Math.Max(s, Ncc(f, cx + dx - Size / 2, cy + dy - Size / 2, icon.Rgb));
                 if (s > s1) { s2 = s1; s1 = s; best = hero; }
                 else if (s > s2) s2 = s;
             }
             if (s1 >= MinScore && s1 - s2 >= MinGap) found[k] = best;
         }
         return found;
+    }
+
+    // Центр ряда — середина самой длинной полосы строк с красной подсветкой (≥ 8 красных точек по первым четырём ячейкам;
+    // на кадрах 24.10 полоса 32 строки: 338–369 и 328–359). Пятую ячейку не берём: на сохранённых кадрах пика она обрезана.
+    // null — подсветки нет: ни один враг ещё не засвечен.
+    static int? RowY(ScreenFrame f)
+    {
+        int bestStart = -1, bestLen = 0, start = -1;
+        for (int y = YMin; y <= YMax + 1; y++)
+        {
+            int red = 0;
+            if (y <= YMax)
+                for (int x = X0 - 16; x < X0 + StepX * 3 + 16; x++)
+                {
+                    var (r, g, b) = f.At(x, y);
+                    if (r - Math.Max(g, b) > 40) red++;
+                }
+            if (red >= 8) { if (start < 0) start = y; continue; }
+            if (start >= 0 && y - start > bestLen) (bestStart, bestLen) = (start, y - start);
+            start = -1;
+        }
+        return bestLen >= 10 ? bestStart + (bestLen - 1) / 2 : null;
     }
 
     // Красная подсветка вокруг иконки врага: точки на окружности радиуса 15 заметно краснее остального.
