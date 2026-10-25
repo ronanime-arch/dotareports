@@ -15,7 +15,8 @@ namespace DotaReports;
 sealed class AllyIconReader
 {
     const int Size = 32, Y0 = 232, Y1 = 262, X0 = 1135, X1 = 1375, BgY = 227;
-    const int MinW = 14, MaxW = 40, FgDiff = 60, FgRows = 4, OwnGlow = 25;
+    // У вашей подложки 153–312 ярко-зелёных пикселей, у чужих ячеек на кадрах 0, у самых ярких иконок (Rubick, 108, 155) — до 52
+    const int MinW = 14, MaxW = 40, FgDiff = 60, FgRows = 4, OwnGlow = 100;
     const double GreenShare = 0.3;   // зелёных среди отличных от фона: у силуэтов 0,43–0,97, у цветных иконок 0
     const int Shift = 3, LX0 = X0 - Size, LY0 = Y0 - Size / 2, LW = X1 - X0 + 2 * Size, LH = Y1 - Y0 + Size;
     // На записанных пиках и снимках свои герои — 0,65–0,90 с отрывом от второго 0,06–0,47 (силуэты Zeus 0,52 и Invoker
