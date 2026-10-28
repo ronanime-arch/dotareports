@@ -280,10 +280,8 @@ sealed class TurboCard : GlassWindow
         bool Playable(TurboPick p) => data.Pool.TryGetValue(p.HeroId, out var g) && g.Games >= MinPoolGames;
         double Score(TurboPick p) => data.PickScore(p, snap.Mode);
 
-        // Главное: кого брать. Из ваших героев (не «редко на роли») — с лучшим итогом, включая вашу игру на нём.
-        var best = picks.Where(p => !p.Rare && Playable(p)).OrderByDescending(Score).FirstOrDefault()
-                   ?? picks.FirstOrDefault(p => !p.Rare);
-        var bestAny = picks.FirstOrDefault(p => !p.Rare);
+        // Главное: кого брать — сильнейший в этой игре по винрейту и драфту, без вашей истории: ваши герои — ниже.
+        var best = data.Strongest(picks, snap.Mode);
         string scope = snap.Position > 0 ? "на роли" : allPick ? "в All Pick" : "в Турбо";
         if (best != null)
         {
@@ -300,11 +298,7 @@ sealed class TurboCard : GlassWindow
             take.Children.Add(head);
             var why = new List<UIElement> { Glass.Chip($"{best.Winrate:0.0}% {scope}", Glass.Ink, 10.5) };
             why.AddRange(Corrections(best).Select(c => (UIElement)Glass.Chip(c.Text, c.Value >= 0 ? Glass.Good : Glass.Bad, 10.5)));
-            double personal = data.PersonalBonus(best.HeroId, snap.Mode);
-            if (Math.Abs(personal) >= 0.05) why.Add(Glass.Chip($"ваша игра {personal:+0.0;-0.0}", personal > 0 ? Glass.Good : Glass.Bad, 10.5));
             take.Children.Add(Glass.Chips(why, top: 6));
-            if (bestAny != null && bestAny.HeroId != best.HeroId && bestAny.Total - best.Total >= 1.5)
-                take.Children.Add(Glass.Text($"по статистике сильнее {H(bestAny.HeroId)} ({bestAny.Winrate:0.0}% {bestAny.Bonus:+0.0;-0.0}), но вы на нём почти не играете", 10, Glass.Muted));
             _panel.Children.Add(Gilded(Glass.Tile(take, top: 8)));
 
             // Под этот драфт: из ваших героев — лучший только по поправкам за врагов, союзников, состав и риск контрпика,
@@ -340,7 +334,7 @@ sealed class TurboCard : GlassWindow
         _panel.Children.Add(Glass.Tile(pool, padding: new Thickness(8, 6, 6, 6)));
 
         _panel.Children.Add(Glass.Text(snap.Position > 0 ? $"Сильные на роли «{RoleNames[snap.Position]}»" : (allPick ? "Сильные в All Pick" : "Сильные в Турбо"), 11, Glass.Muted, top: 6));
-        _panel.Children.Add(Glass.Chips(picks.Where(p => !p.Rare && !mine.Contains(p)).Take(MetaRows).Select(p => (UIElement)Meta(H(p.HeroId), p)), top: 3));
+        _panel.Children.Add(Glass.Chips(picks.Where(p => !p.Rare && !mine.Contains(p) && p.HeroId != best?.HeroId).Take(MetaRows).Select(p => (UIElement)Meta(H(p.HeroId), p)), top: 3));
 
         _panel.Children.Add(Glass.Text("S от 53% · A 51–53 · B 49–51 · C ниже 49", 9.5, Glass.Muted, top: 4));
         _panel.Children.Add(Glass.Text(recognition, 9.5, Glass.Muted, top: 4));

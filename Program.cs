@@ -242,9 +242,14 @@ static class Program
             else
                 lines.Add("шанс победы: нет данных Stratz");
             lines.Add("в команде: " + string.Join(", ", data.Lacking(allies)));
-            foreach (var p in data.TurboPicks(mode, 0, new HashSet<int>(allies), enemies, allies).Where(p => !p.Rare).Take(10))
+            var picks = data.TurboPicks(mode, 0, new HashSet<int>(allies), enemies, allies);
+            // «Бери» — как на карточке пика; ваши — пятёрка ниже него (герои с 2+ играми)
+            lines.Add("Бери: " + (data.Strongest(picks, mode) is { } best ? $"{data.Heroes.GetValueOrDefault(best.HeroId)} (сила {data.StrengthScore(best, mode):+0.0;-0.0})" : "некого"));
+            lines.Add("ваши: " + string.Join(", ", picks.Where(p => data.Pool.TryGetValue(p.HeroId, out var g) && g.Games >= 2)
+                .OrderBy(p => p.Rare).ThenByDescending(p => data.PickScore(p, mode)).Take(5).Select(p => data.Heroes.GetValueOrDefault(p.HeroId))));
+            foreach (var p in picks.Where(p => !p.Rare).Take(10))
                 lines.Add($"{data.Heroes.GetValueOrDefault(p.HeroId)} {p.Winrate:0.0}% · враги {p.VsRevealed:+0.0;-0.0} · союзники {p.WithAllies:+0.0;-0.0} · " +
-                          $"состав {p.Composition:+0.0;-0.0} · риск {p.CounterRisk:+0.0;-0.0} · итог {p.Total:0.0} · ваша игра {data.PersonalBonus(p.HeroId, mode):+0.0;-0.0}");
+                          $"состав {p.Composition:+0.0;-0.0} · риск {p.CounterRisk:+0.0;-0.0} · итог {p.Total:0.0} · сила {data.StrengthScore(p, mode):+0.0;-0.0} · ваша игра {data.PersonalBonus(p.HeroId, mode):+0.0;-0.0}");
             File.WriteAllLines(Path.Combine(Paths.Root, "winprob_test.txt"), lines);
             return;
         }
