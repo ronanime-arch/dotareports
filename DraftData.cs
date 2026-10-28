@@ -361,11 +361,18 @@ sealed class DraftData
     const double TurboBaseWeight = 0.5;
 
     /// <summary>
-    /// Кого брать — чем больше, тем лучше: винрейт героя в режиме (в Турбо и пока режим не ясен — с половинным весом),
-    /// поправки за драфт и ваша игра на нём.
+    /// Сила героя в этой игре, без вашей истории на нём: винрейт в режиме (в Турбо и пока режим не ясен — с половинным весом)
+    /// и поправки за врагов, союзников, состав и риск контрпика.
     /// </summary>
-    public double PickScore(TurboPick p, string? mode) =>
-        (mode == "ALL_PICK" ? 1 : TurboBaseWeight) * (p.Winrate - 50) + p.Bonus + PersonalBonus(p.HeroId, mode);
+    public double StrengthScore(TurboPick p, string? mode) =>
+        (mode == "ALL_PICK" ? 1 : TurboBaseWeight) * (p.Winrate - 50) + p.Bonus;
+
+    /// <summary>Ваши герои — чем больше, тем лучше: сила в этой игре и ваша игра на герое.</summary>
+    public double PickScore(TurboPick p, string? mode) => StrengthScore(p, mode) + PersonalBonus(p.HeroId, mode);
+
+    /// <summary>«Бери»: сильнейший в этой игре из тех, кого на роли реально берут, — ваш он герой или нет; null — некого.</summary>
+    public TurboPick? Strongest(IEnumerable<TurboPick> picks, string? mode) =>
+        picks.Where(p => !p.Rare).MaxBy(p => StrengthScore(p, mode));
 
     const long MinModeMatches = 2000, MinRoleMatches = 300;
     const double MinRoleShare = 0.008; // Skywrath на миде ≈ 1% пиков — должен считаться мидером
