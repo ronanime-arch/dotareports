@@ -19,7 +19,9 @@ sealed class AppController
     const int DraftHotkeyId = 0xD07B;
     const int RatingHotkeyId = 0xD07C;
     const int NecHotkeyId = 0xD07D;
+    const int QuickPickHotkeyId = 0xD07E;
     const uint VK_N = 0x4E;
+    const uint VK_A = 0x41;
     const uint VK_S = 0x53;
     const uint VK_R = 0x52;
     const uint VK_D = 0x44;
@@ -119,6 +121,7 @@ sealed class AppController
     int _ownHero;    // ваш герой в этом пике (GSI), 0 — ещё не выбран
     PickSnapshot? _lastSnap;
     DraftWindow _draft = null!;
+    QuickPick _quickPick = null!;
     // напоминания по часам матча: режим берём из пика (Турбо / All Pick)
     ReminderSettings _reminders = ReminderSettings.Load();
     readonly ReminderEngine _reminderEngine = new();
@@ -172,6 +175,7 @@ sealed class AppController
         _overlay = new OverlayWindow();
         _reminderOverlay = new OverlayWindow(top: 330, backgroundAlpha: 0xCC, pill: true); // полупрозрачная «таблетка»: игра под ней видна
         _draft = new DraftWindow(_draftData) { OpenUrl = url => OpenAnalytics(url) };
+        _quickPick = new QuickPick(_draftData) { Notify = text => _tray.ShowBalloonTip(3000, "Dota Reports", text, Forms.ToolTipIcon.Info) };
         _turboCard = new TurboCard();
         _pickFrame = new PickFrame();
         _turboCard.CloseButtonPressed += () => _pickFrame.ShowAround(null); // закрыли карточку — и рамку «Бери» тоже
@@ -298,6 +302,7 @@ sealed class AppController
         if (picking && s.HeroId != _ownHero)
         {
             _ownHero = s.HeroId;
+            _quickPick.OnHeroPicked(s.HeroId);
             if (_picking) RenderCard();
         }
         if (picking == _picking) return;
@@ -1461,6 +1466,8 @@ sealed class AppController
         }
         if (!Native.RegisterHotKey(_browser.Handle, RatingHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_S))
             Log.Write("Ctrl+Alt+S занята другой программой");
+        if (!Native.RegisterHotKey(_browser.Handle, QuickPickHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_A))
+            Log.Write("Ctrl+Alt+A занята другой программой");
         if (!Native.RegisterHotKey(_browser.Handle, NecHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_N))
             Log.Write("Ctrl+Alt+N занята другой программой");
         if (!Native.RegisterHotKey(_browser.Handle, DraftHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_D))
@@ -1488,6 +1495,11 @@ sealed class AppController
             _draft.Toggle();
             handled = true;
         }
+        else if (msg == Native.WM_HOTKEY && wParam.ToInt32() == QuickPickHotkeyId)
+        {
+            _quickPick.Toggle();
+            handled = true;
+        }
         else if (msg == Native.WM_HOTKEY && wParam.ToInt32() == NecHotkeyId)
         {
             ToggleNecLobby();
@@ -1509,6 +1521,7 @@ sealed class AppController
         _loginItem = new Forms.ToolStripMenuItem("Войти в Steam…", null, async (_, _) => await LoginAsync()) { Visible = false };
         menu.Items.Add(_loginItem);
         menu.Items.Add("Помощник в пике (Ctrl+Alt+D)", null, (_, _) => _draft.Toggle());
+        menu.Items.Add("Быстрый пик героя (Ctrl+Alt+A)", null, (_, _) => _quickPick.Toggle());
         menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
         menu.Items.Add("Лобби NEC (Ctrl+Alt+N)", null, (_, _) => ToggleNecLobby());
@@ -1601,6 +1614,7 @@ sealed class AppController
     // Выход бывает и до конца запуска (обновление закрывает копию, которая ещё ждёт Dota) — окон и браузера тогда нет.
     void Exit()
     {
+        _quickPick.Stop();
         _poll.Stop();
         _confTimer.Stop();
         _gsi.Stop();
@@ -1610,6 +1624,7 @@ sealed class AppController
             Native.UnregisterHotKey(_browser.Handle, DraftHotkeyId);
             Native.UnregisterHotKey(_browser.Handle, RatingHotkeyId);
             Native.UnregisterHotKey(_browser.Handle, NecHotkeyId);
+            Native.UnregisterHotKey(_browser.Handle, QuickPickHotkeyId);
         }
         _necHide.Stop();
         _necPoll.Stop();
