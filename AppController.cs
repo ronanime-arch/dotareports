@@ -21,7 +21,7 @@ sealed class AppController
     const int NecHotkeyId = 0xD07D;
     const int QuickPickHotkeyId = 0xD07E;
     const uint VK_N = 0x4E;
-    const uint VK_A = 0x41;
+    const uint VK_F7 = 0x76;
     const uint VK_S = 0x53;
     const uint VK_R = 0x52;
     const uint VK_D = 0x44;
@@ -1466,8 +1466,8 @@ sealed class AppController
         }
         if (!Native.RegisterHotKey(_browser.Handle, RatingHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_S))
             Log.Write("Ctrl+Alt+S занята другой программой");
-        if (!Native.RegisterHotKey(_browser.Handle, QuickPickHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_A))
-            Log.Write("Ctrl+Alt+A занята другой программой");
+        if (!Native.RegisterHotKey(_browser.Handle, QuickPickHotkeyId, Native.MOD_NOREPEAT, VK_F7))
+            Log.Write("F7 занята другой программой");
         if (!Native.RegisterHotKey(_browser.Handle, NecHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_N))
             Log.Write("Ctrl+Alt+N занята другой программой");
         if (!Native.RegisterHotKey(_browser.Handle, DraftHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_D))
@@ -1521,7 +1521,7 @@ sealed class AppController
         _loginItem = new Forms.ToolStripMenuItem("Войти в Steam…", null, async (_, _) => await LoginAsync()) { Visible = false };
         menu.Items.Add(_loginItem);
         menu.Items.Add("Помощник в пике (Ctrl+Alt+D)", null, (_, _) => _draft.Toggle());
-        menu.Items.Add("Быстрый пик героя (Ctrl+Alt+A)", null, (_, _) => _quickPick.Toggle());
+        menu.Items.Add("Быстрый пик героя (F7)", null, (_, _) => _quickPick.Toggle());
         menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
         menu.Items.Add("Лобби NEC (Ctrl+Alt+N)", null, (_, _) => ToggleNecLobby());
