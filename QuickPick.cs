@@ -45,6 +45,7 @@ sealed class QuickPick
     int _dotaPid;
     IntPtr _dotaWindow;
     string _command = "";
+    int _heroId;
     int _step; // 0 — открыть консоль, 1…OpenTicks — ждём, дальше — повтор
 
     public bool On => _timer.IsEnabled;
@@ -78,6 +79,7 @@ sealed class QuickPick
         try { File.WriteAllText(Paths.QuickPickLast, heroId.ToString()); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log.Write("Быстрый пик: герой не запомнен: " + ex.Message); }
         _command = "dota_select_hero " + internalName;
+        _heroId = heroId;
         if (_dotaWindow != IntPtr.Zero) SetForegroundWindow(_dotaWindow);
         Start();
         Notify?.Invoke("Быстрый пик: " + _data.Heroes.GetValueOrDefault(heroId, internalName));
@@ -102,10 +104,11 @@ sealed class QuickPick
         Log.Write("Быстрый пик: выключен");
     }
 
-    /// <summary>Герой выбран (GSI: HeroId > 0) — повторять команду больше не надо.</summary>
+    /// <summary>Выбран именно наш герой (GSI) — повторять команду больше не надо.</summary>
     public void OnHeroPicked(int heroId)
     {
-        if (heroId > 0 && On)
+        if (heroId > 0 && On) Log.Write($"Быстрый пик: GSI показал героя {heroId}, ждём {_heroId}");
+        if (heroId > 0 && heroId == _heroId && On) // чужой или предварительный номер героя не повод остановиться
         {
             Stop();
             Notify?.Invoke("Быстрый пик: герой выбран");
