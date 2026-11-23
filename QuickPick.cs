@@ -13,16 +13,17 @@ using System.Windows.Threading;
 namespace DotaReports;
 
 /// <summary>
-/// Быстрый пик героя. F7 открывает поиск героя («снайп», «медуза», «Faceless Void»); Enter — открывается консоль Dota
-/// (нужен параметр запуска -console), вводится <c>dota_select_hero …</c>, и дальше каждые 10 мс жмутся ↑ и Enter (повтор
-/// последней команды). Бинды на экране пика не годятся: там активно текстовое поле и клавиша просто печатается.
-/// Выключается само: герой выбран (GSI, консоль закрывается) или повторный F7. Не в Dota — ничего не жмёт.
+/// Быстрый пик героя. F7 — сразу автопик последнего выбранного героя (повторно — стоп); Ctrl+F7 — поиск другого героя
+/// («снайп», «медуза», «Faceless Void»), после Enter автопик идёт уже с ним. Герой пишется в cfg\quickpick.cfg, на клавишу
+/// Insert в autoexec.cfg висит <c>exec quickpick</c> (dota_select_hero), и в Dota каждые 10 мс жмётся Insert — это не печатный
+/// символ, поэтому срабатывает и на экране пика с активным текстовым полем. Консоль не нужна.
+/// Выключается само, когда GSI показал выбранного героя. Не в Dota — ничего не жмёт.
 /// </summary>
 sealed class QuickPick
 {
-    const ushort SC_GRAVE = 0x29, SC_ENTER = 0x1C, SC_UP = 0x48;
+    const ushort SC_INSERT = 0x52; // расширенная клавиша; в Dota по умолчанию не занята
+    const string BindLine = "bind \"INS\" \"exec quickpick\"";
     const uint KEYEVENTF_EXTENDEDKEY = 0x1, KEYEVENTF_UNICODE = 0x4, KEYEVENTF_SCANCODE = 0x8, KEYEVENTF_KEYUP = 0x2;
-    const int OpenTicks = 20; // 200 мс на открытие консоли
 
     [StructLayout(LayoutKind.Sequential)]
     struct KEYBDINPUT { public ushort Vk, Scan; public uint Flags, Time; public UIntPtr Extra; }
@@ -44,8 +45,7 @@ sealed class QuickPick
     QuickPickWindow? _window;
     int _dotaPid;
     IntPtr _dotaWindow;
-    string _command = "";
-    int _step; // 0 — открыть консоль, 1…OpenTicks — ждём, дальше — повтор
+    int _heroId;
 
     public bool On => _timer.IsEnabled;
     /// <summary>Сообщение для значка в трее.</summary>
@@ -57,10 +57,18 @@ sealed class QuickPick
         _timer.Tick += (_, _) => Tick();
     }
 
-    /// <summary>F7: идёт спам — остановить, иначе открыть выбор героя.</summary>
+    /// <summary>F7: идёт автопик — остановить; иначе пикать последнего героя, а если его ещё нет — открыть выбор.</summary>
     public void Toggle()
     {
         if (On) { Stop(); Notify?.Invoke("Быстрый пик: выключен"); return; }
+        if (LastHero() is > 0 and var last && _data.Heroes.ContainsKey(last)) { _dotaWindow = DotaWindowOrZero(); Pick(last); }
+        else ChooseHero();
+    }
+
+    /// <summary>Ctrl+F7: открыть поиск героя.</summary>
+    public void ChooseHero()
+    {
+        if (On) Stop();
         if (_window is { IsVisible: true }) { _window.Hide(); return; }
         _dotaWindow = DotaWindowOrZero();
         _window ??= new QuickPickWindow(_data, Pick);
@@ -75,12 +83,36 @@ sealed class QuickPick
             Notify?.Invoke("Быстрый пик: нет списка героев Valve — запустите помощника в пике, он его скачает");
             return;
         }
-        try { File.WriteAllText(Paths.QuickPickLast, heroId.ToString()); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log.Write("Быстрый пик: герой не запомнен: " + ex.Message); }
-        _command = "dota_select_hero " + internalName;
+        try
+        {
+            WriteCfg(internalName);
+            File.WriteAllText(Paths.QuickPickLast, heroId.ToString());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            Log.Write("Быстрый пик: cfg не записан: " + ex.Message);
+            Notify?.Invoke("Быстрый пик: не записан cfg — " + ex.Message);
+            return;
+        }
+        _heroId = heroId;
         if (_dotaWindow != IntPtr.Zero) SetForegroundWindow(_dotaWindow);
         Start();
         Notify?.Invoke("Быстрый пик: " + _data.Heroes.GetValueOrDefault(heroId, internalName));
+    }
+
+    /// <summary>cfg\quickpick.cfg с командой выбора и строка bind в autoexec.cfg (один раз; нужен перезапуск Dota).</summary>
+    void WriteCfg(string internalName)
+    {
+        var dota = Setup.FindDota() ?? throw new InvalidOperationException("папка Dota 2 не найдена");
+        var cfg = Path.Combine(dota, "game", "dota", "cfg");
+        File.WriteAllText(Path.Combine(cfg, "quickpick.cfg"), $"dota_select_hero {internalName}\n");
+        var autoexec = Path.Combine(cfg, "autoexec.cfg");
+        var text = File.Exists(autoexec) ? File.ReadAllText(autoexec) : "";
+        if (!text.Contains("exec quickpick", StringComparison.OrdinalIgnoreCase))
+        {
+            File.AppendAllText(autoexec, (text.Length == 0 || text.EndsWith('\n') ? "" : "\n") + "// Dota Reports: быстрый пик\n" + BindLine + "\n");
+            Notify?.Invoke("Быстрый пик: в autoexec.cfg добавлен бинд — перезапустите Dota один раз");
+        }
     }
 
     static int LastHero() =>
@@ -89,23 +121,22 @@ sealed class QuickPick
     void Start()
     {
         if (On) return;
-        _step = 0;
         _timer.Start();
-        Log.Write("Быстрый пик: включён, " + _command);
+        Log.Write("Быстрый пик: включён, hero " + _heroId);
     }
 
     public void Stop()
     {
         if (!On) return;
         _timer.Stop();
-        if (_step > 0 && DotaForeground()) Tap(SC_GRAVE, false); // закрыть консоль
         Log.Write("Быстрый пик: выключен");
     }
 
-    /// <summary>Герой выбран (GSI: HeroId > 0) — повторять команду больше не надо.</summary>
+    /// <summary>Выбран именно наш герой (GSI) — повторять команду больше не надо.</summary>
     public void OnHeroPicked(int heroId)
     {
-        if (heroId > 0 && On)
+        if (heroId > 0 && On) Log.Write($"Быстрый пик: GSI показал героя {heroId}, ждём {_heroId}");
+        if (heroId > 0 && heroId == _heroId && On) // чужой или предварительный номер героя не повод остановиться
         {
             Stop();
             Notify?.Invoke("Быстрый пик: герой выбран");
@@ -115,40 +146,13 @@ sealed class QuickPick
     void Tick()
     {
         if (!DotaForeground()) return; // в чужое окно не жмём, но и не выключаемся: можно вернуться в Dota
-        if (_step == 0)
-        {
-            Tap(SC_GRAVE, false);
-            _step = 1;
-        }
-        else if (_step < OpenTicks) _step++;
-        else if (_step == OpenTicks)
-        {
-            Type(_command);
-            Tap(SC_ENTER, false);
-            _step++;
-        }
-        else
-        {
-            Tap(SC_UP, true);
-            Tap(SC_ENTER, false);
-        }
+        Tap(SC_INSERT, true);
     }
 
     static void Tap(ushort scan, bool extended)
     {
         var flags = KEYEVENTF_SCANCODE | (extended ? KEYEVENTF_EXTENDEDKEY : 0);
         Send(new[] { Key(0, scan, flags), Key(0, scan, flags | KEYEVENTF_KEYUP) });
-    }
-
-    static void Type(string text)
-    {
-        var inputs = new List<INPUT>();
-        foreach (var c in text)
-        {
-            inputs.Add(Key(0, c, KEYEVENTF_UNICODE));
-            inputs.Add(Key(0, c, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-        }
-        Send(inputs.ToArray());
     }
 
     static INPUT Key(ushort vk, ushort scan, uint flags) =>
