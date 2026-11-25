@@ -179,7 +179,7 @@ sealed class AppController
         _quickPick = new QuickPick(_draftData, _watcher.CellOf)
         {
             Notify = (title, line, on) => _overlay.ShowPopup(title, on ? OverlayWindow.Green : OverlayWindow.White,
-                new[] { (line, OverlayWindow.Gray) }, on ? TimeSpan.FromMinutes(3) : TimeSpan.FromSeconds(5)),
+                new[] { (line, OverlayWindow.Gray) }, TimeSpan.FromSeconds(on ? 6 : 5)), // коротко: в том же углу карточка пика
         };
         _turboCard = new TurboCard();
         _pickFrame = new PickFrame();

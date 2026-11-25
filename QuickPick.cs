@@ -15,7 +15,7 @@ namespace DotaReports;
 /// <summary>
 /// Быстрый пик героя мышью. F7 — включить для последнего героя (повторно — выключить), Ctrl+F7 — выбрать другого
 /// («снайп», «медуза», «Faceless Void»). Пока идёт выбор героя (GSI) и Dota на переднем плане, по кругу кликает клетку
-/// героя в сетке и кнопку «Выбрать». Консольная команда dota_select_hero в матчмейкинге не сработала.
+/// героя в сетке и кнопку «Выбрать». Через консоль и бинд выбрать героя не получилось.
 /// Включить можно заранее: до начала пика мышь не трогается. Выключается само: герой взят или пик кончился.
 /// Разметка 1920×1080, сетка героев «Атрибуты». По красной кнопке (запрет героя) не кликает.
 /// </summary>
@@ -54,7 +54,7 @@ sealed class QuickPick
     bool _sawSelection;
 
     public bool On => _timer.IsEnabled;
-    /// <summary>Уведомление поверх игры: заголовок, строка, «включён» (висит дольше).</summary>
+    /// <summary>Уведомление поверх игры: заголовок, строка, «включён» (чуть дольше).</summary>
     public Action<string, string, bool>? Notify { get; set; }
 
     public QuickPick(DraftData data, Func<int, System.Drawing.Rectangle?> cellOf)
@@ -134,6 +134,7 @@ sealed class QuickPick
         switch (_step)
         {
             case 0:
+                if (BanButton()) return; // идёт запрет героев: даже клетку не трогаем
                 if (_cellOf(_heroId) is { } cell) SetCursorPos(cell.X + cell.Width / 2, cell.Y + cell.Height / 2);
                 break;
             case 1: case 5: Mouse(MOUSE_LEFTDOWN); break;
