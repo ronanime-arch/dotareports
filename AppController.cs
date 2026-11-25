@@ -176,7 +176,11 @@ sealed class AppController
         _overlay = new OverlayWindow();
         _reminderOverlay = new OverlayWindow(top: 330, backgroundAlpha: 0xCC, pill: true); // полупрозрачная «таблетка»: игра под ней видна
         _draft = new DraftWindow(_draftData) { OpenUrl = url => OpenAnalytics(url) };
-        _quickPick = new QuickPick(_draftData) { Notify = text => _tray.ShowBalloonTip(3000, "Dota Reports", text, Forms.ToolTipIcon.Info) };
+        _quickPick = new QuickPick(_draftData, _watcher.CellOf)
+        {
+            Notify = (title, line, on) => _overlay.ShowPopup(title, on ? OverlayWindow.Green : OverlayWindow.White,
+                new[] { (line, OverlayWindow.Gray) }, TimeSpan.FromSeconds(on ? 6 : 5)), // коротко: в том же углу карточка пика
+        };
         _turboCard = new TurboCard();
         _pickFrame = new PickFrame();
         _turboCard.CloseButtonPressed += () => _pickFrame.ShowAround(null); // закрыли карточку — и рамку «Бери» тоже
@@ -297,13 +301,13 @@ sealed class AppController
         }
         TrackCustom(s, custom);
         _gameState = s.GameState;
+        _quickPick.OnGsi(s.GameState, custom ? 0 : s.HeroId);
         CheckReminders(s);
         // карточка — и в пике, и во время стратегии: тогда видны все герои, и прогноз по драфту полный
         bool picking = !custom && (s.GameState is "DOTA_GAMERULES_STATE_HERO_SELECTION" or "DOTA_GAMERULES_STATE_STRATEGY_TIME");
         if (picking && s.HeroId != _ownHero)
         {
             _ownHero = s.HeroId;
-            _quickPick.OnHeroPicked(s.HeroId);
             if (_picking) RenderCard();
         }
         if (picking == _picking) return;
@@ -1623,7 +1627,6 @@ sealed class AppController
     // Выход бывает и до конца запуска (обновление закрывает копию, которая ещё ждёт Dota) — окон и браузера тогда нет.
     void Exit()
     {
-        _quickPick.Stop();
         _poll.Stop();
         _confTimer.Stop();
         _gsi.Stop();
