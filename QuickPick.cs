@@ -14,8 +14,8 @@ namespace DotaReports;
 
 /// <summary>
 /// Быстрый пик героя мышью. F7 — включить для последнего героя (повторно — выключить), Ctrl+F7 — выбрать другого
-/// («снайп», «медуза», «Faceless Void»). Пока идёт выбор героя (GSI) и Dota на переднем плане, по кругу кликает клетку
-/// героя в сетке и кнопку «Выбрать». Через консоль и бинд выбрать героя не получилось.
+/// («снайп», «медуза», «Faceless Void»). Пока идёт выбор героя (GSI) и Dota на переднем плане, кликает клетку героя
+/// в сетке, а затем быстро кнопку «Выбрать». Через консоль и бинд выбрать героя не получилось.
 /// Включить можно заранее: до начала пика мышь не трогается. Выключается само: герой взят или пик кончился.
 /// Разметка 1920×1080, сетка героев «Атрибуты». По красной кнопке (запрет героя) не кликает.
 /// </summary>
@@ -23,6 +23,7 @@ sealed class QuickPick
 {
     const string Selection = "DOTA_GAMERULES_STATE_HERO_SELECTION";
     const uint MOUSE_LEFTDOWN = 0x2, MOUSE_LEFTUP = 0x4;
+    const int RepeatHeroStep = 100;
     static readonly System.Drawing.Point PickButton = new(1479, 828);
     static readonly System.Drawing.Rectangle PickButtonArea = new(1350, 800, 260, 55);
 
@@ -44,12 +45,13 @@ sealed class QuickPick
 
     readonly DraftData _data;
     readonly Func<int, System.Drawing.Rectangle?> _cellOf;
-    readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(30) };
+    readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(10) };
     QuickPickWindow? _window;
     int _dotaPid;
     IntPtr _dotaWindow;
     int _heroId;
     int _step;
+    bool _down;
     string _gameState = "";
     bool _sawSelection;
 
@@ -111,6 +113,7 @@ sealed class QuickPick
     {
         if (!On) return;
         _timer.Stop();
+        Restart();
         Log.Write($"Быстрый пик: {title} {line}");
         Notify?.Invoke(title, line, false);
     }
@@ -127,24 +130,33 @@ sealed class QuickPick
             Stop($"Автопик {Name(_heroId)} выключен", heroId > 0 ? $"пик кончился, взят {Name(heroId)}" : "пик кончился");
     }
 
-    // Круг ≈ 0,25 с: навести на героя, нажать, отпустить; пауза; то же с кнопкой «Выбрать».
+    // Один клик по герою, дальше — клики по «Выбрать» так быстро, как позволяет таймер (нажатие и отпускание по тикам,
+    // чтобы Dota видела каждое). Раз в ~1,5 с герой кликается снова: первый клик мог попасть до появления сетки.
     void Tick()
     {
-        if (_gameState != Selection || !DotaForeground()) { _step = 0; return; } // вне пика и в чужом окне не кликаем
-        switch (_step)
+        if (_gameState != Selection || !DotaForeground()) { Restart(); return; } // вне пика и в чужом окне не кликаем
+        if (_step == 0)
         {
-            case 0:
-                if (BanButton()) return; // идёт запрет героев: даже клетку не трогаем
-                if (_cellOf(_heroId) is { } cell) SetCursorPos(cell.X + cell.Width / 2, cell.Y + cell.Height / 2);
-                break;
-            case 1: case 5: Mouse(MOUSE_LEFTDOWN); break;
-            case 2: case 6: Mouse(MOUSE_LEFTUP); break;
-            case 4:
-                if (BanButton()) { _step = 0; return; }
-                SetCursorPos(PickButton.X, PickButton.Y);
-                break;
+            if (BanButton()) return; // идёт запрет героев: даже клетку не трогаем
+            if (_cellOf(_heroId) is { } cell) SetCursorPos(cell.X + cell.Width / 2, cell.Y + cell.Height / 2);
         }
-        _step = (_step + 1) % 8;
+        else if (_step == 1) Mouse(MOUSE_LEFTDOWN);
+        else if (_step == 2) Mouse(MOUSE_LEFTUP);
+        else if (_step == 5) SetCursorPos(PickButton.X, PickButton.Y); // дали Dota отметить героя
+        else if (_step > 5)
+        {
+            if (!_down && _step % 8 == 0 && BanButton()) { _step = 0; return; }
+            Mouse(_down ? MOUSE_LEFTUP : MOUSE_LEFTDOWN);
+        }
+        _step++;
+        if (_step >= RepeatHeroStep && !_down) _step = 0;
+    }
+
+    /// <summary>Начать круг заново; кнопку мыши не оставляем зажатой.</summary>
+    void Restart()
+    {
+        if (_down) Mouse(MOUSE_LEFTUP);
+        _step = 0;
     }
 
     /// <summary>Кнопка красная — это запрет героя, а не выбор: по ней кликать нельзя.</summary>
@@ -164,8 +176,9 @@ sealed class QuickPick
         return r / n > 60 && r > gr * 3 / 2;
     }
 
-    static void Mouse(uint flags)
+    void Mouse(uint flags)
     {
+        _down = flags == MOUSE_LEFTDOWN;
         var input = new[] { new INPUT { Type = 0, Mi = new MOUSEINPUT { Flags = flags } } };
         if (SendInput(1, input, Marshal.SizeOf<INPUT>()) != 1)
             Log.Write("Быстрый пик: SendInput не принят, ошибка " + Marshal.GetLastWin32Error());
