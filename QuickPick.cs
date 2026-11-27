@@ -7,7 +7,9 @@ using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -20,9 +22,10 @@ namespace DotaReports;
 /// Режим консоли (если в Dota назначена клавиша консоли, нужен параметр запуска -console): с начала выбора героя консоль
 /// открывается и в неё вводится <c>dota_select_hero …</c>; как только кончились запреты — Enter и дальше без пауз ↑ + Enter.
 /// Режим мыши (клавиша консоли не назначена): клик по герою в сетке и быстрые клики по «Выбрать»; 1920×1080, «Атрибуты».
-/// Режим — галочкой в меню значка. Пока кнопка выбора красная (запрет героя), ни Enter, ни кликов пика нет.
-/// Автобан: F8 — включить/выключить, Ctrl+F8 — выбрать героя. Пока кнопка красная, клик по герою и по кнопке (в обоих
-/// режимах: консольной команды запрета для All Pick и Турбо нет); пик ждёт, пока бан не отправлен.
+/// Пока кнопка выбора красная (запрет героя), ни Enter, ни кликов пика нет.
+/// Автобан: пока кнопка красная, клик по герою и по кнопке (в обоих режимах: консольной команды запрета для All Pick
+/// и Турбо нет); пик ждёт, пока бан не отправлен.
+/// Всё настраивается в окне Ctrl+F7: герой на пик и на бан, у каждого свой переключатель, и переключатель «клики / консоль».
 /// </summary>
 sealed class QuickPick
 {
@@ -60,7 +63,7 @@ sealed class QuickPick
     readonly DraftData _data;
     readonly Func<int, System.Drawing.Rectangle?> _cellOf;
     readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(10) };
-    QuickPickWindow? _window, _banWindow;
+    QuickPickWindow? _window;
     int _banHeroId, _banStep, _banSent;
     DateTime? _selectionSince;
     bool _pickOn, _banOn;
@@ -78,13 +81,21 @@ sealed class QuickPick
 
     public bool On => _pickOn;
     public bool BanOn => _banOn;
+    /// <summary>Герой пика: текущий, если автопик включён, иначе прошлый (0 — нет).</summary>
+    public int PickHero => _pickOn ? _heroId : Known(LastHero(Paths.QuickPickLast));
+    public int BanHero => _banOn ? _banHeroId : Known(LastHero(Paths.QuickBanLast));
+    public string HeroName(int heroId) => Name(heroId);
 
-    /// <summary>Галочка «через консоль» (по умолчанию стоит).</summary>
+    /// <summary>Автопик или автобан включился или выключился (в том числе сам, по GSI).</summary>
+    public event Action? StateChanged;
+
+    /// <summary>Переключатель «консоль» (по умолчанию включён; выключен — клики). Идущий автопик перезапускается в новом режиме.</summary>
     public bool UseConsole
     {
         get => !File.Exists(Paths.QuickPickMouse);
         set
         {
+            if (value == UseConsole) return;
             try
             {
                 if (value) File.Delete(Paths.QuickPickMouse);
@@ -92,11 +103,18 @@ sealed class QuickPick
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log.Write("Быстрый пик: режим не сохранён: " + ex.Message); }
             Log.Write("Быстрый пик: режим " + (value ? "консоли" : "мыши"));
-            if (_pickOn) { StopPick($"Автопик {Name(_heroId)} выключен", "сменён режим — включите заново (F7)"); }
+            if (_pickOn)
+            {
+                var hero = _heroId;
+                StopPick($"Автопик {Name(hero)} выключен", "сменён режим");
+                Pick(hero);
+            }
         }
     }
     /// <summary>Уведомление поверх игры: заголовок, строка, «включён» (чуть дольше).</summary>
     public Action<string, string, bool>? Notify { get; set; }
+
+    int Known(int heroId) => heroId > 0 && _data.Heroes.ContainsKey(heroId) ? heroId : 0;
 
     public QuickPick(DraftData data, Func<int, System.Drawing.Rectangle?> cellOf)
     {
@@ -115,18 +133,44 @@ sealed class QuickPick
         else ChooseHero();
     }
 
-    /// <summary>Ctrl+F7: открыть поиск героя.</summary>
+    /// <summary>Ctrl+F7: окно пика и бана (открыто — закрыть). Открытие ничего не выключает.</summary>
     public void ChooseHero()
     {
-        if (On) StopPick($"Автопик {Name(_heroId)} выключен", "");
-        if (_window is { IsVisible: true }) { _window.Hide(); return; }
+        if (_window is { IsVisible: true }) { _window.Hide(); ReturnToDota(); return; }
         _dotaWindow = DotaWindowOrZero();
-        _window ??= new QuickPickWindow(_data, Pick);
-        _window.Open(LastHero(Paths.QuickPickLast));
+        if (_consoleOpen && DotaForeground()) // закрыть консоль, пока Dota ещё в фокусе: новый пик откроет её сам
+        {
+            Tap(_consoleKey!.Value.Scan, _consoleKey.Value.Extended);
+            _consoleOpen = _entered = false;
+            _step = 0;
+        }
+        _window ??= new QuickPickWindow(_data, this);
+        _window.Open();
+    }
+
+    /// <summary>Переключатель пика в окне: включить для героя или выключить.</summary>
+    public void SetPick(bool on, int heroId)
+    {
+        if (on && heroId > 0) Pick(heroId);
+        else StopPick($"Автопик {Name(_heroId)} выключен", "");
+    }
+
+    /// <summary>Переключатель бана в окне.</summary>
+    public void SetBan(bool on, int heroId)
+    {
+        if (on && heroId > 0) Ban(heroId);
+        else StopBan($"Автобан {Name(_banHeroId)} выключен", "");
+    }
+
+    /// <summary>Окно закрыто — фокус обратно в Dota (пока фокус у окна, ничего не жмётся).</summary>
+    public void ReturnToDota()
+    {
+        if (_dotaWindow != IntPtr.Zero) SetForegroundWindow(_dotaWindow);
     }
 
     void Pick(int heroId)
     {
+        if (_down) Mouse(MOUSE_LEFTUP);
         Remember(Paths.QuickPickLast, heroId);
         _consoleKey = UseConsole ? ConsoleKey() : null;
         var internalName = _data.HeroInternalNames().GetValueOrDefault(heroId);
@@ -137,6 +181,7 @@ sealed class QuickPick
         {
             Log.Write($"Быстрый пик: не включён, герой {heroId}: {problem}");
             Notify?.Invoke($"Автопик {Name(heroId)} не включён", problem, false);
+            StateChanged?.Invoke();
             return;
         }
         _heroId = heroId;
@@ -144,9 +189,9 @@ sealed class QuickPick
         _command = "dota_select_hero " + internalName;
         _consoleOpen = _entered = false;
         _sawSelection = _gameState == Selection;
-        if (_dotaWindow != IntPtr.Zero) SetForegroundWindow(_dotaWindow);
         _pickOn = true;
         _timer.Start();
+        StateChanged?.Invoke();
         var mode = _consoleKey != null ? "консоль" : "мышь";
         Log.Write($"Быстрый пик: включён ({mode}), герой {heroId}, состояние {_gameState}");
         Notify?.Invoke($"Автопик {Name(heroId)} включён", $"режим: {mode} · " + (_sawSelection ? "выбираю" : "жду выбора героя") + " · F7 — выключить", true);
@@ -178,44 +223,29 @@ sealed class QuickPick
         if (!_pickOn && !_banOn) _timer.Stop();
         Log.Write($"Быстрый пик: {title} {line}");
         Notify?.Invoke(title, line, false);
-    }
-
-    /// <summary>F8: автобан включён — выключить; иначе включить для последнего героя бана, а если его нет — открыть выбор.</summary>
-    public void ToggleBan()
-    {
-        if (_banOn) { StopBan($"Автобан {Name(_banHeroId)} выключен", ""); return; }
-        if (LastHero(Paths.QuickBanLast) is > 0 and var last && _data.Heroes.ContainsKey(last)) { _dotaWindow = DotaWindowOrZero(); Ban(last); }
-        else ChooseBanHero();
-    }
-
-    /// <summary>Ctrl+F8: выбрать героя для бана.</summary>
-    public void ChooseBanHero()
-    {
-        if (_banOn) StopBan($"Автобан {Name(_banHeroId)} выключен", "");
-        if (_banWindow is { IsVisible: true }) { _banWindow.Hide(); return; }
-        _dotaWindow = DotaWindowOrZero();
-        _banWindow ??= new QuickPickWindow(_data, Ban, "Автобан");
-        _banWindow.Open(LastHero(Paths.QuickBanLast));
+        StateChanged?.Invoke();
     }
 
     void Ban(int heroId)
     {
+        if (_down) Mouse(MOUSE_LEFTUP);
         Remember(Paths.QuickBanLast, heroId);
         var problem = !Setup.ScreenSupported ? "нужен экран 1920×1080" : _cellOf(heroId) == null ? "героя нет в сетке пика" : null;
         if (problem != null)
         {
             Log.Write($"Быстрый пик: автобан не включён, герой {heroId}: {problem}");
             Notify?.Invoke($"Автобан {Name(heroId)} не включён", problem, false);
+            StateChanged?.Invoke();
             return;
         }
         _banHeroId = heroId;
         _banStep = _banSent = 0;
-        _selectionSince = null;
+        _selectionSince = _gameState == Selection ? DateTime.Now : null;
         _banOn = true;
-        if (_dotaWindow != IntPtr.Zero) SetForegroundWindow(_dotaWindow);
         _timer.Start();
+        StateChanged?.Invoke();
         Log.Write($"Быстрый пик: автобан включён, герой {heroId}, состояние {_gameState}");
-        Notify?.Invoke($"Автобан {Name(heroId)} включён", "F8 — выключить", true);
+        Notify?.Invoke($"Автобан {Name(heroId)} включён", "Ctrl+F7 — выключить", true);
     }
 
     static void Remember(string path, int heroId)
@@ -434,27 +464,36 @@ sealed class QuickPick
     }
 }
 
-/// <summary>Маленькое окно: строка поиска и до шести подходящих героев. Enter — выбрать, ↑↓ — перейти, Esc — закрыть.</summary>
+/// <summary>
+/// Окно Ctrl+F7: строка «Пик» и строка «Бан» с переключателями (зелёный — включён, красный — выключен), переключатель
+/// «клики / консоль» и поиск героя. Enter — герой в выбранную строку (подсвечена; Tab или клик — сменить) и включить её;
+/// после бана выбор переходит на пик, после пика окно закрывается. Esc — закрыть, фокус обратно в Dota.
+/// </summary>
 sealed class QuickPickWindow : Window
 {
     static readonly Brush Bg = new SolidColorBrush(Color.FromRgb(0x14, 0x18, 0x20));
     static readonly Brush PanelBg = new SolidColorBrush(Color.FromRgb(0x1E, 0x24, 0x30));
+    static readonly Brush ActiveBg = new SolidColorBrush(Color.FromRgb(0x2C, 0x36, 0x48));
     static readonly Brush Fg = new SolidColorBrush(Color.FromRgb(0xF2, 0xF2, 0xF2));
     static readonly Brush Dim = new SolidColorBrush(Color.FromRgb(0x9A, 0xA4, 0xB0));
 
     readonly DraftData _data;
-    readonly Action<int> _picked;
+    readonly QuickPick _qp;
     readonly TextBox _input = new();
     readonly ListBox _list = new();
-    readonly TextBlock _hint = new() { FontSize = 11, Foreground = Dim, Margin = new Thickness(0, 6, 0, 0) };
-    int _last;
+    readonly TextBlock _hint = new() { FontSize = 11, Foreground = Dim, Margin = new Thickness(0, 6, 0, 0), TextWrapping = TextWrapping.Wrap };
+    readonly ToggleButton _pickSwitch = Switch("#3FA34D", "#C0392B"), _banSwitch = Switch("#3FA34D", "#C0392B");
+    readonly ToggleButton _modeSwitch = Switch("#101010", "#E0B020"); // включён — консоль (чёрный), выключен — клики (жёлтый)
+    readonly TextBlock _pickName = HeroLabel(), _banName = HeroLabel();
+    readonly Border _pickRow, _banRow;
+    bool _banActive; // куда идёт найденный герой
     List<int> _found = new();
 
-    public QuickPickWindow(DraftData data, Action<int> picked, string title = "Быстрый пик")
+    public QuickPickWindow(DraftData data, QuickPick qp)
     {
         _data = data;
-        _picked = picked;
-        Title = title;
+        _qp = qp;
+        Title = "Быстрый пик и бан";
         Width = 320;
         SizeToContent = SizeToContent.Height;
         Topmost = true;
@@ -464,12 +503,29 @@ sealed class QuickPickWindow : Window
         Background = Bg;
         FontFamily = new FontFamily("Segoe UI");
 
+        _modeSwitch.Click += (_, _) => { _qp.UseConsole = _modeSwitch.IsChecked == true; Refresh(); };
+        var mode = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 2) };
+        mode.Children.Add(new TextBlock { Text = "Клики", FontSize = 13, Foreground = Fg, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) });
+        mode.Children.Add(_modeSwitch);
+        mode.Children.Add(new TextBlock { Text = "Консоль", FontSize = 13, Foreground = Fg, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) });
+        var modeNote = new TextBlock
+        {
+            Text = "Бан — всегда кликами: команды запрета в Dota нет.", FontSize = 11, Foreground = Dim,
+            HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 8),
+        };
+
+        _pickSwitch.Click += (_, _) => { _qp.SetPick(_pickSwitch.IsChecked == true, _qp.PickHero); Refresh(); };
+        _banSwitch.Click += (_, _) => { _qp.SetBan(_banSwitch.IsChecked == true, _qp.BanHero); Refresh(); };
+        _pickRow = Row("Пик", _pickSwitch, _pickName, false);
+        _banRow = Row("Бан", _banSwitch, _banName, true);
+
         _input.FontSize = 16;
         _input.Padding = new Thickness(6, 4, 6, 4);
         _input.Background = PanelBg;
         _input.Foreground = Fg;
         _input.CaretBrush = Fg;
         _input.BorderBrush = Dim;
+        _input.Margin = new Thickness(0, 4, 0, 0);
         _input.TextChanged += (_, _) => Search();
         _list.Background = PanelBg;
         _list.Foreground = Fg;
@@ -479,20 +535,71 @@ sealed class QuickPickWindow : Window
         _list.MouseUp += (_, _) => Choose();
 
         var root = new StackPanel { Margin = new Thickness(10) };
+        root.Children.Add(mode);
+        root.Children.Add(modeNote);
+        root.Children.Add(_pickRow);
+        root.Children.Add(_banRow);
         root.Children.Add(_input);
         root.Children.Add(_list);
         root.Children.Add(_hint);
         Content = root;
 
         PreviewKeyDown += OnKey;
-        Closing += (_, e) => { e.Cancel = true; Hide(); };
+        Closing += (_, e) => { e.Cancel = true; HideToDota(); };
+        _qp.StateChanged += () => { if (IsVisible) Refresh(); };
     }
 
-    public void Open(int lastHero)
+    static TextBlock HeroLabel() => new() { FontSize = 14, Foreground = Fg, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+
+    Border Row(string label, ToggleButton sw, TextBlock name, bool ban)
     {
-        _last = lastHero;
+        var dock = new DockPanel();
+        DockPanel.SetDock(sw, Dock.Right);
+        var title = new TextBlock { Text = label, Width = 40, FontSize = 14, FontWeight = FontWeights.SemiBold, Foreground = Dim, VerticalAlignment = VerticalAlignment.Center };
+        DockPanel.SetDock(title, Dock.Left);
+        dock.Children.Add(sw);
+        dock.Children.Add(title);
+        dock.Children.Add(name);
+        var row = new Border { Child = dock, Padding = new Thickness(8, 5, 8, 5), CornerRadius = new CornerRadius(4), Margin = new Thickness(0, 0, 0, 4), Cursor = Cursors.Hand };
+        // клик по самому переключателю до строки не доходит (его обрабатывает переключатель)
+        row.MouseLeftButtonDown += (_, _) => { _banActive = ban; Refresh(); _input.Focus(); };
+        return row;
+    }
+
+    /// <summary>Переключатель-тумблер: цвет дорожки во включённом и выключенном положении.</summary>
+    static ToggleButton Switch(string on, string off)
+    {
+        var xaml = """
+            <ControlTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="ToggleButton">
+              <Grid Width="42" Height="22" Background="Transparent">
+                <Border x:Name="Track" CornerRadius="11" Background="OFF" BorderBrush="#5A6474" BorderThickness="1"/>
+                <Ellipse x:Name="Thumb" Width="16" Height="16" Fill="#F2F2F2" HorizontalAlignment="Left" Margin="3,0,0,0"/>
+              </Grid>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="Track" Property="Background" Value="ON"/>
+                  <Setter TargetName="Thumb" Property="HorizontalAlignment" Value="Right"/>
+                  <Setter TargetName="Thumb" Property="Margin" Value="0,0,3,0"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                  <Setter Property="Opacity" Value="0.35"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+            """.Replace("\"OFF\"", $"\"{off}\"").Replace("\"ON\"", $"\"{on}\"");
+        return new ToggleButton
+        {
+            Template = (ControlTemplate)XamlReader.Parse(xaml), Cursor = Cursors.Hand, Focusable = false,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0),
+        };
+    }
+
+    public void Open()
+    {
+        _banActive = false;
         _input.Clear();
-        Search();
+        Refresh();
         var wa = SystemParameters.WorkArea;
         Left = wa.Left + (wa.Width - Width) / 2;
         Top = wa.Top + 120;
@@ -501,24 +608,51 @@ sealed class QuickPickWindow : Window
         _input.Focus();
     }
 
+    void HideToDota()
+    {
+        Hide();
+        _qp.ReturnToDota();
+    }
+
+    /// <summary>Переключатели и имена — по текущему состоянию (автопик и автобан могут выключиться сами).</summary>
+    void Refresh()
+    {
+        int pick = _qp.PickHero, ban = _qp.BanHero;
+        _pickName.Text = pick > 0 ? _qp.HeroName(pick) : "— герой не выбран";
+        _banName.Text = ban > 0 ? _qp.HeroName(ban) : "— герой не выбран";
+        _pickName.Foreground = pick > 0 ? Fg : Dim;
+        _banName.Foreground = ban > 0 ? Fg : Dim;
+        _pickSwitch.IsEnabled = pick > 0;
+        _banSwitch.IsEnabled = ban > 0;
+        _pickSwitch.IsChecked = _qp.On;
+        _banSwitch.IsChecked = _qp.BanOn;
+        _modeSwitch.IsChecked = _qp.UseConsole;
+        _pickRow.Background = _banActive ? Brushes.Transparent : ActiveBg;
+        _banRow.Background = _banActive ? ActiveBg : Brushes.Transparent;
+        Search();
+    }
+
     void Search()
     {
         _found = HeroSearch.Find(_input.Text, _data.Heroes, 6);
-        // пустое поле: Enter берёт прошлого героя
-        if (_found.Count == 0 && _input.Text.Trim().Length == 0 && _last > 0 && _data.Heroes.ContainsKey(_last)) _found = new() { _last };
+        var last = _banActive ? _qp.BanHero : _qp.PickHero;
+        // пустое поле: Enter берёт героя строки
+        if (_found.Count == 0 && _input.Text.Trim().Length == 0 && last > 0) _found = new() { last };
         _list.ItemsSource = _found.Select(id => _data.Heroes.GetValueOrDefault(id, $"#{id}")).ToList();
         if (_found.Count > 0) _list.SelectedIndex = 0;
+        var row = _banActive ? "бан" : "пик";
         _hint.Text = _data.Heroes.Count == 0 ? "Список героев ещё не загружен."
-            : _input.Text.Trim().Length == 0 && _last > 0 ? "Enter — прошлый герой, или начните вводить название."
-            : _found.Count == 0 ? "Не нашёл такого героя." : "Enter — выбрать, ↑↓ — перейти, Esc — закрыть.";
+            : _found.Count == 0 && _input.Text.Trim().Length > 0 ? "Не нашёл такого героя."
+            : $"Enter — герой на {row} и включить, Tab — пик/бан, ↑↓ — перейти, Esc — закрыть.";
     }
 
     void OnKey(object sender, KeyEventArgs e)
     {
         switch (e.Key)
         {
-            case Key.Escape: Hide(); e.Handled = true; break;
+            case Key.Escape: HideToDota(); e.Handled = true; break;
             case Key.Enter: Choose(); e.Handled = true; break;
+            case Key.Tab: _banActive = !_banActive; Refresh(); e.Handled = true; break;
             case Key.Down when _list.Items.Count > 0: _list.SelectedIndex = Math.Min(_list.SelectedIndex + 1, _list.Items.Count - 1); e.Handled = true; break;
             case Key.Up when _list.Items.Count > 0: _list.SelectedIndex = Math.Max(_list.SelectedIndex - 1, 0); e.Handled = true; break;
         }
@@ -528,7 +662,15 @@ sealed class QuickPickWindow : Window
     {
         if (_list.SelectedIndex < 0 || _list.SelectedIndex >= _found.Count) return;
         var id = _found[_list.SelectedIndex];
-        Hide();
-        _picked(id);
+        if (_banActive)
+        {
+            _qp.SetBan(true, id);
+            _banActive = false; // запрет раньше пика: дальше — герой на пик
+            _input.Clear();
+            Refresh();
+            return;
+        }
+        _qp.SetPick(true, id);
+        HideToDota();
     }
 }
