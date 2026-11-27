@@ -21,6 +21,9 @@ sealed class AppController
     const int NecHotkeyId = 0xD07D;
     const int QuickPickHotkeyId = 0xD07E;
     const int QuickPickChooseHotkeyId = 0xD07F;
+    const int QuickBanHotkeyId = 0xD080;
+    const int QuickBanChooseHotkeyId = 0xD081;
+    const uint VK_F8 = 0x77;
     const uint VK_N = 0x4E;
     const uint VK_F7 = 0x76;
     const uint VK_S = 0x53;
@@ -1475,6 +1478,10 @@ sealed class AppController
             Log.Write("F7 занята другой программой");
         if (!Native.RegisterHotKey(_browser.Handle, QuickPickChooseHotkeyId, Native.MOD_CONTROL | Native.MOD_NOREPEAT, VK_F7))
             Log.Write("Ctrl+F7 занята другой программой");
+        if (!Native.RegisterHotKey(_browser.Handle, QuickBanHotkeyId, Native.MOD_NOREPEAT, VK_F8))
+            Log.Write("F8 занята другой программой");
+        if (!Native.RegisterHotKey(_browser.Handle, QuickBanChooseHotkeyId, Native.MOD_CONTROL | Native.MOD_NOREPEAT, VK_F8))
+            Log.Write("Ctrl+F8 занята другой программой");
         if (!Native.RegisterHotKey(_browser.Handle, NecHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_N))
             Log.Write("Ctrl+Alt+N занята другой программой");
         if (!Native.RegisterHotKey(_browser.Handle, DraftHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, VK_D))
@@ -1512,6 +1519,16 @@ sealed class AppController
             _quickPick.ChooseHero();
             handled = true;
         }
+        else if (msg == Native.WM_HOTKEY && wParam.ToInt32() == QuickBanHotkeyId)
+        {
+            _quickPick.ToggleBan();
+            handled = true;
+        }
+        else if (msg == Native.WM_HOTKEY && wParam.ToInt32() == QuickBanChooseHotkeyId)
+        {
+            _quickPick.ChooseBanHero();
+            handled = true;
+        }
         else if (msg == Native.WM_HOTKEY && wParam.ToInt32() == NecHotkeyId)
         {
             ToggleNecLobby();
@@ -1535,6 +1552,17 @@ sealed class AppController
         menu.Items.Add("Помощник в пике (Ctrl+Alt+D)", null, (_, _) => _draft.Toggle());
         menu.Items.Add("Быстрый пик героя (F7)", null, (_, _) => _quickPick.Toggle());
         menu.Items.Add("Выбрать героя для быстрого пика (Ctrl+F7)", null, (_, _) => _quickPick.ChooseHero());
+        var consoleMode = new Forms.ToolStripMenuItem("Быстрый пик через консоль (без галочки — мышью)") { CheckOnClick = true };
+        consoleMode.Click += (_, _) => _quickPick.UseConsole = consoleMode.Checked;
+        var autoBan = new Forms.ToolStripMenuItem("Автобан героя (F8)", null, (_, _) => _quickPick.ToggleBan());
+        menu.Items.Add(consoleMode);
+        menu.Items.Add(autoBan);
+        menu.Items.Add("Выбрать героя для бана (Ctrl+F8)", null, (_, _) => _quickPick.ChooseBanHero());
+        menu.Opening += (_, _) =>
+        {
+            consoleMode.Checked = _quickPick.UseConsole;
+            autoBan.Checked = _quickPick.BanOn;
+        };
         menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
         menu.Items.Add("Лобби NEC (Ctrl+Alt+N)", null, (_, _) => ToggleNecLobby());
@@ -1638,6 +1666,8 @@ sealed class AppController
             Native.UnregisterHotKey(_browser.Handle, NecHotkeyId);
             Native.UnregisterHotKey(_browser.Handle, QuickPickHotkeyId);
             Native.UnregisterHotKey(_browser.Handle, QuickPickChooseHotkeyId);
+            Native.UnregisterHotKey(_browser.Handle, QuickBanHotkeyId);
+            Native.UnregisterHotKey(_browser.Handle, QuickBanChooseHotkeyId);
         }
         _necHide.Stop();
         _necPoll.Stop();
