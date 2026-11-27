@@ -302,7 +302,7 @@ sealed class AppController
         }
         TrackCustom(s, custom);
         _gameState = s.GameState;
-        _quickPick.OnGsi(s.GameState, custom ? 0 : s.HeroId);
+        _quickPick.OnGsi(custom ? "" : s.GameState, custom ? 0 : s.HeroId); // в кастомках (NEC и др.) быстрый пик не работает: другая сетка
         CheckReminders(s);
         // карточка — и в пике, и во время стратегии: тогда видны все герои, и прогноз по драфту полный
         bool picking = !custom && (s.GameState is "DOTA_GAMERULES_STATE_HERO_SELECTION" or "DOTA_GAMERULES_STATE_STRATEGY_TIME");

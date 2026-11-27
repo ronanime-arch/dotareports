@@ -264,6 +264,11 @@ sealed class QuickPick
     public void ReturnToDota()
     {
         if (_dotaWindow != IntPtr.Zero) SetForegroundWindow(_dotaWindow);
+        if (_armed) return;
+        var parts = new List<string>();
+        if (_pickEnabled && PickHero > 0) parts.Add("пик " + Name(PickHero));
+        if (_banEnabled && BanHero > 0) parts.Add("бан " + Name(BanHero));
+        if (parts.Count > 0) Notify?.Invoke("F7 выключен: " + string.Join(", ", parts), "F7 — включить", false);
     }
 
     bool Pick(int heroId, bool quiet)
@@ -372,7 +377,9 @@ sealed class QuickPick
         if (!_pickOn) return;
         if (gameState == Selection) _sawSelection = true;
         if (!_sawSelection) return;
-        if (heroId == _heroId) StopPick($"{Name(_heroId)} взят", "в следующем пике — снова");
+        // взят любой герой (и руками другой): пик сделан; герой бана сюда не считается — его могли отметить для запрета
+        if (heroId > 0 && heroId != _banHeroId)
+            StopPick(heroId == _heroId ? $"{Name(_heroId)} взят" : $"Взят {Name(heroId)}", "в следующем пике — снова");
         else if (gameState != Selection)
             StopPick($"Автопик {Name(_heroId)}: пик кончился", heroId > 0 ? $"взят {Name(heroId)}" : "в следующем пике — снова");
     }
@@ -725,6 +732,13 @@ sealed class QuickPickWindow : Window
             Template = (ControlTemplate)XamlReader.Parse(xaml), Cursor = Cursors.Hand, Focusable = false,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0),
         };
+    }
+
+    /// <summary>Для --ui-test: содержимое окна в текущем состоянии, без показа.</summary>
+    public FrameworkElement TestRoot()
+    {
+        Refresh();
+        return (FrameworkElement)Content;
     }
 
     public void Open()
