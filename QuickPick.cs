@@ -17,8 +17,10 @@ using Microsoft.Win32;
 namespace DotaReports;
 
 /// <summary>
-/// Быстрый пик героя. F7 — включить для последнего героя (повторно — выключить), Ctrl+F7 — выбрать другого
-/// («снайп», «медуза», «Faceless Void»). Выключается само: герой взят или пик кончился. Не в Dota — ничего не жмёт.
+/// Быстрый пик и бан. Ctrl+F7 — окно настроек: герой на пик и на бан («снайп», «медуза», «Faceless Void»), тумблеры.
+/// F7 — включить или выключить по этим настройкам; включённый F7 работает в каждом пике, пока его не выключат
+/// (настройки хранятся в файле и переживают перезапуск). Сами по себе ни F7, ни тумблеры не выключаются: герой взят,
+/// запрет отправлен, пик кончился, герой уже забанен или взят — пропускается только этот пик. Не в Dota — ничего не жмёт.
 /// Режим консоли (если в Dota назначена клавиша консоли, нужен параметр запуска -console): с начала выбора героя консоль
 /// открывается и в неё вводится <c>dota_select_hero …</c>; как только кончились запреты — Enter и дальше без пауз ↑ + Enter.
 /// Режим мыши (клавиша консоли не назначена): клик по герою в сетке и быстрые клики по «Выбрать»; 1920×1080, «Атрибуты».
@@ -62,11 +64,13 @@ sealed class QuickPick
 
     readonly DraftData _data;
     readonly Func<int, System.Drawing.Rectangle?> _cellOf;
+    readonly Func<int, string?> _unavailable; // «забанен» / «взят» по сетке пика, null — свободен
     readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(10) };
     QuickPickWindow? _window;
     int _banHeroId, _banStep, _banSent;
     DateTime? _selectionSince;
-    bool _pickOn, _banOn;
+    bool _pickOn, _banOn; // идёт в этом пике
+    bool _armed, _pickEnabled = true, _banEnabled; // настройки: F7 и тумблеры окна, хранятся в файле
     int _dotaPid;
     IntPtr _dotaWindow;
     int _heroId;
@@ -78,15 +82,18 @@ sealed class QuickPick
     bool _entered;
     string _gameState = "";
     bool _sawSelection;
+    bool _touched, _banTouched; // уже кликнули по герою / нажали Enter: дальше серая клетка может быть нашей
 
-    public bool On => _pickOn;
-    public bool BanOn => _banOn;
-    /// <summary>Герой пика: текущий, если автопик включён, иначе прошлый (0 — нет).</summary>
-    public int PickHero => _pickOn ? _heroId : Known(LastHero(Paths.QuickPickLast));
-    public int BanHero => _banOn ? _banHeroId : Known(LastHero(Paths.QuickBanLast));
+    /// <summary>F7 включён: в каждом пике делать то, что включено в окне, пока F7 не нажата снова.</summary>
+    public bool Armed => _armed;
+    public bool PickEnabled => _pickEnabled;
+    public bool BanEnabled => _banEnabled;
+    /// <summary>Герой строки «Пик» (0 — не выбран).</summary>
+    public int PickHero => Known(LastHero(Paths.QuickPickLast));
+    public int BanHero => Known(LastHero(Paths.QuickBanLast));
     public string HeroName(int heroId) => Name(heroId);
 
-    /// <summary>Автопик или автобан включился или выключился (в том числе сам, по GSI).</summary>
+    /// <summary>Настройки или ход пика/бана изменились (в том числе сам, по GSI).</summary>
     public event Action? StateChanged;
 
     /// <summary>Переключатель «консоль» (по умолчанию включён; выключен — клики). Идущий автопик перезапускается в новом режиме.</summary>
@@ -106,9 +113,10 @@ sealed class QuickPick
             if (_pickOn)
             {
                 var hero = _heroId;
-                StopPick($"Автопик {Name(hero)} выключен", "сменён режим");
-                Pick(hero);
+                StopPick("", "", notify: false);
+                Pick(hero, quiet: false);
             }
+            StateChanged?.Invoke();
         }
     }
     /// <summary>Уведомление поверх игры: заголовок, строка, «включён» (чуть дольше).</summary>
@@ -116,21 +124,125 @@ sealed class QuickPick
 
     int Known(int heroId) => heroId > 0 && _data.Heroes.ContainsKey(heroId) ? heroId : 0;
 
-    public QuickPick(DraftData data, Func<int, System.Drawing.Rectangle?> cellOf)
+    public QuickPick(DraftData data, Func<int, System.Drawing.Rectangle?> cellOf, Func<int, string?> unavailable)
     {
         _data = data;
         _cellOf = cellOf;
+        _unavailable = unavailable;
         _timer.Tick += (_, _) => Tick();
+        LoadToggles();
     }
 
     string Name(int heroId) => _data.Heroes.GetValueOrDefault(heroId, $"герой #{heroId}");
 
-    /// <summary>F7: включён — выключить; иначе включить для последнего героя, а если его ещё нет — открыть выбор.</summary>
+    // quickpick_toggles.txt: «armed=1», «pick=1», «ban=0» — переживают перезапуск программы
+    void LoadToggles()
+    {
+        try
+        {
+            if (!File.Exists(Paths.QuickPickToggles)) return;
+            var kv = File.ReadAllLines(Paths.QuickPickToggles).Select(l => l.Split('=', 2)).Where(p => p.Length == 2)
+                .ToDictionary(p => p[0].Trim(), p => p[1].Trim() == "1");
+            _armed = kv.GetValueOrDefault("armed");
+            _pickEnabled = kv.GetValueOrDefault("pick", true);
+            _banEnabled = kv.GetValueOrDefault("ban");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log.Write("Быстрый пик: настройки не прочитаны: " + ex.Message); }
+    }
+
+    void SaveToggles()
+    {
+        try { File.WriteAllLines(Paths.QuickPickToggles, new[] { $"armed={(_armed ? 1 : 0)}", $"pick={(_pickEnabled ? 1 : 0)}", $"ban={(_banEnabled ? 1 : 0)}" }); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log.Write("Быстрый пик: настройки не сохранены: " + ex.Message); }
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>F7: включить или выключить по последним настройкам окна Ctrl+F7. Сам F7 не выключается.</summary>
     public void Toggle()
     {
-        if (On) { StopPick($"Автопик {Name(_heroId)} выключен", ""); return; }
-        if (LastHero(Paths.QuickPickLast) is > 0 and var last && _data.Heroes.ContainsKey(last)) { _dotaWindow = DotaWindowOrZero(); Pick(last); }
-        else ChooseHero();
+        if (!_armed && !(_pickEnabled && PickHero > 0) && !(_banEnabled && BanHero > 0))
+        {
+            Notify?.Invoke("Быстрый пик: нечего включать", "Ctrl+F7 — выберите героя и включите пик или бан", false);
+            ChooseHero();
+            return;
+        }
+        _dotaWindow = DotaWindowOrZero();
+        SetArmed(!_armed);
+    }
+
+    /// <summary>F7 или тумблер «F7» в окне.</summary>
+    public void SetArmed(bool on)
+    {
+        if (on == _armed) return;
+        _armed = on;
+        SaveToggles();
+        Log.Write("Быстрый пик: F7 " + (on ? "включён" : "выключен"));
+        if (on) { StartRun(); return; }
+        StopPick("", "", notify: false);
+        StopBan("", "", notify: false);
+        Notify?.Invoke("Быстрый пик выключен", "F7 — включить снова", false);
+    }
+
+    /// <summary>Тумблер строки «Пик».</summary>
+    public void SetPickEnabled(bool on)
+    {
+        if (on == _pickEnabled) return;
+        _pickEnabled = on;
+        SaveToggles();
+        ApplyPick();
+    }
+
+    public void SetBanEnabled(bool on)
+    {
+        if (on == _banEnabled) return;
+        _banEnabled = on;
+        SaveToggles();
+        ApplyBan();
+    }
+
+    /// <summary>Герой в строку «Пик» (из поиска): запоминается, тумблер строки включается.</summary>
+    public void SetPickHero(int heroId)
+    {
+        Remember(Paths.QuickPickLast, heroId);
+        _pickEnabled = true;
+        SaveToggles();
+        if (_pickOn) StopPick("", "", notify: false); // новый герой — заново
+        ApplyPick();
+    }
+
+    public void SetBanHero(int heroId)
+    {
+        Remember(Paths.QuickBanLast, heroId);
+        _banEnabled = true;
+        SaveToggles();
+        if (_banOn) StopBan("", "", notify: false);
+        ApplyBan();
+    }
+
+    // Настройку поменяли руками — сразу в дело, если F7 включён.
+    void ApplyPick()
+    {
+        if (_armed && _pickEnabled && PickHero > 0) { if (!_pickOn) Pick(PickHero, quiet: false); }
+        else StopPick($"Автопик {Name(_heroId)} выключен", "");
+    }
+
+    void ApplyBan()
+    {
+        if (_armed && _banEnabled && BanHero > 0) { if (!_banOn) Ban(BanHero, quiet: false); }
+        else StopBan($"Автобан {Name(_banHeroId)} выключен", "");
+    }
+
+    // F7 включили или начался новый пик: всё, что включено в окне, — заново (настройки не меняются).
+    void StartRun()
+    {
+        var parts = new List<string>();
+        if (_banEnabled && BanHero > 0 && (_banOn || Ban(BanHero, quiet: true))) parts.Add("бан " + Name(BanHero));
+        if (_pickEnabled && PickHero > 0 && (_pickOn || Pick(PickHero, quiet: true)))
+            parts.Add("пик " + Name(PickHero) + (_consoleKey != null ? " (консоль)" : " (клики)"));
+        if (parts.Count == 0) return; // причину уже показал Pick/Ban
+        var waiting = _gameState == Selection ? "выбираю" : "жду выбора героя";
+        Log.Write("Быстрый пик: работает — " + string.Join(", ", parts));
+        Notify?.Invoke("Быстрый пик: " + string.Join(", ", parts), waiting + " · F7 — выключить", true);
     }
 
     /// <summary>Ctrl+F7: окно пика и бана (открыто — закрыть). Открытие ничего не выключает.</summary>
@@ -138,7 +250,7 @@ sealed class QuickPick
     {
         if (_window is { IsVisible: true }) { _window.Hide(); ReturnToDota(); return; }
         _dotaWindow = DotaWindowOrZero();
-        if (_consoleOpen && DotaForeground()) // закрыть консоль, пока Dota ещё в фокусе: новый пик откроет её сам
+        if (_consoleOpen && DotaForeground()) // закрыть консоль, пока Dota ещё в фокусе: пик откроет её сам
         {
             Tap(_consoleKey!.Value.Scan, _consoleKey.Value.Extended);
             _consoleOpen = _entered = false;
@@ -148,30 +260,15 @@ sealed class QuickPick
         _window.Open();
     }
 
-    /// <summary>Переключатель пика в окне: включить для героя или выключить.</summary>
-    public void SetPick(bool on, int heroId)
-    {
-        if (on && heroId > 0) Pick(heroId);
-        else StopPick($"Автопик {Name(_heroId)} выключен", "");
-    }
-
-    /// <summary>Переключатель бана в окне.</summary>
-    public void SetBan(bool on, int heroId)
-    {
-        if (on && heroId > 0) Ban(heroId);
-        else StopBan($"Автобан {Name(_banHeroId)} выключен", "");
-    }
-
     /// <summary>Окно закрыто — фокус обратно в Dota (пока фокус у окна, ничего не жмётся).</summary>
     public void ReturnToDota()
     {
         if (_dotaWindow != IntPtr.Zero) SetForegroundWindow(_dotaWindow);
     }
 
-    void Pick(int heroId)
+    bool Pick(int heroId, bool quiet)
     {
         if (_down) Mouse(MOUSE_LEFTUP);
-        Remember(Paths.QuickPickLast, heroId);
         _consoleKey = UseConsole ? ConsoleKey() : null;
         var internalName = _data.HeroInternalNames().GetValueOrDefault(heroId);
         var problem = _consoleKey != null
@@ -179,73 +276,80 @@ sealed class QuickPick
             : !Setup.ScreenSupported ? "нужен экран 1920×1080" : _cellOf(heroId) == null ? "героя нет в сетке пика" : null;
         if (problem != null)
         {
-            Log.Write($"Быстрый пик: не включён, герой {heroId}: {problem}");
-            Notify?.Invoke($"Автопик {Name(heroId)} не включён", problem, false);
+            Log.Write($"Быстрый пик: автопик не запущен, герой {heroId}: {problem}");
+            Notify?.Invoke($"Автопик {Name(heroId)} не запущен", problem, false);
             StateChanged?.Invoke();
-            return;
+            return false;
         }
         _heroId = heroId;
         _step = 0;
         _command = "dota_select_hero " + internalName;
-        _consoleOpen = _entered = false;
+        _consoleOpen = _entered = _touched = false;
         _sawSelection = _gameState == Selection;
         _pickOn = true;
         _timer.Start();
         StateChanged?.Invoke();
-        var mode = _consoleKey != null ? "консоль" : "мышь";
-        Log.Write($"Быстрый пик: включён ({mode}), герой {heroId}, состояние {_gameState}");
-        Notify?.Invoke($"Автопик {Name(heroId)} включён", $"режим: {mode} · " + (_sawSelection ? "выбираю" : "жду выбора героя") + " · F7 — выключить", true);
+        var mode = _consoleKey != null ? "консоль" : "клики";
+        Log.Write($"Быстрый пик: автопик запущен ({mode}), герой {heroId}, состояние {_gameState}");
+        if (!quiet)
+            Notify?.Invoke($"Автопик {Name(heroId)} включён", $"режим: {mode} · " + (_sawSelection ? "выбираю" : "жду выбора героя") + " · F7 — выключить", true);
+        return true;
     }
 
     static int LastHero(string path) =>
         File.Exists(path) && int.TryParse(File.ReadAllText(path).Trim(), out var id) ? id : 0;
 
-    void StopPick(string title, string line)
+    // Остановить в этом пике; настройки (F7, тумблеры) не трогает — в следующем пике всё снова.
+    void StopPick(string title, string line, bool notify = true)
     {
         if (!_pickOn) return;
         _pickOn = false;
         Restart();
         if (_consoleOpen && DotaForeground()) Tap(_consoleKey!.Value.Scan, _consoleKey.Value.Extended); // закрыть консоль
         _consoleOpen = false;
-        Finish(title, line);
+        Finish(title, line, notify);
     }
 
-    void StopBan(string title, string line)
+    void StopBan(string title, string line, bool notify = true)
     {
         if (!_banOn) return;
         _banOn = false;
         if (_down) Mouse(MOUSE_LEFTUP);
-        Finish(title, line);
+        Finish(title, line, notify);
     }
 
-    void Finish(string title, string line)
+    void Finish(string title, string line, bool notify)
     {
         if (!_pickOn && !_banOn) _timer.Stop();
-        Log.Write($"Быстрый пик: {title} {line}");
-        Notify?.Invoke(title, line, false);
+        if (notify)
+        {
+            Log.Write($"Быстрый пик: {title} {line}");
+            Notify?.Invoke(title, line, false);
+        }
         StateChanged?.Invoke();
     }
 
-    void Ban(int heroId)
+    bool Ban(int heroId, bool quiet)
     {
         if (_down) Mouse(MOUSE_LEFTUP);
-        Remember(Paths.QuickBanLast, heroId);
         var problem = !Setup.ScreenSupported ? "нужен экран 1920×1080" : _cellOf(heroId) == null ? "героя нет в сетке пика" : null;
         if (problem != null)
         {
-            Log.Write($"Быстрый пик: автобан не включён, герой {heroId}: {problem}");
-            Notify?.Invoke($"Автобан {Name(heroId)} не включён", problem, false);
+            Log.Write($"Быстрый пик: автобан не запущен, герой {heroId}: {problem}");
+            Notify?.Invoke($"Автобан {Name(heroId)} не запущен", problem, false);
             StateChanged?.Invoke();
-            return;
+            return false;
         }
         _banHeroId = heroId;
         _banStep = _banSent = 0;
+        _banTouched = false;
         _selectionSince = _gameState == Selection ? DateTime.Now : null;
         _banOn = true;
         _timer.Start();
         StateChanged?.Invoke();
-        Log.Write($"Быстрый пик: автобан включён, герой {heroId}, состояние {_gameState}");
-        Notify?.Invoke($"Автобан {Name(heroId)} включён", "Ctrl+F7 — выключить", true);
+        Log.Write($"Быстрый пик: автобан запущен, герой {heroId}, состояние {_gameState}");
+        if (!quiet) Notify?.Invoke($"Автобан {Name(heroId)} включён", "F7 — выключить", true);
+        return true;
     }
 
     static void Remember(string path, int heroId)
@@ -257,18 +361,35 @@ sealed class QuickPick
     /// <summary>Каждое сообщение GSI: состояние игры и ваш герой (0 — ещё не взят).</summary>
     public void OnGsi(string gameState, int heroId)
     {
+        var started = gameState == Selection && _gameState != Selection;
         _gameState = gameState;
+        if (started && _armed) StartRun(); // новый пик — по тем же настройкам
         if (_banOn)
         {
             if (gameState == Selection) _selectionSince ??= DateTime.Now;
-            else if (_selectionSince != null) StopBan($"Автобан {Name(_banHeroId)} выключен", "пик кончился");
+            else if (_selectionSince != null) StopBan($"Автобан {Name(_banHeroId)}: пик кончился", "в следующем пике — снова");
         }
         if (!_pickOn) return;
         if (gameState == Selection) _sawSelection = true;
         if (!_sawSelection) return;
-        if (heroId == _heroId) StopPick($"{Name(_heroId)} взят", "автопик выключен");
+        if (heroId == _heroId) StopPick($"{Name(_heroId)} взят", "в следующем пике — снова");
         else if (gameState != Selection)
-            StopPick($"Автопик {Name(_heroId)} выключен", heroId > 0 ? $"пик кончился, взят {Name(heroId)}" : "пик кончился");
+            StopPick($"Автопик {Name(_heroId)}: пик кончился", heroId > 0 ? $"взят {Name(heroId)}" : "в следующем пике — снова");
+    }
+
+    /// <summary>Герой уже забанен или взят — в этом пике его не трогаем (настройки остаются).</summary>
+    bool SkipPick()
+    {
+        if (_touched || _entered || _unavailable(_heroId) is not { } why) return false;
+        StopPick($"{Name(_heroId)} уже {why}", "в этом пике пропускаю");
+        return true;
+    }
+
+    bool SkipBan()
+    {
+        if (_banTouched || _unavailable(_banHeroId) is not { } why) return false;
+        StopBan($"{Name(_banHeroId)} уже {why}", "запрет в этом пике пропускаю");
+        return true;
     }
 
     // Один клик по герою, дальше — клики по «Выбрать» так быстро, как позволяет таймер (нажатие и отпускание по тикам,
@@ -287,16 +408,17 @@ sealed class QuickPick
     {
         if (_banStep == 0)
         {
+            if (SkipBan()) return;
             if (!BanButton())
             {
-                if (_banSent > 0) StopBan($"{Name(_banHeroId)}: запрет отправлен", "автобан выключен");
-                else if (DateTime.Now - _selectionSince > BanWait) StopBan($"Автобан {Name(_banHeroId)} выключен", "этапа запрета не видно");
+                if (_banSent > 0) StopBan($"{Name(_banHeroId)}: запрет отправлен", "в следующем пике — снова");
+                else if (DateTime.Now - _selectionSince > BanWait) StopBan($"Автобан {Name(_banHeroId)}: этапа запрета не видно", "в следующем пике — снова");
                 return;
             }
-            if (_banSent >= BanTries) { StopBan($"{Name(_banHeroId)}: запрет отправлен", "автобан выключен"); return; }
+            if (_banSent >= BanTries) { StopBan($"{Name(_banHeroId)}: запрет отправлен", "в следующем пике — снова"); return; }
             if (_cellOf(_banHeroId) is { } cell) SetCursorPos(cell.X + cell.Width / 2, cell.Y + cell.Height / 2);
         }
-        else if (_banStep is 1 or 10) Mouse(MOUSE_LEFTDOWN);
+        else if (_banStep is 1 or 10) { Mouse(MOUSE_LEFTDOWN); _banTouched = true; }
         else if (_banStep is 2 or 11) Mouse(MOUSE_LEFTUP);
         else if (_banStep == 8)
         {
@@ -323,6 +445,7 @@ sealed class QuickPick
             Type(_command);
             _step++;
         }
+        else if (SkipPick()) return;
         else if (!_entered)
         {
             if (BanButton()) return;
@@ -337,10 +460,10 @@ sealed class QuickPick
     {
         if (_step == 0)
         {
-            if (BanButton()) return; // идёт запрет героев: даже клетку не трогаем
+            if (BanButton() || SkipPick()) return; // идёт запрет героев: даже клетку не трогаем
             if (_cellOf(_heroId) is { } cell) SetCursorPos(cell.X + cell.Width / 2, cell.Y + cell.Height / 2);
         }
-        else if (_step == 1) Mouse(MOUSE_LEFTDOWN);
+        else if (_step == 1) { Mouse(MOUSE_LEFTDOWN); _touched = true; }
         else if (_step == 2) Mouse(MOUSE_LEFTUP);
         else if (_step == 5) SetCursorPos(PickButton.X, PickButton.Y); // дали Dota отметить героя
         else if (_step > 5)
@@ -468,6 +591,7 @@ sealed class QuickPick
 /// Окно Ctrl+F7: строка «Пик» и строка «Бан» с переключателями (зелёный — включён, красный — выключен), переключатель
 /// «клики / консоль» и поиск героя. Enter — герой в выбранную строку (подсвечена; Tab или клик — сменить) и включить её;
 /// после бана выбор переходит на пик, после пика окно закрывается. Esc — закрыть, фокус обратно в Dota.
+/// Тумблеры — настройки: сами не выключаются. Тумблер «F7» — то же, что клавиша F7: работать по этим настройкам в каждом пике.
 /// </summary>
 sealed class QuickPickWindow : Window
 {
@@ -483,6 +607,8 @@ sealed class QuickPickWindow : Window
     readonly ListBox _list = new();
     readonly TextBlock _hint = new() { FontSize = 11, Foreground = Dim, Margin = new Thickness(0, 6, 0, 0), TextWrapping = TextWrapping.Wrap };
     readonly ToggleButton _pickSwitch = Switch("#3FA34D", "#C0392B"), _banSwitch = Switch("#3FA34D", "#C0392B");
+    readonly ToggleButton _armSwitch = Switch("#3FA34D", "#C0392B");
+    readonly TextBlock _armText = new() { FontSize = 13, Foreground = Fg, VerticalAlignment = VerticalAlignment.Center };
     readonly ToggleButton _modeSwitch = Switch("#101010", "#E0B020"); // включён — консоль (чёрный), выключен — клики (жёлтый)
     readonly TextBlock _pickName = HeroLabel(), _banName = HeroLabel();
     readonly Border _pickRow, _banRow;
@@ -514,8 +640,13 @@ sealed class QuickPickWindow : Window
             HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 8),
         };
 
-        _pickSwitch.Click += (_, _) => { _qp.SetPick(_pickSwitch.IsChecked == true, _qp.PickHero); Refresh(); };
-        _banSwitch.Click += (_, _) => { _qp.SetBan(_banSwitch.IsChecked == true, _qp.BanHero); Refresh(); };
+        _pickSwitch.Click += (_, _) => { _qp.SetPickEnabled(_pickSwitch.IsChecked == true); Refresh(); };
+        _banSwitch.Click += (_, _) => { _qp.SetBanEnabled(_banSwitch.IsChecked == true); Refresh(); };
+        _armSwitch.Click += (_, _) => { _qp.SetArmed(_armSwitch.IsChecked == true); Refresh(); };
+        var arm = new DockPanel { Margin = new Thickness(8, 4, 8, 6) };
+        DockPanel.SetDock(_armSwitch, Dock.Right);
+        arm.Children.Add(_armSwitch);
+        arm.Children.Add(_armText);
         _pickRow = Row("Пик", _pickSwitch, _pickName, false);
         _banRow = Row("Бан", _banSwitch, _banName, true);
 
@@ -535,6 +666,7 @@ sealed class QuickPickWindow : Window
         _list.MouseUp += (_, _) => Choose();
 
         var root = new StackPanel { Margin = new Thickness(10) };
+        root.Children.Add(arm);
         root.Children.Add(mode);
         root.Children.Add(modeNote);
         root.Children.Add(_pickRow);
@@ -624,8 +756,11 @@ sealed class QuickPickWindow : Window
         _banName.Foreground = ban > 0 ? Fg : Dim;
         _pickSwitch.IsEnabled = pick > 0;
         _banSwitch.IsEnabled = ban > 0;
-        _pickSwitch.IsChecked = _qp.On;
-        _banSwitch.IsChecked = _qp.BanOn;
+        _pickSwitch.IsChecked = _qp.PickEnabled;
+        _banSwitch.IsChecked = _qp.BanEnabled;
+        _armSwitch.IsChecked = _qp.Armed;
+        _armSwitch.IsEnabled = _qp.Armed || (_qp.PickEnabled && pick > 0) || (_qp.BanEnabled && ban > 0);
+        _armText.Text = _qp.Armed ? "F7: работает в каждом пике" : "F7: выключено";
         _modeSwitch.IsChecked = _qp.UseConsole;
         _pickRow.Background = _banActive ? Brushes.Transparent : ActiveBg;
         _banRow.Background = _banActive ? ActiveBg : Brushes.Transparent;
@@ -664,13 +799,13 @@ sealed class QuickPickWindow : Window
         var id = _found[_list.SelectedIndex];
         if (_banActive)
         {
-            _qp.SetBan(true, id);
+            _qp.SetBanHero(id);
             _banActive = false; // запрет раньше пика: дальше — герой на пик
             _input.Clear();
             Refresh();
             return;
         }
-        _qp.SetPick(true, id);
+        _qp.SetPickHero(id);
         HideToDota();
     }
 }

@@ -28,6 +28,7 @@ static class Paths
     public static string QuickPickLast => Path.Combine(Root, "quickpick.txt");
     public static string QuickBanLast => Path.Combine(Root, "quickban.txt");
     public static string QuickPickMouse => Path.Combine(Root, "quickpick_mouse");
+    public static string QuickPickToggles => Path.Combine(Root, "quickpick_toggles.txt");
     public static string HeroList => Path.Combine(Root, "herolist_ru.json");
     public static string AbilityList => Path.Combine(Root, "abilitylist_ru.json"); // названия способностей (Пробуждение в кастомке)
     public static string Portraits => Path.Combine(Root, "portraits");
