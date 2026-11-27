@@ -43,6 +43,24 @@ sealed class PickWatcher
     /// <summary>Где герой в сетке пика на экране (клетки заданы раз при запуске — без блокировки).</summary>
     public Rectangle? CellOf(int hero) => _grid.CellOf(hero);
 
+    int _uHero;
+    string? _uWhy;
+
+    /// <summary>
+    /// Герой уже недоступен в сетке: «забанен», «взят» или null. Не ждёт разбора кадра (быстрый пик спрашивает
+    /// каждые 10 мс): если сетка занята, отвечает прошлым ответом.
+    /// </summary>
+    public string? Unavailable(int hero)
+    {
+        if (!System.Threading.Monitor.TryEnter(_grid)) return hero == _uHero ? _uWhy : null;
+        try
+        {
+            _uHero = hero;
+            return _uWhy = _grid.Banned.Contains(hero) ? "забанен" : _grid.Taken.Contains(hero) ? "взят" : null;
+        }
+        finally { System.Threading.Monitor.Exit(_grid); }
+    }
+
     public void Begin(string matchId)
     {
         lock (_grid) _grid.Reset();

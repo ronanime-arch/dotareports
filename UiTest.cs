@@ -29,6 +29,10 @@ static class UiTest
             (2318, 2204), (2, 6, false), (38, 61), "данные Valve от 17.10 21:40"), () => { });
         Save(rating.Root, 300, shot, new Point(20, 130), Path.Combine(dir, "rating"));
 
+        var qpData = new DraftData();
+        var quick = new QuickPickWindow(qpData, new QuickPick(qpData, _ => null, _ => null));
+        Save(quick.TestRoot(), 320, shot, new Point(20, 130), Path.Combine(dir, "quickpick"));
+
         var lobby = new RatingWindow(380);
         var players = new List<NecPlayer>
         {

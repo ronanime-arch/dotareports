@@ -176,7 +176,8 @@ sealed class AppController
         _overlay = new OverlayWindow();
         _reminderOverlay = new OverlayWindow(top: 330, backgroundAlpha: 0xCC, pill: true); // полупрозрачная «таблетка»: игра под ней видна
         _draft = new DraftWindow(_draftData) { OpenUrl = url => OpenAnalytics(url) };
-        _quickPick = new QuickPick(_draftData, _watcher.CellOf)
+        _quickPick = new QuickPick(_draftData, _watcher.CellOf,
+            id => _picking ? _watcher.Unavailable(id) : null) // вне обычного пика (кастомка) сетка прошлого матча
         {
             Notify = (title, line, on) => _overlay.ShowPopup(title, on ? OverlayWindow.Green : OverlayWindow.White,
                 new[] { (line, OverlayWindow.Gray) }, TimeSpan.FromSeconds(on ? 6 : 5)), // коротко: в том же углу карточка пика
@@ -301,7 +302,7 @@ sealed class AppController
         }
         TrackCustom(s, custom);
         _gameState = s.GameState;
-        _quickPick.OnGsi(s.GameState, custom ? 0 : s.HeroId);
+        _quickPick.OnGsi(custom ? "" : s.GameState, custom ? 0 : s.HeroId); // в кастомках (NEC и др.) быстрый пик не работает: другая сетка
         CheckReminders(s);
         // карточка — и в пике, и во время стратегии: тогда видны все герои, и прогноз по драфту полный
         bool picking = !custom && (s.GameState is "DOTA_GAMERULES_STATE_HERO_SELECTION" or "DOTA_GAMERULES_STATE_STRATEGY_TIME");
@@ -1533,8 +1534,8 @@ sealed class AppController
         _loginItem = new Forms.ToolStripMenuItem("Войти в Steam…", null, async (_, _) => await LoginAsync()) { Visible = false };
         menu.Items.Add(_loginItem);
         menu.Items.Add("Помощник в пике (Ctrl+Alt+D)", null, (_, _) => _draft.Toggle());
-        menu.Items.Add("Быстрый пик героя (F7)", null, (_, _) => _quickPick.Toggle());
-        menu.Items.Add("Выбрать героя для быстрого пика (Ctrl+F7)", null, (_, _) => _quickPick.ChooseHero());
+        menu.Items.Add("Быстрый пик и бан: вкл/выкл (F7)", null, (_, _) => _quickPick.Toggle());
+        menu.Items.Add("Быстрый пик и бан: герои, клики/консоль (Ctrl+F7)", null, (_, _) => _quickPick.ChooseHero());
         menu.Items.Add("Рейтинг (Ctrl+Alt+S)", null, async (_, _) => await ToggleRatingAsync());
         menu.Items.Add("Последняя сводка (Ctrl+Alt+R)", null, (_, _) => ShowLatest());
         menu.Items.Add("Лобби NEC (Ctrl+Alt+N)", null, (_, _) => ToggleNecLobby());
