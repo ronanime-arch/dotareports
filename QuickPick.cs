@@ -37,6 +37,7 @@ sealed class QuickPick
     const uint KEY_EXTENDED = 0x1, KEY_UP = 0x2, KEY_UNICODE = 0x4, KEY_SCANCODE = 0x8;
     const ushort SC_ENTER = 0x1C, SC_ARROW_UP = 0x48;
     const int ConsoleOpenTicks = 15; // ~0,2 с на открытие консоли
+    const int KeyHoldTicks = 3;      // столько тиков клавиша зажата
     const int BanRetryStep = 50, BanTries = 2;
     static readonly TimeSpan BanWait = TimeSpan.FromSeconds(5); // нет красной кнопки с начала выбора — запретов нет
     static readonly System.Drawing.Point PickButton = new(1479, 828);
@@ -76,6 +77,7 @@ sealed class QuickPick
     int _heroId;
     int _step;
     bool _down;
+    readonly Queue<INPUT[]?> _keys = new(); // клавиши по тикам; null — тик ожидания
     (ushort Scan, bool Extended)? _consoleKey; // null — режим мыши
     string _command = "";
     bool _consoleOpen;
@@ -404,6 +406,11 @@ sealed class QuickPick
     void Tick()
     {
         if (_gameState != Selection || !DotaForeground()) { Restart(); return; } // вне пика и в чужом окне не жмём
+        if (_keys.Count > 0) // клавиша нажата — держим, потом отпускаем; остальное ждёт
+        {
+            if (_keys.Dequeue() is { } input) Send(input);
+            return;
+        }
         if (_banOn) { BanTick(); return; } // пик — после бана
         if (!_pickOn) return;
         if (_consoleKey != null) ConsoleTick();
@@ -442,25 +449,28 @@ sealed class QuickPick
     {
         if (!_consoleOpen)
         {
-            Tap(_consoleKey!.Value.Scan, _consoleKey.Value.Extended);
+            Press(_consoleKey!.Value.Scan, _consoleKey.Value.Extended);
             _consoleOpen = true;
             _step = 0;
+            Log.Write("Быстрый пик: открываю консоль");
         }
         else if (_step < ConsoleOpenTicks) _step++;
         else if (_step == ConsoleOpenTicks)
         {
             Type(_command);
             _step++;
+            Log.Write("Быстрый пик: набрал " + _command);
         }
         else if (SkipPick()) return;
         else if (!_entered)
         {
             if (BanButton()) return;
-            Tap(SC_ENTER, false);
+            Press(SC_ENTER, false);
             _entered = true;
+            Log.Write("Быстрый пик: Enter");
         }
-        else if (_step++ % 2 == 0) Tap(SC_ARROW_UP, true);
-        else Tap(SC_ENTER, false);
+        else if (_step++ % 2 == 0) Press(SC_ARROW_UP, true);
+        else Press(SC_ENTER, false);
     }
 
     void MouseTick()
@@ -486,6 +496,7 @@ sealed class QuickPick
     void Restart()
     {
         if (_down) Mouse(MOUSE_LEFTUP);
+        ReleaseKeys();
         _banStep = 0;
         if (_consoleKey == null) _step = 0;
     }
@@ -515,10 +526,33 @@ sealed class QuickPick
             Log.Write("Быстрый пик: SendInput не принят, ошибка " + Marshal.GetLastWin32Error());
     }
 
-    void Tap(ushort scan, bool extended)
+    // Dota не видит клавишу, нажатую и отпущенную одним пакетом (консоль так и не открывалась): держим ~3 тика.
+    void Press(ushort scan, bool extended)
     {
         var flags = KEY_SCANCODE | (extended ? KEY_EXTENDED : 0);
-        Send(Key(scan, flags), Key(scan, flags | KEY_UP));
+        _keys.Enqueue(new[] { Key(scan, flags) });
+        for (int i = 0; i < KeyHoldTicks; i++) _keys.Enqueue(null);
+        _keys.Enqueue(new[] { Key(scan, flags | KEY_UP) });
+        _keys.Enqueue(null); // пауза перед следующей клавишей
+    }
+
+    /// <summary>Сразу, вне тиков (закрыть консоль): нажать, подержать 40 мс, отпустить.</summary>
+    void Tap(ushort scan, bool extended)
+    {
+        ReleaseKeys();
+        var flags = KEY_SCANCODE | (extended ? KEY_EXTENDED : 0);
+        Send(Key(scan, flags));
+        System.Threading.Thread.Sleep(40);
+        Send(Key(scan, flags | KEY_UP));
+    }
+
+    /// <summary>Очередь клавиш бросить, но зажатую не оставлять.</summary>
+    void ReleaseKeys()
+    {
+        var ups = _keys.Where(k => k != null && (k[0].Ki.Flags & KEY_UP) != 0).ToList();
+        _keys.Clear();
+        // отпускание без нажатия безвредно; нажатие без отпускания — залипшая клавиша
+        foreach (var up in ups) Send(up!);
     }
 
     void Type(string text) =>
