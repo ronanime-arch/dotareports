@@ -39,7 +39,7 @@ sealed class QuickPick
     const uint MOUSE_LEFTDOWN = 0x2, MOUSE_LEFTUP = 0x4;
     const int RepeatHeroStep = 100;
     const int BanRetryStep = 50, BanTries = 2;
-    static readonly TimeSpan BanWait = TimeSpan.FromSeconds(5); // нет красной кнопки с начала выбора — запретов нет
+    static readonly TimeSpan BanWait = TimeSpan.FromSeconds(3); // герой выбран, а кнопка не красная уже 3 с с начала пика — запретов нет
     static readonly System.Drawing.Point PickButton = new(1479, 828);
     static readonly System.Drawing.Rectangle PickButtonArea = new(1350, 800, 260, 55);
 
@@ -405,26 +405,29 @@ sealed class QuickPick
         else MouseTick();
     }
 
-    // Пока кнопка красная: клик по герою, клик по кнопке; через ~0,5 с ещё раз, если она всё ещё красная.
+    // Кнопка краснеет («Запретить») только когда герой уже выбран, поэтому сначала клик по герою, потом смотрим на
+    // кнопку: красная — жмём её (запрет), иначе этап запретов не идёт — героя не трогаем дальше и пускаем пик.
+    // Раньше ждали красной кнопки до клика и в Турбо так и не дождались (5 с ничего не происходило).
     void BanTick()
     {
+        var elapsed = _selectionSince is { } since ? DateTime.Now - since : TimeSpan.Zero;
         if (_banStep == 0)
         {
             if (SkipBan()) return;
-            if (!BanButton())
-            {
-                if (_banSent > 0) StopBan($"{Name(_banHeroId)}: запрет отправлен", "в следующем пике — снова");
-                else if (DateTime.Now - _selectionSince > BanWait) StopBan($"Автобан {Name(_banHeroId)}: этапа запрета не видно", "в следующем пике — снова");
-                return;
-            }
             if (_banSent >= BanTries) { StopBan($"{Name(_banHeroId)}: запрет отправлен", "в следующем пике — снова"); return; }
             if (_cellOf(_banHeroId) is { } cell) SetCursorPos(cell.X + cell.Width / 2, cell.Y + cell.Height / 2);
         }
         else if (_banStep is 1 or 10) { Mouse(MOUSE_LEFTDOWN); _banTouched = true; }
         else if (_banStep is 2 or 11) Mouse(MOUSE_LEFTUP);
-        else if (_banStep == 8)
+        else if (_banStep == 8) // герой отмечен — какая кнопка?
         {
-            if (!BanButton()) { _banStep = 0; return; } // запреты кончились: «Выбрать» с этим героем не жмём
+            if (!BanButton())
+            {
+                if (_banSent > 0) StopBan($"{Name(_banHeroId)}: запрет отправлен", "в следующем пике — снова");
+                else if (elapsed > BanWait) StopBan($"Автобан {Name(_banHeroId)}: этапа запрета не видно", "в следующем пике — снова");
+                else _banStep = BanRetryStep - 30; // сетка могла ещё не ожить — ещё раз через ~0,3 с
+                return;
+            }
             SetCursorPos(PickButton.X, PickButton.Y);
         }
         if (_banStep == 11) _banSent++;
@@ -463,9 +466,10 @@ sealed class QuickPick
         else if (_step == 1) { Mouse(MOUSE_LEFTDOWN); _touched = true; }
         else if (_step == 2) Mouse(MOUSE_LEFTUP);
         else if (_step == 5) SetCursorPos(PickButton.X, PickButton.Y); // дали Dota отметить героя
-        else if (_step > 5)
+        else if (_step >= 8) // ещё 3 тика — кнопка успевает смениться на «Запретить», если идут запреты
         {
-            if (!_down && _step % 8 == 0 && BanButton()) { _step = 0; return; }
+            // красная — это запрет выбранного героя: не жать, иначе забаним своего (проверка перед каждым нажатием)
+            if (!_down && BanButton()) { _step = 0; return; }
             Mouse(_down ? MOUSE_LEFTUP : MOUSE_LEFTDOWN);
         }
         _step++;
