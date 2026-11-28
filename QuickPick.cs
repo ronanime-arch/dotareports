@@ -34,9 +34,10 @@ sealed class QuickPick
     const string Selection = "DOTA_GAMERULES_STATE_HERO_SELECTION";
     const uint MOUSE_LEFTDOWN = 0x2, MOUSE_LEFTUP = 0x4;
     const int RepeatHeroStep = 100;
-    const uint KEY_EXTENDED = 0x1, KEY_UP = 0x2, KEY_UNICODE = 0x4, KEY_SCANCODE = 0x8;
+    const uint KEY_EXTENDED = 0x1, KEY_UP = 0x2, KEY_UNICODE = 0x4;
+    const uint MAPVK_VSC_TO_VK_EX = 3;
     const ushort SC_ENTER = 0x1C, SC_ARROW_UP = 0x48;
-    const int ConsoleOpenTicks = 15; // ~0,2 с на открытие консоли
+    const int ConsoleOpenTicks = 35; // ~0,5 с: консоль выезжает, только потом поле ввода берёт текст
     const int KeyHoldTicks = 3;      // столько тиков клавиша зажата
     const int BanRetryStep = 50, BanTries = 2;
     static readonly TimeSpan BanWait = TimeSpan.FromSeconds(5); // нет красной кнопки с начала выбора — запретов нет
@@ -59,6 +60,7 @@ sealed class QuickPick
 
     [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
@@ -529,7 +531,7 @@ sealed class QuickPick
     // Dota не видит клавишу, нажатую и отпущенную одним пакетом (консоль так и не открывалась): держим ~3 тика.
     void Press(ushort scan, bool extended)
     {
-        var flags = KEY_SCANCODE | (extended ? KEY_EXTENDED : 0);
+        var flags = extended ? KEY_EXTENDED : 0;
         _keys.Enqueue(new[] { Key(scan, flags) });
         for (int i = 0; i < KeyHoldTicks; i++) _keys.Enqueue(null);
         _keys.Enqueue(new[] { Key(scan, flags | KEY_UP) });
@@ -540,7 +542,7 @@ sealed class QuickPick
     void Tap(ushort scan, bool extended)
     {
         ReleaseKeys();
-        var flags = KEY_SCANCODE | (extended ? KEY_EXTENDED : 0);
+        var flags = extended ? KEY_EXTENDED : 0;
         Send(Key(scan, flags));
         System.Threading.Thread.Sleep(40);
         Send(Key(scan, flags | KEY_UP));
@@ -558,7 +560,14 @@ sealed class QuickPick
     void Type(string text) =>
         Send(text.SelectMany(c => new[] { Key(c, KEY_UNICODE), Key(c, KEY_UNICODE | KEY_UP) }).ToArray());
 
-    static INPUT Key(ushort scan, uint flags) => new() { Type = 1, Ki = new KEYBDINPUT { Scan = scan, Flags = flags } };
+    // Клавиша — как с настоящей клавиатуры: и код клавиши Windows, и скан-код. Только скан-код (KEYEVENTF_SCANCODE)
+    // Dota в привязках не узнала: Insert консоль не открыл, а набранная команда ушла в поиск героев.
+    static INPUT Key(ushort scan, uint flags)
+    {
+        ushort vk = (flags & KEY_UNICODE) != 0 ? (ushort)0
+            : (ushort)MapVirtualKey((flags & KEY_EXTENDED) != 0 ? 0xE000u | scan : scan, MAPVK_VSC_TO_VK_EX);
+        return new() { Type = 1, Ki = new KEYBDINPUT { Vk = vk, Scan = scan, Flags = flags } };
+    }
 
     static void Send(params INPUT[] inputs)
     {
