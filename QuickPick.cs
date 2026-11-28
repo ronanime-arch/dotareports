@@ -39,7 +39,7 @@ sealed class QuickPick
     const uint MOUSE_LEFTDOWN = 0x2, MOUSE_LEFTUP = 0x4;
     const int RepeatHeroStep = 100;
     const int BanRetryStep = 50, BanTries = 2;
-    static readonly TimeSpan BanWait = TimeSpan.FromSeconds(3); // герой выбран, а кнопка не красная уже 3 с с начала пика — запретов нет
+    static readonly TimeSpan BanWait = TimeSpan.FromSeconds(10); // запреты в Турбо идут ~12 с; не увидели красной кнопки за 10 с — их нет
     static readonly System.Drawing.Point PickButton = new(1479, 828);
     static readonly System.Drawing.Rectangle PickButtonArea = new(1350, 800, 260, 55);
 
@@ -82,7 +82,8 @@ sealed class QuickPick
     bool _entered; // команда уже ушла в консоль
     string _gameState = "";
     bool _sawSelection;
-    bool _touched, _banTouched; // уже кликнули по герою / нажали Enter: дальше серая клетка может быть нашей
+    bool _touched, _banTouched;
+    int _banChecks; // снимков на этапе бана за этот пик // уже кликнули по герою / нажали Enter: дальше серая клетка может быть нашей
 
     /// <summary>F7 включён: в каждом пике делать то, что включено в окне, пока F7 не нажата снова.</summary>
     public bool Armed => _armed;
@@ -343,6 +344,7 @@ sealed class QuickPick
         _banHeroId = heroId;
         _banStep = _banSent = 0;
         _banTouched = false;
+        _banChecks = 0;
         _selectionSince = _gameState == Selection ? DateTime.Now : null;
         _banOn = true;
         _timer.Start();
@@ -421,7 +423,13 @@ sealed class QuickPick
         else if (_banStep is 2 or 11) Mouse(MOUSE_LEFTUP);
         else if (_banStep == 8) // герой отмечен — какая кнопка?
         {
-            if (!BanButton())
+            var red = BanButton();
+            if (_banChecks++ < 3) // для разбора: что на экране после клика по герою бана
+            {
+                Log.Write($"Быстрый пик: после клика по {Name(_banHeroId)} кнопка {ButtonColor()} — {(red ? "красная" : "не красная")}");
+                Shot("ban");
+            }
+            if (!red)
             {
                 if (_banSent > 0) StopBan($"{Name(_banHeroId)}: запрет отправлен", "в следующем пике — снова");
                 else if (elapsed > BanWait) StopBan($"Автобан {Name(_banHeroId)}: этапа запрета не видно", "в следующем пике — снова");
@@ -451,7 +459,7 @@ sealed class QuickPick
         }
         if (SkipPick() || BanButton()) return; // в запретах команду не шлём
         if (_step++ % 10 != 0) return; // ~6 раз в секунду, пока герой не взят
-        if (!_entered) Log.Write("Быстрый пик: в консоль → " + _command);
+        if (!_entered) { Log.Write($"Быстрый пик: в консоль → {_command}, кнопка {ButtonColor()}"); Shot("pick"); }
         _entered = true;
         SendNetcon(_command);
     }
@@ -463,7 +471,12 @@ sealed class QuickPick
             if (BanButton() || SkipPick()) return; // идёт запрет героев: даже клетку не трогаем
             if (_cellOf(_heroId) is { } cell) SetCursorPos(cell.X + cell.Width / 2, cell.Y + cell.Height / 2);
         }
-        else if (_step == 1) { Mouse(MOUSE_LEFTDOWN); _touched = true; }
+        else if (_step == 1)
+        {
+            Mouse(MOUSE_LEFTDOWN);
+            if (!_touched) { Log.Write($"Быстрый пик: клик по {Name(_heroId)}, кнопка {ButtonColor()}"); Shot("pick"); }
+            _touched = true;
+        }
         else if (_step == 2) Mouse(MOUSE_LEFTUP);
         else if (_step == 5) SetCursorPos(PickButton.X, PickButton.Y); // дали Dota отметить героя
         else if (_step >= 8) // ещё 3 тика — кнопка успевает смениться на «Запретить», если идут запреты
@@ -487,18 +500,49 @@ sealed class QuickPick
     /// <summary>Кнопка красная — это запрет героя, а не выбор: по ней кликать нельзя.</summary>
     static bool BanButton()
     {
+        var (r, g, _) = ButtonRgb();
+        return r > 60 && r > g * 3 / 2;
+    }
+
+    /// <summary>Средний цвет области кнопки выбора.</summary>
+    static (long R, long G, long B) ButtonRgb()
+    {
         using var bmp = new System.Drawing.Bitmap(PickButtonArea.Width, PickButtonArea.Height);
         using (var g = System.Drawing.Graphics.FromImage(bmp))
             g.CopyFromScreen(PickButtonArea.Location, System.Drawing.Point.Empty, PickButtonArea.Size);
-        long r = 0, gr = 0, n = 0;
+        long r = 0, gr = 0, b = 0, n = 0;
         for (int y = 0; y < bmp.Height; y += 4)
             for (int x = 0; x < bmp.Width; x += 4, n++)
             {
                 var c = bmp.GetPixel(x, y);
                 r += c.R;
                 gr += c.G;
+                b += c.B;
             }
-        return r / n > 60 && r > gr * 3 / 2;
+        return (r / n, gr / n, b / n);
+    }
+
+    static string ButtonColor() => ButtonRgb() is var (r, g, b) ? $"RGB {r},{g},{b}" : "";
+
+    /// <summary>
+    /// Снимок всего экрана в quickpick_shots (последние 12) — чтобы увидеть, как выглядят запреты и кнопка в этом режиме:
+    /// кадры пика снимают только сетку.
+    /// </summary>
+    static void Shot(string tag)
+    {
+        try
+        {
+            var dir = Path.Combine(Paths.Root, "quickpick_shots");
+            Directory.CreateDirectory(dir);
+            foreach (var old in new DirectoryInfo(dir).GetFiles("*.png").OrderByDescending(f => f.CreationTimeUtc).Skip(11)) old.Delete();
+            using var bmp = new System.Drawing.Bitmap(1920, 1080);
+            using (var g = System.Drawing.Graphics.FromImage(bmp)) g.CopyFromScreen(0, 0, 0, 0, bmp.Size);
+            bmp.Save(Path.Combine(dir, $"{DateTime.Now:MMdd_HHmmss_fff}_{tag}.png"), System.Drawing.Imaging.ImageFormat.Png);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ExternalException)
+        {
+            Log.Write("Быстрый пик: снимок не сохранён: " + ex.Message);
+        }
     }
 
     void Mouse(uint flags)
