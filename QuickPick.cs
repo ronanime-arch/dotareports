@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
@@ -21,8 +23,10 @@ namespace DotaReports;
 /// F7 — включить или выключить по этим настройкам; включённый F7 работает в каждом пике, пока его не выключат
 /// (настройки хранятся в файле и переживают перезапуск). Сами по себе ни F7, ни тумблеры не выключаются: герой взят,
 /// запрет отправлен, пик кончился, герой уже забанен или взят — пропускается только этот пик. Не в Dota — ничего не жмёт.
-/// Режим консоли (если в Dota назначена клавиша консоли, нужен параметр запуска -console): с начала выбора героя консоль
-/// открывается и в неё вводится <c>dota_select_hero …</c>; как только кончились запреты — Enter и дальше без пауз ↑ + Enter.
+/// Режим консоли — сетевая консоль Dota (параметр запуска <c>-netconport 2121</c>): как только кончились запреты,
+/// по TCP ~6 раз в секунду уходит <c>dota_select_hero …</c>, клавиши не нажимаются. Порт не отвечает — кликами.
+/// (Нажатия клавиш из программы Dota в привязках не принимает: Insert консоль не открывал, а Enter и ↑ выбирали
+/// выделенного в сетке героя.)
 /// Режим мыши (клавиша консоли не назначена): клик по герою в сетке и быстрые клики по «Выбрать»; 1920×1080, «Атрибуты».
 /// Пока кнопка выбора красная (запрет героя), ни Enter, ни кликов пика нет.
 /// Автобан: пока кнопка красная, клик по герою и по кнопке (в обоих режимах: консольной команды запрета для All Pick
@@ -34,11 +38,6 @@ sealed class QuickPick
     const string Selection = "DOTA_GAMERULES_STATE_HERO_SELECTION";
     const uint MOUSE_LEFTDOWN = 0x2, MOUSE_LEFTUP = 0x4;
     const int RepeatHeroStep = 100;
-    const uint KEY_EXTENDED = 0x1, KEY_UP = 0x2, KEY_UNICODE = 0x4;
-    const uint MAPVK_VSC_TO_VK_EX = 3;
-    const ushort SC_ENTER = 0x1C, SC_ARROW_UP = 0x48;
-    const int ConsoleOpenTicks = 35; // ~0,5 с: консоль выезжает, только потом поле ввода берёт текст
-    const int KeyHoldTicks = 3;      // столько тиков клавиша зажата
     const int BanRetryStep = 50, BanTries = 2;
     static readonly TimeSpan BanWait = TimeSpan.FromSeconds(5); // нет красной кнопки с начала выбора — запретов нет
     static readonly System.Drawing.Point PickButton = new(1479, 828);
@@ -60,7 +59,6 @@ sealed class QuickPick
 
     [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
@@ -79,11 +77,9 @@ sealed class QuickPick
     int _heroId;
     int _step;
     bool _down;
-    readonly Queue<INPUT[]?> _keys = new(); // клавиши по тикам; null — тик ожидания
-    (ushort Scan, bool Extended)? _consoleKey; // null — режим мыши
+    int? _netconPort; // null — режим мыши
     string _command = "";
-    bool _consoleOpen;
-    bool _entered;
+    bool _entered; // команда уже ушла в консоль
     string _gameState = "";
     bool _sawSelection;
     bool _touched, _banTouched; // уже кликнули по герою / нажали Enter: дальше серая клетка может быть нашей
@@ -242,7 +238,7 @@ sealed class QuickPick
         var parts = new List<string>();
         if (_banEnabled && BanHero > 0 && (_banOn || Ban(BanHero, quiet: true))) parts.Add("бан " + Name(BanHero));
         if (_pickEnabled && PickHero > 0 && (_pickOn || Pick(PickHero, quiet: true)))
-            parts.Add("пик " + Name(PickHero) + (_consoleKey != null ? " (консоль)" : " (клики)"));
+            parts.Add("пик " + Name(PickHero) + (_netconPort != null ? " (консоль)" : " (клики)"));
         if (parts.Count == 0) return; // причину уже показал Pick/Ban
         var waiting = _gameState == Selection ? "выбираю" : "жду выбора героя";
         Log.Write("Быстрый пик: работает — " + string.Join(", ", parts));
@@ -254,12 +250,6 @@ sealed class QuickPick
     {
         if (_window is { IsVisible: true }) { _window.Hide(); ReturnToDota(); return; }
         _dotaWindow = DotaWindowOrZero();
-        if (_consoleOpen && DotaForeground()) // закрыть консоль, пока Dota ещё в фокусе: пик откроет её сам
-        {
-            Tap(_consoleKey!.Value.Scan, _consoleKey.Value.Extended);
-            _consoleOpen = _entered = false;
-            _step = 0;
-        }
         _window ??= new QuickPickWindow(_data, this);
         _window.Open();
     }
@@ -278,9 +268,11 @@ sealed class QuickPick
     bool Pick(int heroId, bool quiet)
     {
         if (_down) Mouse(MOUSE_LEFTUP);
-        _consoleKey = UseConsole ? ConsoleKey() : null;
+        CloseNetcon();
+        _netconPort = UseConsole ? NetconPort() : null;
+        _netFails = 0;
         var internalName = _data.HeroInternalNames().GetValueOrDefault(heroId);
-        var problem = _consoleKey != null
+        var problem = _netconPort != null
             ? internalName == null ? "нет списка героев Valve" : null
             : !Setup.ScreenSupported ? "нужен экран 1920×1080" : _cellOf(heroId) == null ? "героя нет в сетке пика" : null;
         if (problem != null)
@@ -293,12 +285,12 @@ sealed class QuickPick
         _heroId = heroId;
         _step = 0;
         _command = "dota_select_hero " + internalName;
-        _consoleOpen = _entered = _touched = false;
+        _entered = _touched = false;
         _sawSelection = _gameState == Selection;
         _pickOn = true;
         _timer.Start();
         StateChanged?.Invoke();
-        var mode = _consoleKey != null ? "консоль" : "клики";
+        var mode = _netconPort != null ? "консоль" : "клики";
         Log.Write($"Быстрый пик: автопик запущен ({mode}), герой {heroId}, состояние {_gameState}");
         if (!quiet)
             Notify?.Invoke($"Автопик {Name(heroId)} включён", $"режим: {mode} · " + (_sawSelection ? "выбираю" : "жду выбора героя") + " · F7 — выключить", true);
@@ -314,8 +306,7 @@ sealed class QuickPick
         if (!_pickOn) return;
         _pickOn = false;
         Restart();
-        if (_consoleOpen && DotaForeground()) Tap(_consoleKey!.Value.Scan, _consoleKey.Value.Extended); // закрыть консоль
-        _consoleOpen = false;
+        CloseNetcon();
         Finish(title, line, notify);
     }
 
@@ -408,14 +399,9 @@ sealed class QuickPick
     void Tick()
     {
         if (_gameState != Selection || !DotaForeground()) { Restart(); return; } // вне пика и в чужом окне не жмём
-        if (_keys.Count > 0) // клавиша нажата — держим, потом отпускаем; остальное ждёт
-        {
-            if (_keys.Dequeue() is { } input) Send(input);
-            return;
-        }
         if (_banOn) { BanTick(); return; } // пик — после бана
         if (!_pickOn) return;
-        if (_consoleKey != null) ConsoleTick();
+        if (_netconPort != null) NetconTick();
         else MouseTick();
     }
 
@@ -445,34 +431,26 @@ sealed class QuickPick
         _banStep = _banStep >= BanRetryStep ? 0 : _banStep + 1;
     }
 
-    // Команда набирается один раз (в запретах — заранее, без Enter), дальше только ↑ и Enter: если консоль вдруг
-    // не открылась, в чат уйдёт не больше одной строки.
-    void ConsoleTick()
+    // Консоль Dota по сети (-netconport): команда уходит по TCP, без клавиш. Нажатия клавиш из программы Dota в привязках
+    // не принимает (Insert консоль не открыл), а Enter и ↑ доходят до экрана пика и выбирают выделенного героя.
+    void NetconTick()
     {
-        if (!_consoleOpen)
+        if (_netStream == null)
         {
-            Press(_consoleKey!.Value.Scan, _consoleKey.Value.Extended);
-            _consoleOpen = true;
+            if (_step++ % 50 != 0) return; // переподключение раз в ~0,7 с
+            if (OpenNetcon()) { _step = 0; return; }
+            if (++_netFails < 3) return;
+            Log.Write($"Быстрый пик: консоль Dota на порту {_netconPort} не отвечает — кликами");
+            Notify?.Invoke("Консоль Dota не отвечает", $"нужен параметр запуска -netconport {_netconPort} · пока кликами", false);
+            _netconPort = null;
             _step = 0;
-            Log.Write("Быстрый пик: открываю консоль");
+            return;
         }
-        else if (_step < ConsoleOpenTicks) _step++;
-        else if (_step == ConsoleOpenTicks)
-        {
-            Type(_command);
-            _step++;
-            Log.Write("Быстрый пик: набрал " + _command);
-        }
-        else if (SkipPick()) return;
-        else if (!_entered)
-        {
-            if (BanButton()) return;
-            Press(SC_ENTER, false);
-            _entered = true;
-            Log.Write("Быстрый пик: Enter");
-        }
-        else if (_step++ % 2 == 0) Press(SC_ARROW_UP, true);
-        else Press(SC_ENTER, false);
+        if (SkipPick() || BanButton()) return; // в запретах команду не шлём
+        if (_step++ % 10 != 0) return; // ~6 раз в секунду, пока герой не взят
+        if (!_entered) Log.Write("Быстрый пик: в консоль → " + _command);
+        _entered = true;
+        SendNetcon(_command);
     }
 
     void MouseTick()
@@ -494,13 +472,12 @@ sealed class QuickPick
         if (_step >= RepeatHeroStep && !_down) _step = 0;
     }
 
-    /// <summary>Начать круг мыши заново; кнопку не оставляем зажатой. Открытая консоль остаётся открытой.</summary>
+    /// <summary>Начать круг мыши заново; кнопку не оставляем зажатой.</summary>
     void Restart()
     {
         if (_down) Mouse(MOUSE_LEFTUP);
-        ReleaseKeys();
         _banStep = 0;
-        if (_consoleKey == null) _step = 0;
+        if (_netconPort == null) _step = 0;
     }
 
     /// <summary>Кнопка красная — это запрет героя, а не выбор: по ней кликать нельзя.</summary>
@@ -528,83 +505,63 @@ sealed class QuickPick
             Log.Write("Быстрый пик: SendInput не принят, ошибка " + Marshal.GetLastWin32Error());
     }
 
-    // Dota не видит клавишу, нажатую и отпущенную одним пакетом (консоль так и не открывалась): держим ~3 тика.
-    void Press(ushort scan, bool extended)
+    TcpClient? _netcon;
+    NetworkStream? _netStream;
+    int _netFails;
+
+    bool OpenNetcon()
     {
-        var flags = extended ? KEY_EXTENDED : 0;
-        _keys.Enqueue(new[] { Key(scan, flags) });
-        for (int i = 0; i < KeyHoldTicks; i++) _keys.Enqueue(null);
-        _keys.Enqueue(new[] { Key(scan, flags | KEY_UP) });
-        _keys.Enqueue(null); // пауза перед следующей клавишей
+        CloseNetcon();
+        try
+        {
+            var client = new TcpClient();
+            if (!client.ConnectAsync("127.0.0.1", _netconPort!.Value).Wait(300)) { client.Dispose(); return false; }
+            _netcon = client;
+            _netStream = client.GetStream();
+            Log.Write($"Быстрый пик: консоль Dota подключена, порт {_netconPort}");
+            return true;
+        }
+        catch (Exception ex) when (ex is SocketException or AggregateException or IOException or InvalidOperationException)
+        {
+            return false;
+        }
     }
 
-    /// <summary>Сразу, вне тиков (закрыть консоль): нажать, подержать 40 мс, отпустить.</summary>
-    void Tap(ushort scan, bool extended)
+    void SendNetcon(string command)
     {
-        ReleaseKeys();
-        var flags = extended ? KEY_EXTENDED : 0;
-        Send(Key(scan, flags));
-        System.Threading.Thread.Sleep(40);
-        Send(Key(scan, flags | KEY_UP));
+        try { _netStream!.Write(Encoding.UTF8.GetBytes(command + "\n")); }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+        {
+            Log.Write("Быстрый пик: консоль Dota отключилась: " + ex.Message);
+            CloseNetcon();
+        }
     }
 
-    /// <summary>Очередь клавиш бросить, но зажатую не оставлять.</summary>
-    void ReleaseKeys()
+    void CloseNetcon()
     {
-        var ups = _keys.Where(k => k != null && (k[0].Ki.Flags & KEY_UP) != 0).ToList();
-        _keys.Clear();
-        // отпускание без нажатия безвредно; нажатие без отпускания — залипшая клавиша
-        foreach (var up in ups) Send(up!);
+        _netStream?.Dispose();
+        _netcon?.Dispose();
+        _netStream = null;
+        _netcon = null;
     }
 
-    void Type(string text) =>
-        Send(text.SelectMany(c => new[] { Key(c, KEY_UNICODE), Key(c, KEY_UNICODE | KEY_UP) }).ToArray());
-
-    // Клавиша — как с настоящей клавиатуры: и код клавиши Windows, и скан-код. Только скан-код (KEYEVENTF_SCANCODE)
-    // Dota в привязках не узнала: Insert консоль не открыл, а набранная команда ушла в поиск героев.
-    static INPUT Key(ushort scan, uint flags)
-    {
-        ushort vk = (flags & KEY_UNICODE) != 0 ? (ushort)0
-            : (ushort)MapVirtualKey((flags & KEY_EXTENDED) != 0 ? 0xE000u | scan : scan, MAPVK_VSC_TO_VK_EX);
-        return new() { Type = 1, Ki = new KEYBDINPUT { Vk = vk, Scan = scan, Flags = flags } };
-    }
-
-    static void Send(params INPUT[] inputs)
-    {
-        if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>()) != inputs.Length)
-            Log.Write("Быстрый пик: SendInput принял не всё, ошибка " + Marshal.GetLastWin32Error());
-    }
-
-    // клавиши, которые не печатают символов, и «~»: имя в dotakeys_personal.lst → скан-код
-    static readonly Dictionary<string, (ushort, bool)> ConsoleScans = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["INS"] = (0x52, true), ["DEL"] = (0x53, true), ["HOME"] = (0x47, true), ["END"] = (0x4F, true),
-        ["PGUP"] = (0x49, true), ["PGDN"] = (0x51, true), ["`"] = (0x29, false), ["BACKQUOTE"] = (0x29, false),
-        ["F1"] = (0x3B, false), ["F2"] = (0x3C, false), ["F3"] = (0x3D, false), ["F4"] = (0x3E, false), ["F5"] = (0x3F, false),
-        ["F6"] = (0x40, false), ["F9"] = (0x43, false), ["F10"] = (0x44, false),
-        ["F11"] = (0x57, false), ["F12"] = (0x58, false),
-    };
-
-    /// <summary>Клавиша консоли из настроек Dota (самый свежий dotakeys_personal.lst); null — не назначена или незнакомая.</summary>
-    static (ushort, bool)? ConsoleKey()
+    /// <summary>Порт сетевой консоли из параметров запуска Dota (-netconport N); не нашёл — 2121, как советуем.</summary>
+    static int NetconPort()
     {
         try
         {
-            if (Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", null) is not string steam) return null;
-            var file = new DirectoryInfo(Path.Combine(steam.Replace('/', '\\'), "userdata")).GetDirectories()
-                .Select(d => new FileInfo(Path.Combine(d.FullName, "570", "remote", "cfg", "dotakeys_personal.lst")))
-                .Where(f => f.Exists).OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
-            if (file == null) return null;
-            var name = Regex.Match(File.ReadAllText(file.FullName),
-                "\"Console\"\\s*\\{[^{}]*?\"Key\"\\s+\"([^\"]+)\"").Groups[1].Value;
-            if (ConsoleScans.TryGetValue(name, out var key)) return key;
-            Log.Write($"Быстрый пик: клавиша консоли «{name}» не назначена или не поддерживается — режим мыши");
+            if (Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", null) is string steam)
+                foreach (var f in new DirectoryInfo(Path.Combine(steam.Replace('/', '\\'), "userdata")).GetDirectories()
+                    .Select(d => new FileInfo(Path.Combine(d.FullName, "config", "localconfig.vdf"))).Where(f => f.Exists)
+                    .OrderByDescending(f => f.LastWriteTimeUtc))
+                    if (Regex.Match(File.ReadAllText(f.FullName), @"""LaunchOptions""\s+""[^""]*-netconport\s+(\d+)") is { Success: true } m)
+                        return int.Parse(m.Groups[1].Value);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            Log.Write("Быстрый пик: настройки клавиш не прочитаны: " + ex.Message);
+            Log.Write("Быстрый пик: параметры запуска не прочитаны: " + ex.Message);
         }
-        return null;
+        return 2121;
     }
 
     bool DotaForeground()
@@ -686,7 +643,8 @@ sealed class QuickPickWindow : Window
         mode.Children.Add(new TextBlock { Text = "Консоль", FontSize = 13, Foreground = Fg, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) });
         var modeNote = new TextBlock
         {
-            Text = "Бан — всегда кликами: команды запрета в Dota нет.", FontSize = 11, Foreground = Dim,
+            Text = "Консоль: параметр запуска Dota -netconport 2121.\nБан — всегда кликами: команды запрета нет.",
+            FontSize = 11, Foreground = Dim, TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap,
             HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 8),
         };
 
